@@ -115,6 +115,24 @@ answered input request is retried under a **new** JSON-RPC id.
 A tool call whose server asks for input raises an elicitation request in the UI (the same dialog
 serves legacy server-initiated `elicitation/create` requests).
 
+## Web UI
+
+`web/` is plain HTML/CSS/ES modules — no build step, no framework, served straight from disk
+(`-web`, default `./web`). Events arrive over a websocket, falling back to SSE and then to a
+1.5 s poll; every action is a REST call, so a button never waits on the event transport.
+
+Two behaviours are worth knowing, because both were bugs once:
+
+- **Following is opt-out.** The transcript scrolls with the output only while you are at the
+  bottom; scrolling up (or wheeling up) unpins immediately and a floating `↓ latest` counts what
+  you missed — Escape or the button jumps back. A wall of tokens must never steal the viewport
+  from the composer, because that is where stop and interrupt live. `#log` is the only scrolling
+  container (`min-height: 0` on the flex items is what keeps the document itself from scrolling).
+- **Order comes from entry ids.** Entries are stored in a map and served by `GET
+  /api/session/{id}`; the handler sorts them by their numeric id and the UI sorts again, so a
+  reload renders the same sequence that was produced. `status.tip` marks the current path —
+  entries that are not on it are shown dimmed, because they are not sent.
+
 ## HTTP API
 
 | method | path | what it does |
@@ -122,7 +140,7 @@ serves legacy server-initiated `elicitation/create` requests).
 | GET | `/api/health` | liveness |
 | GET | `/api/sessions` | every session with its status |
 | POST | `/api/sessions` | create a session (body: a config; `{}` is enough) |
-| GET | `/api/session/{id}` | config (without the API key), status, entries on the current path, pending ids |
+| GET | `/api/session/{id}` | config (without the API key), status, every entry sorted by id, pending ids |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active |
 | DELETE | `/api/session/{id}` | close and delete the session |
 | POST | `/api/session/{id}/send` | `{text, images[], files[], label}` — send now or queue |
