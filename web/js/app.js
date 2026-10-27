@@ -185,6 +185,9 @@ const PIN_PX = 48;
 let pinned = true;
 let unseen = 0;
 let lastScrollWrite = 0;
+// A reload restores the old scroll offset of #log, which looks exactly like the user scrolling
+// away from the bottom. On a fresh page the newest message is the right place, so opt out.
+if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
 
 const distanceFromBottom = (box) => box.scrollHeight - box.scrollTop - box.clientHeight;
 
@@ -255,10 +258,33 @@ function wireScroll() {
   );
   $('#jump').onclick = () => scrollDown(true);
   window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || pinned) return;
+    if (e.key !== 'Escape') return;
     if (document.querySelector('dialog[open]')) return; // the dialog closes itself
+    closeNav(); // on a phone Escape first puts the drawer away
+    if (pinned) return;
     scrollDown(true);
   });
+}
+
+// ---------------------------------------------------------------------- session drawer (phones)
+//
+// Below the CSS breakpoint the sidebar is off-canvas and ☰ slides it in over the transcript; on a
+// desktop viewport the button and the scrim are display:none, so none of this is reachable.
+let navOpen = false;
+
+function setNav(open) {
+  navOpen = open;
+  document.body.classList.toggle('nav-open', open);
+  $('#scrim').classList.toggle('hidden', !open);
+}
+
+const closeNav = () => {
+  if (navOpen) setNav(false);
+};
+
+function wireNav() {
+  $('#menu').onclick = () => setNav(!navOpen);
+  $('#scrim').onclick = () => setNav(false);
 }
 
 const whoName = (e) => (e.kind === 'compaction' ? 'compaction' : e.role || e.kind);
@@ -799,6 +825,9 @@ function pathOf(entries, tip) {
 async function refresh() {
   if (!state.id) return;
   const data = await get('');
+  // Rebuilding from an empty transcript means "fresh load or session switch": that always lands on
+  // the newest message, even if the viewport was left reading something older.
+  const wasEmpty = !log().children.length;
   log().textContent = '';
   state.entries.clear();
   state.tools.clear();
@@ -816,7 +845,7 @@ async function refresh() {
   renderStatus(data.status);
   state.pending = data.pending || [];
   renderPending();
-  scrollDown();
+  scrollDown(wasEmpty);
 }
 
 async function loadSessions() {
@@ -850,6 +879,7 @@ async function loadSessions() {
 
 async function selectSession(id) {
   state.id = id;
+  closeNav(); // on a phone the drawer covered the transcript only to pick this
   log().textContent = '';
   resetScroll();
   state.entries.clear();
@@ -1041,6 +1071,20 @@ async function showInspect() {
   if (data.tools?.length) head.appendChild(el('div', '', `tools: ${data.tools.join(', ')}`));
   body.appendChild(head);
 
+  // The system prompt is part of the payload, so it belongs in this view. Without it there is no
+  // way to see what steers the model — including which language and script it should answer in.
+  // Older servers report only systemBytes, so the block is skipped rather than lying about "(none)".
+  if (typeof data.system === 'string') {
+    body.appendChild(el('div', 'lbl', 'system prompt (first message, sent verbatim)'));
+    body.appendChild(
+      el(
+        'pre',
+        '',
+        data.system || 'none: no system message is sent, the model falls back to its own defaults (its trained language and script included)',
+      ),
+    );
+  }
+
   const table = el('table');
   const tr = el('tr');
   for (const h of ['id', 'role', 'tokens', 'head']) tr.appendChild(el('th', '', h));
@@ -1053,6 +1097,39 @@ async function showInspect() {
     table.appendChild(row);
   }
   body.appendChild(table);
+
+  // "As sent" is the whole request body: system head, messages, tool definitions.
+  const actions = el('div', 'row');
+  const raw = el('pre', 'payload hidden', '');
+  const toggle = el('button', '', 'payload as sent');
+  toggle.onclick = async () => {
+    if (!raw.classList.contains('hidden')) {
+      raw.classList.add('hidden');
+      toggle.textContent = 'payload as sent';
+      return;
+    }
+    toggle.textContent = 'reading…';
+    const p = await get('/payload').catch((err) => {
+      note(err.message, 'error');
+      return null;
+    });
+    if (!p) {
+      toggle.textContent = 'payload as sent';
+      return;
+    }
+    if (!Array.isArray(p.messages)) {
+      // An older server answers this path with the SPA shell, so check the shape before printing it.
+      note('this server does not serve /payload yet — rebuild bareloopd', 'error');
+      toggle.textContent = 'payload as sent';
+      return;
+    }
+    raw.textContent = JSON.stringify(p, null, 2);
+    raw.classList.remove('hidden');
+    toggle.textContent = 'hide payload';
+  };
+  actions.append(toggle, el('span', 'dim', `or GET /api/session/${state.id}/payload`));
+  body.appendChild(actions);
+  body.appendChild(raw);
   const note2 = el('div', '', 'dimmed rows are summarised away; italic tokens are byte/4 estimates');
   note2.style.marginTop = '6px';
   body.appendChild(note2);
@@ -1062,6 +1139,7 @@ async function showInspect() {
 
 function wire() {
   wireScroll();
+  wireNav();
   $('#btn-send').onclick = send;
   $('#btn-interrupt').onclick = interruptSend;
   $('#btn-stop').onclick = stop;

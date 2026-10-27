@@ -2,8 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>bareloop</title>
+    <!-- inline favicon: one line, and the console stops logging a 404 for every page load -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13' fill='%235aa2ff'>↺</text></svg>" />
     <link rel="stylesheet" href="app.css" />
   </head>
   <body>
@@ -22,6 +24,7 @@
 
       <main id="main">
         <header id="topbar">
+          <button id="menu" type="button" class="ghost" title="sessions" aria-label="open the session list">☰</button>
           <input id="session-name" class="ghost-input" spellcheck="false" title="rename this session" />
           <span id="tools" class="badge" title="MCP tools"></span>
           <span class="spacer"></span>
@@ -73,6 +76,9 @@
         <div id="panel-body"></div>
       </aside>
     </div>
+
+    <!-- drawer scrim: only shown on narrow viewports, see the @media block in app.css -->
+    <div id="scrim" class="hidden"></div>
 
     <dialog id="dlg-new">
       <form id="new-form">
