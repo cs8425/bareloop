@@ -40,12 +40,16 @@ type stdio struct {
 	in       chan *msg
 	ids      idSource
 	closed   bool
+	exitErr  error // why the child died (guarded by cmu)
 	cmu      sync.Mutex
 	logf     func(string, ...any)
-	readerDone chan struct{}
+	readerDone chan struct{} // stdout reader finished
+	stderrDone chan struct{} // stderr reader finished
+	reaped     chan struct{} // cmd.Wait() has returned
 }
 
-// newStdio starts the subprocess and begins reading.
+// newStdio starts the subprocess and begins reading. ctx only bounds this call: the child
+// outlives it (closing happens in close()).
 func newStdio(ctx context.Context, cfg StdioConfig) (*stdio, error) {
 	if strings.TrimSpace(cfg.Command) == "" {
 		return nil, errors.New("mcp: stdio server needs a command")
@@ -60,11 +64,18 @@ func newStdio(ctx context.Context, cfg StdioConfig) (*stdio, error) {
 		cfg:        cfg,
 		in:         make(chan *msg, 16),
 		readerDone: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+		reaped:     make(chan struct{}),
 		logf:       cfg.Logf,
 	}
 	t.d = newDemux(t.in, func(m *msg) { /* notifications before a call: drop */ })
 
-	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
+	// The subprocess must NOT inherit the lifetime of whatever context happened to be current
+	// when the session was opened. Callers pass a handshake-scoped context (and cancel it when
+	// connect returns), so tying the process to it kills a perfectly healthy server right after
+	// tools/list — which is how a long-lived MCP server became a zombie and every later call
+	// failed with a broken pipe. The transport owns the process: it lives until close().
+	cmd := exec.Command(cfg.Command, cfg.Args...)
 	if cfg.Dir != "" {
 		cmd.Dir = cfg.Dir
 	}
@@ -91,6 +102,7 @@ func newStdio(ctx context.Context, cfg StdioConfig) (*stdio, error) {
 	t.stderrR = bufio.NewReaderSize(stderr, 1<<16)
 	go t.readLoop()
 	go t.stderrLoop()
+	go t.reap()
 	return t, nil
 }
 
@@ -157,6 +169,7 @@ func (t *stdio) readLine() (string, error) {
 }
 
 func (t *stdio) stderrLoop() {
+	defer close(t.stderrDone)
 	buf := make([]byte, 8<<10)
 	for {
 		n, err := t.stderrR.Read(buf)
@@ -174,11 +187,52 @@ func (t *stdio) stderrLoop() {
 	}
 }
 
+// reap waits for both readers to finish (os/exec forbids Wait before the pipes have been
+// drained) and then reaps the child. Without this a server that exits on its own — crashed,
+// killed, or told to leave by a cancelled context — stays a zombie forever.
+func (t *stdio) reap() {
+	defer close(t.reaped)
+	<-t.readerDone
+	<-t.stderrDone
+	err := t.cmd.Wait()
+	if err != nil {
+		t.cmu.Lock()
+		t.exitErr = err
+		t.cmu.Unlock()
+		if !t.isClosed() {
+			t.logf("stdio server %s exited: %v", t.cmd.Path, err)
+		}
+	}
+	t.d.closeAll(goneErr(err))
+}
+
+// goneErr names the exit for anyone still waiting on a request.
+func goneErr(err error) error {
+	if err == nil {
+		return errors.New("mcp: stdio server exited")
+	}
+	return fmt.Errorf("mcp: stdio server exited: %w", err)
+}
+
+// gone returns why the child is dead, or "" while it is still running.
+func (t *stdio) gone() string {
+	t.cmu.Lock()
+	defer t.cmu.Unlock()
+	if t.exitErr == nil {
+		return ""
+	}
+	return t.exitErr.Error()
+}
+
 func (t *stdio) write(b []byte) error {
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 	if t.isClosed() {
 		return errors.New("mcp: stdio transport closed")
+	}
+	if reason := t.gone(); reason != "" {
+		// Much more useful than "write |1: broken pipe": say which process died and how.
+		return fmt.Errorf("mcp: stdio server %s is gone (%s)", t.cfg.Command, reason)
 	}
 	if t.cfg.PrefixFraming {
 		b = append(append([]byte("M "), b...), '\n')
@@ -282,16 +336,15 @@ func (t *stdio) close() error {
 	t.cmu.Unlock()
 
 	_ = t.stdin.Close()
-	done := make(chan struct{})
-	go func() {
-		_ = t.cmd.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-t.reaped:
 	case <-time.After(2 * time.Second):
-		_ = t.cmd.Process.Kill()
-		<-done
+		// It ignored stdin closing: kill it, and let the reaper collect it (never Wait here,
+		// which would race the reaper over the pipes).
+		if t.cmd.Process != nil {
+			_ = t.cmd.Process.Kill()
+		}
+		<-t.reaped
 	}
 	t.d.closeAll(errors.New("mcp: transport closed"))
 	return nil
