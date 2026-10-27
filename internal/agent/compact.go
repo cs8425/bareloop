@@ -59,7 +59,7 @@ func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force b
 		res.Skipped = string(compact.ReasonAutoOff)
 		return res
 	}
-	if trig == compact.TriggerInLoop && !cfg.Compact.InLoop {
+	if trig == compact.TriggerInLoop && !cfg.Compact.UseInLoop() {
 		res.Noop = true
 		res.Skipped = string(compact.ReasonInLoopOff)
 		return res

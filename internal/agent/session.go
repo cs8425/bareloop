@@ -309,7 +309,7 @@ func (s *Session) Status() *Status {
 		Summary:      cmp != nil,
 		Turn:         turn,
 		AutoCompact:  cfg.Compact.Auto,
-		InLoop:       cfg.Compact.InLoop,
+		InLoop:       cfg.Compact.UseInLoop(),
 		Tools:        len(s.reg.Tools()),
 		Servers:      s.reg.statusSnapshot(),
 		UpdatedAt:    time.Now().UTC(),

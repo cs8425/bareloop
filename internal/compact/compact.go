@@ -38,9 +38,11 @@ const DefaultMarker = "[Conversation summary — earlier messages were compacted
 
 // Params are the user-facing compaction parameters (§7).
 type Params struct {
-	// Auto is the master switch (T1). InLoop enables T2 (between agentic turns).
-	Auto   bool `json:"auto"`
-	InLoop bool `json:"inLoop"`
+	// Auto is the master switch (T1) and defaults to off (spec §1.1). InLoop enables T2
+	// (between agentic turns) and defaults to ON: a nil pointer means the key was omitted,
+	// and only an explicit false turns it off.
+	Auto   bool  `json:"auto"`
+	InLoop *bool `json:"inLoop,omitempty"`
 	// Mode is the policy for future cut decisions; compaction entries are mode-agnostic (§2.6).
 	Mode string `json:"mode"`
 	// SummaryMode selects the summary request shape (§3.1).
@@ -69,11 +71,11 @@ type Params struct {
 	SplitInstruction string `json:"splitInstruction"`
 }
 
-// DefaultParams returns the documented defaults (§7). Auto and InLoop default to off.
+// DefaultParams returns the documented defaults (§7): auto compaction off, in-loop compaction
+// on (InLoop stays nil, which means "on unless explicitly disabled").
 func DefaultParams() Params {
 	return Params{
 		Auto:               false,
-		InLoop:             false,
 		Mode:               "threshold-target",
 		SummaryMode:        ModePrefixStable,
 		ThresholdPct:       70,
@@ -87,6 +89,9 @@ func DefaultParams() Params {
 		Marker:             DefaultMarker,
 	}
 }
+
+// UseInLoop is the effective value of InLoop: on unless explicitly disabled (T2, §1.1).
+func (p Params) UseInLoop() bool { return p.InLoop == nil || *p.InLoop }
 
 // Normalise fills in blanks and clamps nonsense.
 func (p Params) Normalise() Params {
@@ -182,7 +187,8 @@ const (
 	// TriggerEndOfTurn is T1: after a turn ends normally. The only automatic trigger by
 	// default, because between turns the assistant message never has dangling tool calls.
 	TriggerEndOfTurn Trigger = "end_of_turn"
-	// TriggerInLoop is T2: before sending, inside the loop. Off by default (§1.1).
+	// TriggerInLoop is T2: before sending, inside the loop. On by default (compact.inLoop=false
+	// turns it off).
 	TriggerInLoop Trigger = "in_loop"
 	// TriggerManual is T3: the user pressed the button. It bypasses the trigger condition
 	// and the protective floor, never the safety floors (§1.1, §2.3).

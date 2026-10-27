@@ -63,13 +63,18 @@ type Message struct {
 }
 
 // Options controls the assembler. It is derived from session config and is identical for
-// every consumer (main send, summary call, inspector, rebuild).
+// every consumer (main send, summary call, inspector, rebuild). A nil pointer means
+// "not set in config.json", i.e. the documented default.
 type Options struct {
-	// SendReasoning re-sends the model's reasoning channel on the next turn.
-	SendReasoning bool
+	// SendReasoning re-sends the model's reasoning channel on the next turn. Default on, so
+	// a reasoning-capable model keeps seeing its own thinking.
+	SendReasoning *bool `json:"sendReasoning,omitempty"`
 	// OmitToolResultName skips the `name` field on tool results.
-	OmitToolResultName bool
+	OmitToolResultName bool `json:"omitToolResultName,omitempty"`
 }
+
+// SendReasoningOn is the effective value of SendReasoning: on unless explicitly disabled.
+func (o Options) SendReasoningOn() bool { return o.SendReasoning == nil || *o.SendReasoning }
 
 // Built is the assembled payload plus the entries it came from.
 type Built struct {
@@ -147,7 +152,7 @@ func messageFor(e *ir.Entry, opts Options) Message {
 				Function: FunctionCall{Name: tc.Name, Arguments: args},
 			})
 		}
-		if opts.SendReasoning && e.Reasoning != "" {
+		if opts.SendReasoningOn() && e.Reasoning != "" {
 			m.ReasoningContent = e.Reasoning
 		}
 	default: // user

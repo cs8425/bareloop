@@ -857,8 +857,8 @@ async function openSettings() {
   fld(f, 'summaryMax').value = cfg.compact?.summaryMax ?? 70;
   fld(f, 'maxAttempts').value = cfg.compact?.maxAttempts ?? 3;
   fld(f, 'maxTurns').value = cfg.maxTurns || '';
-  fld(f, 'auto').checked = cfg.compact?.auto !== false;
-  fld(f, 'inLoop').checked = !!cfg.compact?.inLoop;
+  fld(f, 'auto').checked = cfg.compact?.auto === true; // T1: off unless set
+  fld(f, 'inLoop').checked = cfg.compact?.inLoop !== false; // T2: on unless set false
   fld(f, 'systemPrompt').value = cfg.systemPrompt || '';
   fld(f, 'mcp').value = JSON.stringify(cfg.mcp || [], null, 2);
   $('#dlg-settings').showModal();

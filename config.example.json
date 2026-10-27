@@ -24,14 +24,14 @@
     "reasoningEffort": "",
 
     "asm": {
-      "sendReasoning": false,
+      "sendReasoning": true,
       "omitToolResultName": false
     },
 
     "compact": {
       "auto": true,
-      "inLoop": false,
-      "mode": "threshold",
+      "inLoop": true,
+      "mode": "threshold-target",
       "summaryMode": "prefix-stable",
       "threshold": 70,
       "keepTarget": 50,

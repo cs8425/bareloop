@@ -150,8 +150,8 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			return false, err
 		}
 
-		// In-loop trigger (spec §1.1 T2), off by default.
-		if cfg.Compact.InLoop {
+		// In-loop trigger (spec §1.1 T2), on unless compact.inLoop is false.
+		if cfg.Compact.UseInLoop() {
 			if res := s.compactHere(ctx, compact.TriggerInLoop, false); res.Committed {
 				s.emit(Event{Type: EvtCompact, Data: res})
 				built, sizes, tools = s.build()

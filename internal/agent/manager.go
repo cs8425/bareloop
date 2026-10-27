@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"bareloop/internal/asm"
 	"bareloop/internal/compact"
 )
 
@@ -88,6 +89,17 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 	}
 	if len(cfg.Extra) == 0 {
 		cfg.Extra = m.defaults.Extra
+	}
+	// These three only apply when creating a session (a session config that exists on disk is
+	// authoritative and is never re-merged), so "unset means take the default" is safe here.
+	if cfg.ReasoningEffort == "" {
+		cfg.ReasoningEffort = m.defaults.ReasoningEffort
+	}
+	if cfg.ASM == (asm.Options{}) {
+		cfg.ASM = m.defaults.ASM
+	}
+	if !cfg.NotifyTools {
+		cfg.NotifyTools = m.defaults.NotifyTools
 	}
 	// Compaction parameters: a session that did not specify any gets the manager defaults;
 	// a session that did specify some keeps its own, with Normalise() filling the rest.

@@ -75,10 +75,28 @@ session stores its own copy in `data/<id>/config.json`.
 | `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `cacheIncludedInPrompt`, `headers` |
 | `defaults.systemPrompt` | the system prompt |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
-| `defaults.compact` | compaction parameters (see below) |
-| `defaults.asm` | payload options: `sendReasoning`, `omitToolResultName` |
-| `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults; `maxTurns` 0 means unlimited |
+| `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
+| `defaults.asm` | payload options: `sendReasoning` (**on** by default), `omitToolResultName` (off) |
+| `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
 | `sessions[]` | optional sessions to create at startup |
+
+### Leaving a value out
+
+Nothing is put into the request body unless it is set, so an unset field means the LLM server
+keeps its own default:
+
+| field | means "do not send / use the default" | sent when |
+|---|---|---|
+| `temperature` | `null`, or the key is absent | any number — **`0` is a real value** (greedy decoding) |
+| `maxTokens` | `0` or absent | `> 0` (`max_tokens`) |
+| `reasoningEffort` | `""` or absent | non-empty (`minimal`/`low`/`medium`/`high`) |
+| `maxTurns` | `0` or absent = **no cap**: a run ends when the model stops asking for tools | `> 0` = hard cap per agentic run |
+| `compact.auto` | absent = off (T1 after a turn) | `true` |
+| `compact.inLoop` | absent = **on** (T2 between turns) | `false` turns it off |
+| `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
+
+`defaults` is merged when a session is **created**; afterwards `data/<id>/config.json` is the
+truth for that session and is re-read on restart.
 
 The context window (`llm.nCtx`) is probed from `/props`, `/model` and `/models` when it is not
 configured (llama.cpp, vLLM, Ollama and LM Studio all publish it under one of
