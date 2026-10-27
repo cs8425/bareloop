@@ -161,6 +161,41 @@ dialog .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 dialog .grid .check { grid-column: span 3; flex-direction: row; align-items: center; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
 dialog .hint { color: var(--muted); font-size: 11.5px; margin: 0; }
+dialog p { margin: 0 0 4px; }
+/* confirm/prompt dialogs are small: they should not inherit the settings dialog's width. */
+dialog.modal { max-width: 420px; }
+
+/* Toasts: an action that failed while the transcript was scrolled away is otherwise invisible.
+   Top-right, so a toast never covers the composer or the keyboard on a phone, and never eats a click
+   meant for the send button. */
+#toasts {
+  position: fixed;
+  top: calc(84px + env(safe-area-inset-top, 0px));
+  right: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  z-index: 40;
+  pointer-events: none;
+  max-width: min(420px, calc(100vw - 28px));
+}
+.toast {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 8px;
+  padding: 7px 11px;
+  font-size: 12.5px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  animation: toast-in 0.16s ease-out;
+}
+.toast.err { border-left-color: #e5534b; }
+.toast.out { opacity: 0; transition: opacity 0.35s ease-in; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
 
 /* ── mobile ──────────────────────────────────────────────────────────────────────────────
    dvh, not vh: on a mobile browser `100vh` is the height of the *largest* possible viewport,
