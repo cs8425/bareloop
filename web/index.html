@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bareloop</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="side">
+        <div class="side-head">
+          <b>bareloop</b>
+          <button id="new-session" type="button" title="new session">+</button>
+        </div>
+        <ul id="session-list"></ul>
+        <div class="side-foot">
+          <span id="conn" class="dot"></span>
+          <span id="conn-label">connecting…</span>
+        </div>
+      </aside>
+
+      <main id="main">
+        <header id="topbar">
+          <input id="session-name" class="ghost-input" spellcheck="false" title="rename this session" />
+          <span id="tools" class="badge" title="MCP tools"></span>
+          <span class="spacer"></span>
+          <button id="btn-inspect" type="button" title="what would be sent next">inspect</button>
+          <button id="btn-settings" type="button" title="model, MCP servers, compaction">settings</button>
+        </header>
+
+        <div id="statusbar">
+          <span id="phase" class="badge">idle</span>
+          <span id="turn"></span>
+          <span class="ctxbar"><span id="ctx-fill"></span><span id="ctx-text"></span></span>
+          <button id="btn-compact" type="button" class="warn" title="compact now">compact</button>
+        </div>
+
+        <div id="log"></div>
+        <div id="requests"></div>
+
+        <div id="pending" class="hidden">
+          <span id="pending-badge" class="badge hidden">pending</span>
+          <ul id="pending-list"></ul>
+        </div>
+
+        <div id="composer">
+          <div id="attachments"></div>
+          <div class="composer-row">
+            <textarea id="input" rows="3" spellcheck="false" placeholder="message — Enter sends, Shift+Enter adds a line, paste or drop images"></textarea>
+            <div class="composer-buttons">
+              <button id="btn-send" type="button" class="primary">send</button>
+              <button id="btn-interrupt" type="button" title="stop now, keep what was produced, send this instead">interrupt</button>
+              <button id="btn-stop" type="button" class="danger hidden" title="stop the run">stop</button>
+              <label class="file-btn" title="attach images"
+                >📎<input id="files" type="file" accept="image/*" multiple hidden
+              /></label>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <aside id="panel" class="hidden">
+        <div class="side-head">
+          <b id="panel-title">inspect</b>
+          <button id="panel-close" type="button">×</button>
+        </div>
+        <div id="panel-body"></div>
+      </aside>
+    </div>
+
+    <dialog id="dlg-new">
+      <form id="new-form">
+        <h3>new session</h3>
+        <label>
+          id
+          <input name="id" spellcheck="false" pattern="[A-Za-z0-9_.-]+" placeholder="letters, digits, . _ -" />
+        </label>
+        <label>
+          name
+          <input name="name" placeholder="optional display name" />
+        </label>
+        <p class="hint">
+          The model, MCP servers, system prompt and compaction parameters are inherited from the
+          server configuration; change them per session in settings.
+        </p>
+        <menu>
+          <button value="cancel" formmethod="dialog" type="submit" class="ghost">cancel</button>
+          <button type="submit" class="primary">create</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-settings">
+      <form id="settings-form">
+        <h3>session settings</h3>
+        <div class="grid">
+          <label>name <input name="name" /></label>
+          <label>model <input name="model" spellcheck="false" /></label>
+          <label>base URL <input name="baseUrl" spellcheck="false" placeholder="http://127.0.0.1:8901/v1" /></label>
+          <label>API key <input name="apiKey" type="password" spellcheck="false" placeholder="unchanged when empty" /></label>
+          <label>n_ctx <input name="nCtx" type="number" min="0" placeholder="0 = probe the server" /></label>
+          <label>max turns <input name="maxTurns" type="number" min="0" placeholder="0 = unlimited" /></label>
+          <label>trigger % <input name="threshold" type="number" min="1" max="100" /></label>
+          <label>keep target % <input name="keepTarget" type="number" min="1" max="99" /></label>
+          <label>summary max % <input name="summaryMax" type="number" min="1" max="99" /></label>
+          <label>summary tries <input name="maxAttempts" type="number" min="1" max="9" /></label>
+          <label class="check"><input name="auto" type="checkbox" /> automatic compaction</label>
+          <label class="check"><input name="inLoop" type="checkbox" /> allow compaction between tool calls (T2)</label>
+        </div>
+        <label>system prompt <textarea name="systemPrompt" rows="4" spellcheck="false"></textarea></label>
+        <label>
+          MCP servers (JSON array)
+          <textarea name="mcp" rows="8" spellcheck="false"></textarea>
+        </label>
+        <p class="hint">
+          An empty API key keeps the stored one. Each session keeps its own log, MCP servers,
+          system prompt, context window and compaction parameters. Saving while a run is active is
+          refused; MCP servers reconnect only when their list actually changed.
+        </p>
+        <menu>
+          <button value="cancel" formmethod="dialog" type="submit" class="ghost">cancel</button>
+          <button id="settings-save" type="submit" class="primary">save</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

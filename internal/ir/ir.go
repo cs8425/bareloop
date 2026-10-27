@@ -1,0 +1,232 @@
+// Package ir holds the conversation record model ("entries on a path").
+//
+// Design notes (see notes/compact-threshold-mode.en.md §0):
+//   - the path (root -> tip) is the single source of truth for "what gets sent"
+//   - a compaction is just another record on the path, not a field on the session
+//   - entries are never removed by compaction; they simply stop appearing in the payload
+package ir
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// Part types.
+const (
+	PartText  = "text"
+	PartImage = "image"
+)
+
+// Part is one piece of a multi-part message (text or image attachment).
+//
+// Parts always travel in a fixed order ([images..., text]) and images always use the
+// same encoding, so that "rebuild from storage" is byte-identical to "the live push"
+// (spec §5.4).
+type Part struct {
+	Type string `json:"type"`
+	// Text is used when Type == PartText.
+	Text string `json:"text,omitempty"`
+	// MimeType + Data (base64, no data-url prefix) are used when Type == PartImage.
+	MimeType string `json:"mimeType,omitempty"`
+	Data     string `json:"data,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+// ToolCall is a tool invocation requested by the model.
+type ToolCall struct {
+	ID     string          `json:"id"`
+	Name   string          `json:"name"`
+	Args   json.RawMessage `json:"arguments,omitempty"`
+	Server string          `json:"server,omitempty"` // MCP server that owns the tool
+}
+
+// Usage is the real token accounting reported by the server for one assistant turn.
+//
+// ContextUsed() is the one number shared by the UI progress bar and the compaction
+// trigger check (spec §0 "contextUsed (real usage)").
+type Usage struct {
+	// PromptTokens is the prompt size as reported by the server.
+	PromptTokens int `json:"prompt,omitempty"`
+	// CacheTokens is only added to ContextUsed when the server does not already include
+	// cached tokens inside PromptTokens (llama.cpp /completion: excluded; OpenAI: included).
+	CacheTokens int `json:"cache,omitempty"`
+	// CompletionTokens is the generated size of this turn.
+	CompletionTokens int `json:"completion,omitempty"`
+
+	// HasPrompt / HasCompletion record "the server really told us", so that a missing
+	// count is never confused with a zero count.
+	HasPrompt     bool `json:"hasPrompt,omitempty"`
+	HasCompletion bool `json:"hasCompletion,omitempty"`
+}
+
+// ContextUsed returns the real KV occupancy of the completed turn.
+func (u *Usage) ContextUsed() int {
+	if u == nil || !u.HasPrompt {
+		return 0
+	}
+	return u.PromptTokens + u.CacheTokens + u.CompletionTokens
+}
+
+// Entry kinds.
+const (
+	KindUser       = "user"
+	KindAssistant  = "assistant"
+	KindTool       = "tool"
+	KindCompaction = "compaction"
+)
+
+// CompactionMeta is the metadata of a compaction entry.
+//
+// The three boundary states of spec §2.5 must stay distinguishable:
+//
+//	BoundaryID == nil                 -> deliberate empty kept ("compact everything").
+//	BoundaryID != nil, found on path  -> normal boundary, kept starts at that message.
+//	BoundaryID != nil, not found      -> broken: fail open (send everything).
+type CompactionMeta struct {
+	BoundaryID  *string `json:"boundaryId"`
+	Replaced    int     `json:"replaced"`
+	IsSplitTurn bool    `json:"isSplitTurn,omitempty"`
+	Model       string  `json:"model,omitempty"`
+	UsageBefore int     `json:"usageBefore,omitempty"`
+	SummarySize int     `json:"summarySize,omitempty"`
+	SummaryMode string  `json:"summaryMode,omitempty"`
+	// Broken is computed while resolving the path (never trusted from storage).
+	Broken bool `json:"broken,omitempty"`
+}
+
+// Entry is one conversation record on the path.
+type Entry struct {
+	ID       string `json:"id"`
+	ParentID string `json:"parentId,omitempty"`
+	Kind     string `json:"kind"`
+	// Role is the API role: user|assistant|tool. A compaction entry travels with role user.
+	Role    string `json:"role"`
+	Content string `json:"content,omitempty"`
+	// Reasoning is the model's chain-of-thought channel (never sent back to the model).
+	Reasoning string `json:"reasoning,omitempty"`
+	Parts     []Part     `json:"parts,omitempty"`
+	ToolCalls []ToolCall `json:"toolCalls,omitempty"`
+
+	// Tool-result only fields.
+	ToolCallID string `json:"toolCallId,omitempty"`
+	Tool       string `json:"tool,omitempty"`
+	Server     string `json:"server,omitempty"`
+	IsError    bool   `json:"isError,omitempty"`
+
+	Interrupted bool   `json:"interrupted,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Usage       *Usage `json:"usage,omitempty"`
+	// Finish is the provider's finish reason ("stop", "tool_calls", "length", …).
+	Finish string `json:"finishReason,omitempty"`
+	// Ms is how long generating this entry / running this tool took.
+	Ms int64 `json:"ms,omitempty"`
+
+	Compaction *CompactionMeta `json:"compaction,omitempty"`
+
+	// Label is a free-form UI annotation (e.g. "interrupted by user").
+	Label string    `json:"label,omitempty"`
+	Ts    time.Time `json:"ts"`
+}
+
+// IsCompaction reports whether the entry is a compaction record.
+func (e *Entry) IsCompaction() bool { return e.Kind == KindCompaction }
+
+// Path walks from id up to the root and returns the root-to-id sequence.
+// A missing parent terminates the walk (the visible prefix is returned).
+func Path(entries map[string]*Entry, id string) []*Entry {
+	seen := map[string]bool{}
+	var out []*Entry
+	cur := id
+	for cur != "" {
+		if seen[cur] {
+			break // corrupt cycle
+		}
+		seen[cur] = true
+		e, ok := entries[cur]
+		if !ok {
+			break
+		}
+		out = append(out, e)
+		cur = e.ParentID
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// Effective is the path the model actually sees after the active compaction entry is
+// applied (spec §3.2): "planning input == assembler input" holds structurally, because
+// both call this one function.
+//
+// Rules (spec §2.5, §3.3):
+//   - only the last compaction entry on the path is active
+//   - boundary absent  -> kept = entries after the compaction entry
+//   - boundary found   -> kept = boundary .. end, everything up to the entry replaced by it
+//   - boundary missing -> fail open: the whole path, with Broken marked on the meta
+//
+// The returned kept slice never contains the compaction entry itself; the caller splices
+// the summary in front of it (with role user).
+func Effective(entries map[string]*Entry, path []*Entry) ([]*Entry, *Entry) {
+	idx := -1
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i].IsCompaction() {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return path, nil
+	}
+	cmp := path[idx]
+	meta := cmp.Compaction
+	if meta == nil {
+		meta = &CompactionMeta{}
+		cmp.Compaction = meta
+	}
+	meta.Broken = false
+	// Earlier compaction entries are never sent: their content lives inside the summary that
+	// replaced them (rolling summary, spec §3.6), and the boundary of the active one may even
+	// point at one of them.
+	withoutOlder := func(from int) []*Entry {
+		kept := make([]*Entry, 0, len(path)-from)
+		for _, e := range path[from:] {
+			if e.IsCompaction() {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		return kept
+	}
+	if meta.BoundaryID == nil {
+		// Deliberate empty kept: payload = [summary] + everything after the entry.
+		kept := withoutOlder(idx + 1)
+		return kept, cmp
+	}
+	bid := *meta.BoundaryID
+	if bid == "" {
+		meta.Broken = true
+		return path, cmp
+	}
+	for i := idx + 1; i < len(path); i++ {
+		if path[i].ID == bid {
+			return withoutOlder(i), cmp
+		}
+	}
+	// Boundary id present but not found after the compaction entry (branch, deleted
+	// message, imported legacy data): broken -> fail open, send everything.
+	meta.Broken = true
+	return path, cmp
+}
+
+// LastUsage returns the real usage of the last completed assistant turn on the path,
+// or nil when no turn has run yet (spec: "unavailable -> do not check, do not guess").
+func LastUsage(path []*Entry) *Usage {
+	for i := len(path) - 1; i >= 0; i-- {
+		e := path[i]
+		if e.Kind == KindAssistant && e.Usage != nil && e.Usage.HasPrompt {
+			return e.Usage
+		}
+	}
+	return nil
+}

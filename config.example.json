@@ -1,0 +1,60 @@
+{
+  "addr": "127.0.0.1:8090",
+  "data": "data",
+  "web": "web",
+  "fsync": false,
+  "debug": false,
+
+  "defaults": {
+    "name": "main",
+    "systemPrompt": "You are a careful assistant. Use the tools when they help. Answer in the language the user writes in.",
+
+    "llm": {
+      "kind": "openai",
+      "baseUrl": "http://127.0.0.1:8901/v1",
+      "apiKey": "${BARELOOP_API_KEY}",
+      "model": "${BARELOOP_MODEL}",
+      "nCtx": 4096,
+      "cacheIncludedInPrompt": false
+    },
+
+    "temperature": 0.7,
+    "maxTokens": 0,
+    "maxTurns": 0,
+    "reasoningEffort": "",
+
+    "asm": {
+      "sendReasoning": false,
+      "omitToolResultName": false
+    },
+
+    "compact": {
+      "auto": true,
+      "inLoop": false,
+      "mode": "threshold",
+      "summaryMode": "prefix-stable",
+      "threshold": 70,
+      "keepTarget": 50,
+      "minKeptUserTurns": 4,
+      "minKeptMessages": 0,
+      "minSummarizeTokens": 2000,
+      "summaryMax": 70,
+      "maxAttempts": 3,
+      "temperature": 0.2
+    },
+
+    "mcp": [
+      {
+        "name": "stub",
+        "type": "stdio",
+        "command": "./bin/mcpstub",
+        "args": ["-transport", "stdio", "-version", "2026-07-28"]
+      },
+      {
+        "name": "stub-http",
+        "type": "http",
+        "url": "http://127.0.0.1:8911/mcp"
+      }
+    ]
+  }
+}
