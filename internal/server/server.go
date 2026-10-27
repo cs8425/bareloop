@@ -48,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/session/{id}", s.handlePatch)
 	mux.HandleFunc("DELETE /api/session/{id}", s.handleDelete)
 	mux.HandleFunc("GET /api/session/{id}/inspect", s.handleInspect)
+	mux.HandleFunc("GET /api/session/{id}/payload", s.handlePayload)
 	mux.HandleFunc("POST /api/session/{id}/send", s.handleSend)
 	mux.HandleFunc("POST /api/session/{id}/interrupt", s.handleInterrupt)
 	mux.HandleFunc("POST /api/session/{id}/stop", s.handleStop)
@@ -377,6 +378,14 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sess.Inspect())
 }
 
+func (s *Server) handlePayload(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, sess.Payload())
+}
+
 // ---------------------------------------------------------------- SSE (fallback transport)
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -464,6 +473,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The UI is served from disk and changes while the server runs. Revalidate every time (a 304 is
+	// still cheap: ServeFile answers If-Modified-Since) so a reload always shows the edited file.
+	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeFile(w, r, file)
 }
 

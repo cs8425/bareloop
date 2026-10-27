@@ -544,6 +544,28 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.Name == "" {
 		patch.Name = old.Name
 	}
+	// Same rule as the fields above: what a patch does not carry is not a change. Without these,
+	// PATCHing only a name would drop the system prompt and reset the assembler options, because
+	// s.cfg is replaced wholesale below.
+	if patch.SystemPrompt == "" {
+		patch.SystemPrompt = old.SystemPrompt
+	}
+	if patch.ASM == (asm.Options{}) {
+		patch.ASM = old.ASM
+	}
+	if patch.ReasoningEffort == "" {
+		patch.ReasoningEffort = old.ReasoningEffort
+	}
+	if len(patch.Extra) == 0 {
+		patch.Extra = old.Extra
+	}
+	if !patch.NotifyTools {
+		patch.NotifyTools = old.NotifyTools
+	}
+	if patch.MCP == nil {
+		// An empty list is a change ("remove every server"); an absent key is not.
+		patch.MCP = old.MCP
+	}
 	if patch.Compact == (compact.Params{}) {
 		patch.Compact = old.Compact
 	}
@@ -680,6 +702,9 @@ type Inspection struct {
 	Broken       bool          `json:"boundaryBroken,omitempty"`
 	Messages     []InspectRow  `json:"messages"`
 	SystemBytes  int           `json:"systemBytes"`
+	// System is the exact system head that will be sent. Empty means no system message is sent at
+	// all, which is the difference between a steered model and whatever the model defaults to.
+	System       string        `json:"system,omitempty"`
 	TotalBytes   int           `json:"totalBytes"`
 	Synthetic    int           `json:"syntheticToolResults"`
 	Plan         *compact.Plan `json:"plan,omitempty"`
@@ -709,6 +734,7 @@ func (s *Session) Inspect() *Inspection {
 		NCTX:        s.nctxLocked(),
 		Summary:     cmp != nil,
 		SystemBytes: len(built.System),
+		System:      built.System,
 		TotalBytes:  built.Bytes(),
 		Synthetic:   built.Synthetic,
 	}
@@ -749,6 +775,18 @@ func (s *Session) Inspect() *Inspection {
 	return ins
 }
 
+// Payload is the exact request body the next request would carry: system head, messages (system
+// first) and tool definitions. Inspect sizes them, this shows them; nothing about the prompt is
+// hidden behind a byte count.
+func (s *Session) Payload() map[string]any {
+	built, _, tools := s.build()
+	return map[string]any{
+		"system":   built.System,
+		"messages": built.All(),
+		"tools":    tools,
+	}
+}
+
 func (s *Session) nctxLocked() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -762,10 +800,13 @@ func roleOf(e *ir.Entry) string {
 	return e.Role
 }
 
+// head clips to n runes: n bytes would cut multi-byte characters in half and the JSON encoder
+// would turn the remainder into replacement characters.
 func head(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }

@@ -73,12 +73,27 @@ session stores its own copy in `data/<id>/config.json`.
 |---|---|
 | `addr`, `data`, `web`, `fsync`, `debug` | listen address, log directory, static UI directory, synchronous appends, request logging |
 | `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `cacheIncludedInPrompt`, `headers` |
-| `defaults.systemPrompt` | the system prompt |
+| `defaults.systemPrompt` | the system prompt: the one place that decides language and script (see "What is actually sent") |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
 | `defaults.asm` | payload options: `sendReasoning` (**on** by default), `omitToolResultName` (off) |
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
 | `sessions[]` | optional sessions to create at startup |
+
+Keys are lowerCamelCase, and they are matched case-insensitively (`"SendReasoning"` is understood).
+Two things bite harder than a typo:
+
+- `defaults` is read when a session is **created**. Editing `config.json` afterwards changes nothing
+  for an existing session — `data/<id>/config.json` is the truth, and a settings save writes the
+  whole effective config back into it, which is how `"sendReasoning": true` appears there even
+  though nobody typed it.
+- `data/<id>/config.json` is rewritten by the server, so keep hand edits for the moments the
+  server is not running: stop it, edit, start. The UI dialog and `PATCH` are the live paths.
+
+`PATCH` follows one rule for every field: **the zero value means "keep what is stored"** — that is
+how an empty API key keeps the key, and why `compact: {}` means "unchanged". It also means you
+cannot clear a system prompt or switch `asm.sendReasoning` back to its unset state over the API;
+stop the server, edit `data/<id>/config.json` and start again for that.
 
 ### Leaving a value out
 
@@ -132,6 +147,40 @@ Two behaviours are worth knowing, because both were bugs once:
   /api/session/{id}`; the handler sorts them by their numeric id and the UI sorts again, so a
   reload renders the same sequence that was produced. `status.tip` marks the current path —
   entries that are not on it are shown dimmed, because they are not sent.
+- **Nothing is cached.** Static files are served with `Cache-Control: no-cache`, so editing
+  `web/` while the server runs and hitting reload shows the change (a 304 still answers when the
+  file did not move).
+
+Below 860px the UI is one column: the session list becomes a drawer (☰, closed by the scrim, by
+picking a session or by Escape) and the side panel becomes a bottom sheet. Heights use `dvh`
+because on a phone `100vh` is the *largest* viewport and would hide the composer — the composer
+is where stop and interrupt live — behind the browser's own bar; inputs are never smaller than
+16px because iOS Safari zooms the page otherwise; and padding adds `env(safe-area-inset-*)` so
+the notch and the gesture bar do not cover anything.
+
+## What is actually sent
+
+`GET /api/session/{id}/inspect` answers the size question (per-message tokens, budget, plan, tool
+list) and now also returns the `system` head verbatim; `GET /api/session/{id}/payload` answers
+the content question with the exact body of the next request — `{system, messages, tools}`, the
+same `[]Message` values the provider receives. The inspect panel shows both (`payload as sent`),
+so no part of the prompt is hidden behind a byte count.
+
+Every request also leaves one line in the process log:
+
+```
+turn 3: 14 messages + system prompt (287 bytes), 9 tools, 41233 bytes
+```
+
+and `BARELOOP_PAYLOAD_DUMP=1` appends the whole body as JSON after it — large, and only worth
+turning on while debugging. Use it whenever the model behaves oddly: it settles in one line
+whether something other than the user's own words is steering the answer.
+
+Language and script are not free. The assembler sends no text of its own (there is not a single
+non-ASCII string in the Go code or the UI), so the model answers in whatever it was trained to
+prefer unless the system prompt says otherwise — which is how a Traditional Chinese question
+comes back in Simplified. `defaults.systemPrompt` in `config.example.json` pins both: same
+language, same script, no unrequested switching.
 
 ## HTTP API
 
@@ -141,7 +190,7 @@ Two behaviours are worth knowing, because both were bugs once:
 | GET | `/api/sessions` | every session with its status |
 | POST | `/api/sessions` | create a session (body: a config; `{}` is enough) |
 | GET | `/api/session/{id}` | config (without the API key), status, every entry sorted by id, pending ids |
-| PATCH | `/api/session/{id}` | update the config; refuses while a run is active |
+| PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |
 | DELETE | `/api/session/{id}` | close and delete the session |
 | POST | `/api/session/{id}/send` | `{text, images[], files[], label}` — send now or queue |
 | POST | `/api/session/{id}/interrupt` | abort the current generation and send this message instead |
@@ -153,7 +202,8 @@ Two behaviours are worth knowing, because both were bugs once:
 | POST | `/api/session/{id}/entry/delete` | `{id}` — delete a leaf or make an interior entry synthetic |
 | POST | `/api/session/{id}/tip` | `{id}` — move the tip (time travel) |
 | POST | `/api/session/{id}/reload` | re-read the log from disk |
-| GET | `/api/session/{id}/inspect` | what would be sent: per-message token sizes, the plan, the tool list |
+| GET | `/api/session/{id}/inspect` | what would be sent: the system head, per-message token sizes, the plan, the tool list |
+| GET | `/api/session/{id}/payload` | the exact body of the next request: `{system, messages, tools}` |
 | GET | `/api/session/{id}/events` | the event stream as SSE (fallback transport) |
 | GET | `/ws` | the event stream as a websocket (primary transport) |
 

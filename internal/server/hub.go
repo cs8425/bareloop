@@ -45,6 +45,12 @@ func (h *Hub) Broadcast(e agent.Event) {
 	if e.Session != "" {
 		ring := h.replay[e.Session]
 		ring = append(ring, e)
+		if _, id := finishedStream(e); id != "" {
+			// A finished stream must not be replayed. A page that reloads gets the committed entry
+			// from GET /api/session/{id}, so replaying the fragments too renders the same answer a
+			// second time. Subscribers received the fragments before this call, so nobody loses them.
+			ring = dropStream(ring, id)
+		}
 		if len(ring) > h.limit {
 			ring = ring[len(ring)-h.limit:]
 		}
@@ -67,6 +73,27 @@ func (h *Hub) Broadcast(e agent.Event) {
 		h.logf("closing a client that is not reading fast enough")
 		h.unregister(c)
 	}
+}
+
+// finishedStream reports the id of the stream a terminal fragment closes ("" for any other event).
+func finishedStream(e agent.Event) (bool, string) {
+	if e.Type != agent.EvtDelta || e.Delta == nil || !e.Delta.Done {
+		return false, ""
+	}
+	return true, e.Delta.StreamID
+}
+
+// dropStream removes every fragment of one stream, reusing the backing array (no other slice
+// shares it: Snapshot copies, and the events themselves are never mutated).
+func dropStream(ring []agent.Event, id string) []agent.Event {
+	out := ring[:0]
+	for _, ev := range ring {
+		if ev.Type == agent.EvtDelta && ev.Delta != nil && ev.Delta.StreamID == id {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // Snapshot returns the recent events of a session (for a page that just reconnected).

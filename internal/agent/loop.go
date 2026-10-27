@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -134,6 +135,29 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 	}
 }
 
+// logPayload writes one line per request to the process log: what the model is about to see.
+// With BARELOOP_PAYLOAD_DUMP=1 the exact body (messages + tool definitions) is appended as JSON,
+// which is how you check that nothing but the user's own words steers the model — language and
+// script included. The dump is the whole payload, so it is large: set it only when debugging.
+func (s *Session) logPayload(turn int, built *asm.Built, tools []llm.Tool) {
+	if built.System == "" {
+		s.logf("turn %d: %d messages, NO system prompt (session systemPrompt is empty), %d tools, %d bytes",
+			turn, len(built.Messages), len(tools), built.Bytes())
+	} else {
+		s.logf("turn %d: %d messages + system prompt (%d bytes), %d tools, %d bytes",
+			turn, len(built.Messages), len(built.System), len(tools), built.Bytes())
+	}
+	if os.Getenv("BARELOOP_PAYLOAD_DUMP") == "" {
+		return
+	}
+	dump, err := json.Marshal(map[string]any{"system": built.System, "messages": built.All(), "tools": tools})
+	if err != nil {
+		s.logf("payload dump: %v", err)
+		return
+	}
+	s.logf("turn %d payload: %s", turn, dump)
+}
+
 // turns runs generate → tool calls → generate … until the model answers without asking for
 // tools. It reports whether the user aborted.
 func (s *Session) turns(ctx context.Context) (bool, error) {
@@ -172,6 +196,7 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		// Remember the exact payload that goes out: the summary request reuses it as its
 		// prefix so the provider's KV cache stays warm (spec §5.2).
 		s.rememberSent(built.All(), tools)
+		s.logPayload(turn, built, tools)
 
 		entry, streamID, aborted := s.generate(ctx, built, tools, turn)
 		if entry == nil {
