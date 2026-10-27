@@ -103,9 +103,14 @@ func main() {
 	if err := mgr.LoadAll(ctx); err != nil {
 		logf("load existing sessions: %v", err)
 	}
+	// Anything that already has data/<id>/ wins over this file: it is loaded above and its config is
+	// never re-merged with defaults, so say what was started from where.
+	for _, s := range mgr.List() {
+		logf("session %q: using %s/%s/config.json (this file's defaults applied when it was created)", s.ID, cfg.Data, s.ID)
+	}
 	for _, sc := range cfg.Sessions {
 		if _, err := mgr.Create(ctx, sc); err != nil {
-			logf("pre-create session %q: %v", sc.ID, err)
+			logf("session %q from this file: %v (an existing session keeps its own config; edit %s/%s/config.json)", sc.ID, err, cfg.Data, sc.ID)
 		}
 	}
 	if len(mgr.List()) == 0 {
