@@ -102,6 +102,8 @@ function connect() {
     setConn(true, 'websocket', 'ws');
     ws.send(JSON.stringify({ type: 'subscribe', session: '' }));
     ws.send(JSON.stringify({ type: 'snapshot', session: state.id || '' }));
+    // A reconnect may have missed events the replay window already dropped: re-read the session.
+    if (state.id) refresh().catch(() => {});
   };
   ws.onmessage = (ev) => {
     let msg;
@@ -173,9 +175,90 @@ function note(text, kind = 'note') {
   if (kind === 'note') setTimeout(() => node.remove(), 9000);
 }
 
-function scrollDown() {
+// ---------------------------------------------------------------------------- auto-scroll
+//
+// Following the transcript is opt-out, and the opt-out has to be instant: a wall of tokens must
+// never drag the viewport away from the composer, or stop/interrupt cannot be reached. The rule is
+// "follow only while pinned", where pinned means the bottom of #log is on screen. Any scroll the
+// user performs unpins; the floating jump button (or Escape) re-pins.
+const PIN_PX = 48;
+let pinned = true;
+let unseen = 0;
+let lastScrollWrite = 0;
+
+const distanceFromBottom = (box) => box.scrollHeight - box.scrollTop - box.clientHeight;
+
+function scrollDown(force = false) {
   const box = log();
-  if (box.scrollHeight - box.scrollTop - box.clientHeight < 220) box.scrollTop = box.scrollHeight;
+  if (!pinned && !force) {
+    unseen++;
+    renderJump();
+    return;
+  }
+  if (force) pinned = true;
+  unseen = 0;
+  lastScrollWrite = Date.now();
+  box.scrollTop = box.scrollHeight;
+  renderJump();
+}
+
+function renderJump() {
+  const btn = $('#jump');
+  if (!btn) return;
+  btn.classList.toggle('hidden', pinned);
+  const label = unseen > 0 ? `\u2193 ${unseen > 99 ? '99+' : unseen} new` : '\u2193 latest';
+  if (btn.textContent.trim() !== label) btn.textContent = label;
+}
+
+// resetScroll re-arms the follow, e.g. after switching to another session.
+function resetScroll() {
+  pinned = true;
+  unseen = 0;
+  renderJump();
+}
+
+// scrollsInside reports whether a nested scroll box (a tool card's <pre>) would consume the wheel
+// movement, so scrolling a code block does not unpin the transcript.
+function scrollsInside(target, up) {
+  for (let n = target; n && n !== log(); n = n.parentElement) {
+    if (n.scrollHeight - n.clientHeight <= 1) continue;
+    const atTop = n.scrollTop <= 0;
+    const atBottom = n.scrollTop + n.clientHeight >= n.scrollHeight - 1;
+    if (up ? !atTop : !atBottom) return true;
+  }
+  return false;
+}
+
+function wireScroll() {
+  const box = log();
+  box.addEventListener(
+    'scroll',
+    () => {
+      if (Date.now() - lastScrollWrite < 150) return; // our own follow, not the user's scroll
+      const atBottom = distanceFromBottom(box) <= PIN_PX;
+      if (atBottom === pinned) return;
+      pinned = atBottom;
+      if (atBottom) unseen = 0;
+      renderJump();
+    },
+    { passive: true },
+  );
+  // Wheeling up while already at the bottom fires no scroll event, so read the intent itself.
+  box.addEventListener(
+    'wheel',
+    (e) => {
+      if (e.deltaY >= 0 || !pinned || scrollsInside(e.target, true)) return;
+      pinned = false;
+      renderJump();
+    },
+    { passive: true },
+  );
+  $('#jump').onclick = () => scrollDown(true);
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || pinned) return;
+    if (document.querySelector('dialog[open]')) return; // the dialog closes itself
+    scrollDown(true);
+  });
 }
 
 const whoName = (e) => (e.kind === 'compaction' ? 'compaction' : e.role || e.kind);
@@ -283,8 +366,17 @@ function reasoningBlock(text) {
 
 // streaming ------------------------------------------------------------
 
+// finishedStreams remembers streams that already ended. A reconnect replays the hub's recent
+// events, and a replayed delta of a committed message would otherwise render the same reply twice.
+const finishedStreams = new Set();
+function markStreamFinished(id) {
+  finishedStreams.add(id);
+  if (finishedStreams.size > 200) finishedStreams.delete(finishedStreams.values().next().value);
+}
+
 function streamStart(streamId) {
   if (state.streams.has(streamId)) return state.streams.get(streamId);
+  if (finishedStreams.has(streamId)) return null;
   const node = el('div', 'msg assistant stream');
   const head = el('header');
   head.appendChild(el('span', 'who', 'assistant'));
@@ -304,6 +396,7 @@ function streamStart(streamId) {
 
 function streamDelta(d) {
   const s = streamStart(d.streamId);
+  if (!s) return;
   if (d.reasoning) {
     s.reasoningText += d.reasoning;
     if (!s.rText) {
@@ -336,6 +429,7 @@ function streamDelta(d) {
 
 function streamFinish(s) {
   s.node.classList.remove('stream');
+  markStreamFinished(s.id);
   if (!s.content && !s.tools.size) s.node.remove();
 }
 
@@ -573,6 +667,7 @@ function onEntry(e) {
       }
       s.node.remove();
       state.streams.delete(id);
+      markStreamFinished(id);
     }
   }
   if (e.kind === 'user') {
@@ -681,6 +776,14 @@ function renderPending() {
 
 // ---------------------------------------------------------------------------- session data
 
+// sortByNum restores append order from entry ids ("1", "2", "10"): the DOM shows whatever order
+// the entries are appended in, so a shuffled payload must be re-ordered before rendering.
+const numId = (id) => {
+  const n = Number(id);
+  return Number.isFinite(n) ? n : 0;
+};
+const sortByNum = (list) => list.slice().sort((a, b) => numId(a.id) - numId(b.id));
+
 // pathOf walks parents from the tip, returning the set of entry ids that are actually sent.
 function pathOf(entries, tip) {
   const byId = new Map(entries.map((e) => [e.id, e]));
@@ -699,9 +802,7 @@ async function refresh() {
   log().textContent = '';
   state.entries.clear();
   state.tools.clear();
-  for (const [, s] of state.streams) s.node.remove();
-  state.streams.clear();
-  const entries = data.entries || [];
+  const entries = sortByNum(data.entries || []);
   const onPath = pathOf(entries, data.status?.tip);
   for (const e of entries) {
     const node = entryNode(e);
@@ -710,6 +811,7 @@ async function refresh() {
       node.title = 'not on the current path (branch)';
     }
   }
+  for (const [, s] of state.streams) log().appendChild(s.node); // live streams survive the rebuild, below the committed entries
   state.status = data.status;
   renderStatus(data.status);
   state.pending = data.pending || [];
@@ -749,6 +851,7 @@ async function loadSessions() {
 async function selectSession(id) {
   state.id = id;
   log().textContent = '';
+  resetScroll();
   state.entries.clear();
   state.tools.clear();
   state.streams.clear();
@@ -814,6 +917,7 @@ async function send() {
   if (!body || !state.id) return;
   clearDraft();
   await call('/send', body);
+  scrollDown(true); // sending a message means "show me the answer"
 }
 
 async function interruptSend() {
@@ -821,6 +925,7 @@ async function interruptSend() {
   if (!body || !state.id) return;
   clearDraft();
   await call('/interrupt', body);
+  scrollDown(true);
 }
 
 async function stop() {
@@ -956,6 +1061,7 @@ async function showInspect() {
 // ---------------------------------------------------------------------------- wiring
 
 function wire() {
+  wireScroll();
   $('#btn-send').onclick = send;
   $('#btn-interrupt').onclick = interruptSend;
   $('#btn-stop').onclick = stop;
