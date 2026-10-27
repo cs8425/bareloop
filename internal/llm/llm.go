@@ -105,6 +105,32 @@ type Config struct {
 	HTTP    *http.Client  `json:"-"`
 }
 
+// Same reports whether two configs describe the same endpoint. Config carries a map and an
+// *http.Client, so == cannot be used on it; the fields that matter when deciding whether a new
+// provider must be built are compared here (the http client and the timeout are not part of an
+// endpoint identity).
+func (c Config) Same(o Config) bool {
+	if c.Kind != o.Kind || c.BaseURL != o.BaseURL || c.APIKey != o.APIKey || c.Model != o.Model ||
+		c.Path != o.Path || c.NCTX != o.NCTX {
+		return false
+	}
+	if (c.CacheIncludedInPrompt == nil) != (o.CacheIncludedInPrompt == nil) {
+		return false
+	}
+	if c.CacheIncludedInPrompt != nil && *c.CacheIncludedInPrompt != *o.CacheIncludedInPrompt {
+		return false
+	}
+	if len(c.Headers) != len(o.Headers) {
+		return false
+	}
+	for k, v := range c.Headers {
+		if ov, ok := o.Headers[k]; !ok || ov != v {
+			return false
+		}
+	}
+	return true
+}
+
 // New builds a provider from cfg.
 func New(cfg Config) (Provider, error) {
 	if cfg.BaseURL == "" {

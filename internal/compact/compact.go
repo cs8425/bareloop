@@ -362,8 +362,10 @@ func countUsers(path []*ir.Entry) int {
 	return n
 }
 
-// Instruction returns the summary instruction to append (§3.6).
-func (p Params) Instruction(split bool) string {
+// SummaryInstruction returns the summary instruction to append (§3.6). It is named apart from
+// the Params.Instruction config override because a type cannot hold a field and a method of the
+// same name.
+func (p Params) SummaryInstruction(split bool) string {
 	if split {
 		if strings.TrimSpace(p.SplitInstruction) != "" {
 			return p.SplitInstruction
@@ -425,7 +427,7 @@ type SummaryCall struct {
 // definitions at the start of the prompt, so a missing or reordered array forks at token 0.
 func (p Params) BuildRequest(nctx int, lastMessages []asm.Message, tools []llm.Tool, split bool, userInstruction string) SummaryCall {
 	call := SummaryCall{Temperature: p.Temperature, MaxTokens: p.SummaryMaxTokens(nctx)}
-	instr := p.Instruction(split)
+	instr := p.SummaryInstruction(split)
 	if strings.TrimSpace(userInstruction) != "" {
 		instr += "\n\nAdditional instruction from the user: " + strings.TrimSpace(userInstruction)
 	}

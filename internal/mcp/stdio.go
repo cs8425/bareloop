@@ -150,7 +150,7 @@ func (t *stdio) readLine() (string, error) {
 			}
 			return strings.Join(parts, ""), err
 		}
-		if strings.HasSuffix(chunk, "\n") {
+		if strings.HasSuffix(string(chunk), "\n") {
 			return strings.Join(parts, ""), nil
 		}
 	}

@@ -555,7 +555,7 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		patch.Temperature = old.Temperature
 	}
 	reconnectMCP := !sameMCP(old.MCP, patch.MCP)
-	llmChanged := old.LLM != patch.LLM
+	llmChanged := !old.LLM.Same(patch.LLM)
 	s.cfg = patch
 	s.mu.Unlock()
 

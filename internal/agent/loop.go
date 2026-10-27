@@ -290,7 +290,8 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 			if tc.Name != "" {
 				cur.Name = tc.Name
 			}
-			cur.Args += tc.Args
+			// Args arrive as string fragments of one JSON object; ir.ToolCall.Args is raw JSON.
+			cur.Args = append(cur.Args, tc.Args...)
 			emitDelta(Delta{ToolCall: &ToolCallProgress{ID: cur.ID, Name: cur.Name, Args: tc.Args, Index: tc.Index}})
 		}
 		if ev.FinishReason != "" {
@@ -364,7 +365,7 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 // a tool call without a result (spec §5.1).
 func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bool) {
 	for _, tc := range calls {
-		run := &RunInfo{ID: tc.ID, CallID: tc.ID, Tool: tc.Name, Args: tc.Args, Status: "running", Rounds: s.turnCount()}
+		run := &RunInfo{ID: tc.ID, CallID: tc.ID, Tool: tc.Name, Args: string(tc.Args), Status: "running", Rounds: s.turnCount()}
 		if ref, ok := s.reg.resolve(tc.Name); ok {
 			run.Server = ref.Server
 		}
@@ -374,7 +375,7 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 		onEvent := func(e mcp.Event) {
 			s.emit(Event{Type: EvtInfo, Info: fmt.Sprintf("%s %s %s", e.Server, e.Method, clip(string(e.Params), 300))})
 		}
-		res, ref, err := s.reg.call(ctx, tc.Name, json.RawMessage(orEmpty(tc.Args)), onEvent)
+		res, ref, err := s.reg.call(ctx, tc.Name, orEmpty(tc.Args), onEvent)
 
 		ms := time.Since(start).Milliseconds()
 		text, parts := toolOutput(res)
@@ -462,11 +463,13 @@ func toolOutput(res *mcp.CallResult) (string, []ir.Part) {
 	return text, parts
 }
 
-func orEmpty(s string) json.RawMessage {
-	if strings.TrimSpace(s) == "" {
+// orEmpty normalises missing tool arguments to an empty JSON object: a provider that streamed
+// no arguments at all still needs `{}` as the MCP call payload.
+func orEmpty(raw json.RawMessage) json.RawMessage {
+	if strings.TrimSpace(string(raw)) == "" {
 		return json.RawMessage(`{}`)
 	}
-	return json.RawMessage(s)
+	return raw
 }
 
 // rememberSent stores the exact payload that went out, for the summary request prefix

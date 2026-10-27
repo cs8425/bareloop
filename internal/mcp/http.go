@@ -270,6 +270,11 @@ func (t *httpTransport) call(ctx context.Context, method string, params any, onM
 	if err != nil {
 		return nil, nil, err
 	}
+	if rpc != nil {
+		// The HTTP layer carried a JSON-RPC error (an unknown method, an expired session id,
+		// 400/401/403). It stays typed: the era probe and the retry logic read the code.
+		return nil, rpc, nil
+	}
 	if resp == nil {
 		if immediate == nil || len(immediate.ID) == 0 {
 			return json.RawMessage("{}"), nil, nil
