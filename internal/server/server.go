@@ -1,13 +1,17 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,12 +110,26 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := sess.Config()
 	cfg.LLM.APIKey = "" // the key is never echoed back to the browser
+	entries := sess.Entries()
+	sortEntries(entries)
 	writeJSON(w, map[string]any{
 		"config":  cfg,
 		"status":  sess.Status(),
-		"entries": sess.Entries(),
+		"entries": entries,
 		"pending": sess.PendingIDs(),
 	})
+}
+
+// sortEntries orders entries by their numeric id, which is the order they were appended.
+// store.Entries iterates a map, so without this the browser renders a shuffled transcript.
+func sortEntries(entries []*ir.Entry) {
+	sort.Slice(entries, func(i, j int) bool { return entryNum(entries[i].ID) < entryNum(entries[j].ID) })
+}
+
+// entryNum parses the per-session number of an entry id ("42" → 42, anything else → 0).
+func entryNum(id string) int64 {
+	n, _ := strconv.ParseInt(id, 10, 64)
+	return n
 }
 
 func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
@@ -476,3 +494,21 @@ func (w *statusWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Hijack passes the connection through to the underlying ResponseWriter. A logging wrapper that
+// forgets this breaks every WebSocket upgrade with "http.ResponseWriter does not implement
+// http.Hijacker", because websocket.Accept receives the wrapper instead of the real writer.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("server: underlying ResponseWriter is not a http.Hijacker")
+	}
+	conn, buf, err := h.Hijack()
+	if err == nil {
+		w.status = http.StatusSwitchingProtocols
+	}
+	return conn, buf, err
+}
+
+// Unwrap lets http.ResponseController reach the real ResponseWriter through this wrapper.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
