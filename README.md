@@ -147,9 +147,11 @@ Two behaviours are worth knowing, because both were bugs once:
   /api/session/{id}`; the handler sorts them by their numeric id and the UI sorts again, so a
   reload renders the same sequence that was produced. `status.tip` marks the current path —
   entries that are not on it are shown dimmed, because they are not sent.
-- **Nothing is cached.** Static files are served with `Cache-Control: no-cache`, so editing
-  `web/` while the server runs and hitting reload shows the change (a 304 still answers when the
-  file did not move).
+- **Caching is bounded, and cheap to revalidate.** `index.html` — the file that names every asset —
+  is `Cache-Control: no-cache, must-revalidate`, so navigating to the UI always asks the server.
+  Everything else is `public, max-age=60, must-revalidate`. Both carry an `ETag`, so a
+  revalidation costs a 304 and no body, and a hard refresh always bypasses the lot. Editing `web/`
+  while the server runs therefore shows up on the next navigation (or immediately on reload).
 
 Below 860px the UI is one column: the session list becomes a drawer (☰, closed by the scrim, by
 picking a session or by Escape) and the side panel becomes a bottom sheet. Heights use `dvh`
@@ -157,6 +159,20 @@ because on a phone `100vh` is the *largest* viewport and would hide the composer
 is where stop and interrupt live — behind the browser's own bar; inputs are never smaller than
 16px because iOS Safari zooms the page otherwise; and padding adds `env(safe-area-inset-*)` so
 the notch and the gesture bar do not cover anything.
+
+### Embedding the UI
+
+The UI is plain files, served from `-web` (default `./web`, looked up in a few usual places so
+`go run ./cmd/bareloopd` works from the repo root). Shipping a single binary means replacing that
+directory with an embedded filesystem — `//go:embed all:web` plus `http.FS`, one import in `cmd`
+and one field in `server.Server`:
+
+- keep the split: the entry point is revalidated, assets have a lifetime;
+- the `ETag` is the only thing that has to change meaning — from "size + modification time" to a
+  hash of the bytes, since embedded files all share the build time;
+- if the asset names ever grow content hashes (`app.4f9c1.js`), drop `max-age` to a year and hash
+  the name into `index.html` instead; until then 60s is the staleness budget that lets an upgrade
+  self-heal.
 
 ## What is actually sent
 

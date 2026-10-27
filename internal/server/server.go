@@ -446,6 +446,14 @@ func writeSSE(w http.ResponseWriter, e agent.Event) bool {
 
 // ---------------------------------------------------------------- static
 
+// Cache policy for the UI. Asset names are not content-hashed, so a cache lifetime is the only
+// staleness budget — short enough that an upgrade self-heals, long enough to skip the body:
+// every response carries an ETag, so revalidation costs a 304 and nothing else.
+const (
+	assetCache = "public, max-age=60, must-revalidate"
+	pageCache  = "no-cache, must-revalidate"
+)
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeErr(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -473,10 +481,44 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The UI is served from disk and changes while the server runs. Revalidate every time (a 304 is
-	// still cheap: ServeFile answers If-Modified-Since) so a reload always shows the edited file.
-	w.Header().Set("Cache-Control", "no-cache")
-	http.ServeFile(w, r, file)
+	// index.html is the entry point that names every asset, so it is never reused without asking;
+	// that is what makes an edited UI, or an embedded one from a new binary, show up on navigation.
+	s.serveFile(w, r, file, strings.HasSuffix(file, "index.html"))
+}
+
+// serveFile writes one static file with an ETag. The identity is size plus modification time, which
+// is exactly what changes when a file on disk is edited; an embed.FS can hand over a content hash
+// here instead and nothing else about the protocol changes.
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, path string, isPage bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	etag := fmt.Sprintf(`"%x-%x"`, st.ModTime().Unix(), st.Size())
+	w.Header().Set("ETag", etag)
+	if isPage {
+		w.Header().Set("Cache-Control", pageCache)
+	} else {
+		w.Header().Set("Cache-Control", assetCache)
+	}
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		for _, want := range strings.Split(match, ",") {
+			if strings.TrimPrefix(strings.TrimSpace(want), "W/") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+	}
+	// ServeContent adds Last-Modified, honours If-Modified-Since and Range, and sets the content type
+	// from the extension — a module script has to arrive as JavaScript to be imported.
+	http.ServeContent(w, r, filepath.Base(path), st.ModTime(), f)
 }
 
 // logWrap logs one line per request.
