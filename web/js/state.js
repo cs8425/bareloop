@@ -15,6 +15,7 @@ export const state = {
   attachments: [], // {name, mimeType, data}
   pending: [],
   status: null,
+  pathIds: [], // ids on the current path, root -> tip ([] until a session has loaded)
   seq: 0,
   transport: 'none',
   es: null,

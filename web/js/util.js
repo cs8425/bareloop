@@ -53,7 +53,7 @@ export const numId = (id) => {
 export const sortByNum = (list) => list.slice().sort((a, b) => numId(a.id) - numId(b.id));
 
 // pathOf walks parents from the tip and returns the ids that are actually sent: everything else is
-// history on another branch and is drawn dimmed.
+// history on another branch, and with no tree view to return to it the transcript does not draw it.
 export function pathOf(entries, tip) {
   const byId = new Map(entries.map((e) => [e.id, e]));
   const set = new Set();

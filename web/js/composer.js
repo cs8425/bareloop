@@ -28,6 +28,26 @@ function renderAttachments() {
     wrap.append(img, x);
     box.appendChild(wrap);
   });
+  syncComposer();
+}
+
+// syncComposer is the single place that decides what the composer's right-hand slot offers:
+// idle -> send (dim until there is a draft), running -> the red square and the bolt.
+//
+// It runs on every keystroke, on every attachment change and on every status frame, so the glyph is
+// never a guess about the server: `draft()` maps base64 blobs and is far too expensive to call here,
+// which is why the emptiness test looks at the textarea and the attachment list directly.
+export function syncComposer(running) {
+  const r = running ?? state.status?.phase === 'running';
+  const has = !!input().value.trim() || !!state.attachments.length;
+  const send = $('#btn-send');
+  const stop = $('#btn-stop');
+  const interrupt = $('#btn-interrupt');
+  send.classList.toggle('hidden', r);
+  stop.classList.toggle('hidden', !r);
+  interrupt.classList.toggle('hidden', !r);
+  send.disabled = !has || !state.id;
+  interrupt.disabled = !has || !state.id;
 }
 
 // addFiles reads images to base64: the log stores base64, so an image attached here is replayable
@@ -93,6 +113,8 @@ export function wireComposer() {
     addFiles(e.target.files);
     e.target.value = '';
   };
+  input().addEventListener('input', () => syncComposer());
+  syncComposer(false);
   // Dropping an image anywhere in the composer is the same as pasting one; dragover has to be
   // cancelled or the browser navigates to the file instead.
   const composer = $('#composer');

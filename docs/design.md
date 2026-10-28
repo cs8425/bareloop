@@ -221,8 +221,16 @@ each of them was a bug first.
 
 - **Order comes from entry ids.** Entries are stored in a map and served by `GET /api/session/{id}`; the
   handler sorts them by their numeric id and the UI sorts again, so a reload renders the same sequence
-  that was produced. `status.tip` marks the current path - entries that are not on it are shown dimmed,
-  because they are not sent.
+  that was produced. `status.tip` marks the current path, and **only the path is drawn**: an entry that is
+  not on it belongs to a branch nobody can switch to yet, so it is not shown at all (it stays in the log).
+  Sorting by id means two branches would **interleave** in one vertical list anyway (an id is creation
+  order, not depth), which is the real reason there is no branch switcher: a tree cannot be drawn honestly
+  by appending to a list.
+- **The action row is copy / raw / run again / delete** - on a compaction entry, "run again" reads "re-make
+  this summary" (see *Running the loop again*). `const BRANCH_UI = false` in
+  `web/js/transcript.js` removes the tip-move button (see *Deferred*); `RESTART_UI = true` keeps "run again
+  from here", which is a recovery tool rather than a way of browsing. There is no edit button: `entry/patch`
+  rewrites shared history in place, which is not a thing to hide behind a pencil.
 - **Caching is bounded, and cheap to revalidate.** `index.html` - the file that names every asset - is
   `Cache-Control: no-cache, must-revalidate`, so navigating to the UI always asks the server. Everything
   else is `public, max-age=60, must-revalidate`. Both carry an `ETag`, so a revalidation costs a 304 and
@@ -240,6 +248,46 @@ session or by Escape) and the side panel becomes a bottom sheet. Heights use `dv
 live - behind the browser's own bar; inputs are never smaller than 16px because iOS Safari zooms the page
 otherwise; and padding adds `env(safe-area-inset-*)` so the notch and the gesture bar do not cover
 anything.
+
+### Running the loop again
+
+`POST /api/session/{id}/resume` starts a run from the current tip and appends nothing. It exists because the
+loop can stop half way - `Stop()` keeps the partial answer, a provider error ends the run, a forced
+compaction ends it with "the context was compacted, please send again" - and the answer to all three is "ask
+again with what you have". `Send` cannot do this job: it always appends a user entry and refuses an empty
+message, so using it would write a duplicate question just to restart a turn.
+
+Only three kinds of entry may end a request, so only those are offered as a break point: a **user message**
+(answer it again), a **tool result** (the model thinks with the result it already has; the tool is *not*
+re-run), and a **compaction summary** - which is not a request but the record of one, so its button does
+something else, described below. A finished assistant answer is not offered, because "continue from your own
+last answer" is a different question and answering it silently would be presumptuous. A half-finished or
+failed answer is not a boundary either - its *parent* is - so its button moves the tip to the parent and the
+truncated text is what gets given up.
+
+Giving that up is what the confirm box is for: it counts the entries after the chosen one and says plainly
+that they stay in the log but cannot be reached from the UI. When the tip already sits at the break point
+with nothing after it - the ordinary case right after an abort - there is nothing to confirm and the run
+just starts.
+
+**A summary is re-made, not re-asked.** "Run again" on a compaction entry moves the path to the summary's
+*parent* and asks for a summary of it (`POST /compact` with no instruction - the trigger writes the prompt it
+would write today). That is precisely the state the compaction ran in: the path is the one it saw, and this
+summary no longer applies to it. So the second summary is made from the same messages, and the old one plus
+everything that had followed it leave the path.
+
+Whether the run then continues follows the rule the loop already lives by - **what was running keeps running,
+what had stopped stays stopped** - and the entry's label is the only trace of which it was. `in_loop` is
+written before sending, inside a run (it is also what the forced compaction after a provider refused the
+payload writes), so that one resumes; `end_of_turn` follows a finished turn and `manual` is the button pressed
+while idle, so those two only replace the summary and leave the session stopped - starting a turn nobody asked
+for is worse than a summary you have to follow up yourself. A summary that is still the tip has nothing to
+redo: there the same label decides whether the button exists at all, and resuming an `in_loop` one is the
+"the context was compacted, please send again" moment.
+
+`Resume` deliberately does not call `needsRun()`: that function also drives the loop's own
+auto-continuation, where a compaction boundary must say no (otherwise a compaction with nothing new pending
+would immediately re-ask). For a resume the compaction boundary is the whole point.
 
 ### Embedding the UI
 
@@ -290,6 +338,47 @@ model output cannot inject script. It exports `{ register, render, renderTo, esc
 Hooks run in registration order; the first `code` hook that returns a string wins. A `script` tag of
 `type="module"` is deferred, so an extension module placed before `app.js` still sees the renderer; a
 classic inline script would run too early.
+
+## Deferred
+
+Built, half-built, and deliberately not built - with what each one is waiting for.
+
+**Branching UI.** The log is a tree and `POST /api/session/{id}/tip` moves the path tip; the transcript has
+no button for it - "branch here" sits in `web/js/transcript.js` behind `const BRANCH_UI = false`, and
+flipping that constant is the whole re-enable, handler included. It is off because one list in id order
+cannot show two branches side by side (they interleave), so a button that moved the tip would leave you
+typing at the end of a path you cannot see, cannot name, and cannot get back from. "Run again from here"
+stays available: it is not browsing, it is how a stalled loop is picked up, and it says which entries it is
+giving up before it does it. What a tree view has to provide first:
+
+- every child of an entry reachable from that entry (a fork you cannot find is not a feature, it is an
+  orphaned subtree);
+- which node is the tip, always visible, one click to move it there;
+- what would be sent from that node before you move - `pathOf` already computes it client-side;
+- and the paths that "run again from here" gives up have to come back into view: today they are not drawn at
+  all, which is honest only while nothing can switch to them.
+
+Off-path entries are not drawn at all, and `POST /tip` still works for anyone who wants it by hand: the
+storage model did not change, and a log written by anything else may already branch.
+
+**`entry/patch` does not branch.** `PatchEntry` rewrites one entry and replay keeps its `ParentID`
+(`patches never move a node`, `internal/store/store.go`), so editing an ancestor changes the shared history
+of every path through it. That is either exactly what you meant or quietly destructive, and the alternative
+is a new entry with the same parent plus a tip move - a real fork where the old text survives on the old
+path. Unresolved because "edit" is not in the UI either; the API table now documents the real behaviour.
+
+**Not pre-splitting a request that will not fit.** On a freshly started server nothing has been measured
+yet, so the first oversized request is *refused with a 400*, probed, and answered by a forced compaction
+that asks you to send again. Guessing the window from config to avoid that one refusal was considered and
+rejected: an accepted refusal is honest, a guessed window is a new wrong number to maintain. Revisit only if
+the provider starts reporting its limit (then probe it at startup instead).
+
+**`map-reduce` summary mode** is accepted by config and runs the serial chain, saying so in the log
+(`internal/compact/iterative.go`). It is the answer to a region so large that serial latency dominates: the
+parts are independent, so they can be summarised in parallel and merged.
+
+**`CompactResult` does not report `summaryMode`.** The mode that actually ran is recorded on the compaction
+entry - which is what replay and the inspector read - but the result of a manual compact still omits it.
 
 ## Go version
 

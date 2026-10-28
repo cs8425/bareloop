@@ -12,8 +12,9 @@ endpoint.
 - **Go, standard library only**, plus `github.com/coder/websocket` for the browser transport. No
   framework, no build step for the UI.
 - **No database.** One append-only JSONL log per session, where every entry is a node of a conversation
-  tree and a `tip` record says which node is current. Editing a message branches the tree; moving the tip
-  is time travel; nothing is ever rewritten in place.
+  tree and a `tip` record says which node is current. Moving the tip is time travel: the file is only ever
+  appended to, so an abandoned path stays on disk. It is a tree, but the UI shows one path at a time: what
+  is not on the path is not drawn, and there is no branch switcher yet (`docs/design.md`, Deferred).
 - **The loop runs on the server**, not in the browser, so a run survives a page reload and survives
   closing the tab.
 - **Nothing is hidden from you.** `inspect` shows the token count of every message and the exact numbers
@@ -34,7 +35,7 @@ endpoint.
 | read this | for |
 |---|---|
 | this file | what it is, how to build it, how to use it |
-| [`docs/design.md`](docs/design.md) | how it works and why: the context window, compaction invariants, prompt cache, retries, MCP eras, the UI's shape, the markdown renderer's hooks |
+| [`docs/design.md`](docs/design.md) | how it works and why: the context window, compaction invariants, prompt cache, retries, MCP eras, the UI's shape, the markdown renderer's hooks, and what is deliberately deferred |
 | [`notes/compact-threshold-mode.en.md`](notes/compact-threshold-mode.en.md) | the compaction spec (the authority when the two docs disagree) |
 | [`config.example.json`](config.example.json) | every config field, documented inline |
 
@@ -80,9 +81,21 @@ unpins the view from the streaming output, and `↓ latest` takes you back.
 
 Per session you can:
 
-- **edit a message** (the tree branches from there) or **delete a leaf**; entries that are not on the
-  current path are dimmed, because they are not sent;
-- **move the tip** to an earlier entry - time travel, with everything after it still on disk;
+- **copy a message**, **see its raw text**, or **delete an entry** (its children are re-attached to its
+  parent);
+- **run again from any legal break point** - a user message or a tool result. That
+  moves the path to that entry and continues the loop **without appending anything**: the tool result that
+  already arrived is reused, not redone. This is what to press when a run died half way (output stopped
+  mid-reasoning, a tool result with no answer after it, "the context was compacted, please send again").
+  Everything that followed leaves the path - the transcript draws the path only, and the confirm box counts
+  what you are giving up; it stays in the log either way;
+- **re-make a compaction summary** - the same button on a summary entry means "make this summary again from
+  the messages before it": the path moves back to where the summary was made (so the messages it sees are
+  the ones it saw then) and a fresh summary is asked for with the prompt this trigger writes today. The old
+  summary and everything after it leave the path. The run continues afterwards **only** if that summary had
+  been written in the middle of a run (`in_loop`, which is also what the forced compaction after a provider
+  refused the payload writes); an `end_of_turn` or a manual one replaces the summary and leaves the session
+  stopped - what had stopped stays stopped;
 - **compact now**, optionally with an instruction ("keep every file path mentioned"), even below the
   threshold; if the summary comes back too large you get the three-option gate (accept / retry / skip);
 - **answer a tool's input request** in a dialog, for MCP servers that ask mid-call;
@@ -180,10 +193,11 @@ otherwise the model answers in whatever it prefers
 | POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now or queue |
 | POST | `/api/session/{id}/interrupt` | abort the current generation and send this message instead |
 | POST | `/api/session/{id}/stop` | abort the current run, keep what was produced |
+| POST | `/api/session/{id}/resume` | continue from the current tip without appending anything; the path must end on a user message, a tool result or a compaction summary |
 | POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold |
 | POST | `/api/session/{id}/gate` | `{id, answer}` - `accept` / `retry` / `skip` for an oversized summary |
 | POST | `/api/session/{id}/elicit` | `{id, behavior, content}` - answer a tool's input request |
-| POST | `/api/session/{id}/entry/patch` | `{id, content}` - edit a message (branches automatically) |
+| POST | `/api/session/{id}/entry/patch` | `{id, content}` - rewrite one entry's content **in place**: every path through it changes too, and it does not branch |
 | POST | `/api/session/{id}/entry/delete` | `{id}` - delete a leaf or make an interior entry synthetic |
 | POST | `/api/session/{id}/tip` | `{id}` - move the tip (time travel) |
 | POST | `/api/session/{id}/reload` | re-read the log from disk |
@@ -199,7 +213,7 @@ Text frames, JSON. The server sends one object per frame: `{type, session, seq, 
 because images travel as base64 inside one message.
 
 Commands a browser may send: `ping`, `subscribe` (`{session: "a,b"}`, empty means all), `snapshot`, `send`,
-`interrupt`, `stop`, `compact`, `gate`, `elicit`, `inspect`, `status`, `pending`, `entryPatch`,
+`interrupt`, `stop`, `resume`, `compact`, `gate`, `elicit`, `inspect`, `status`, `pending`, `entryPatch`,
 `entryDelete`, `tip`, `name`. Every action also exists as REST, which is what the bundled UI uses - so a
 button never waits on the event transport, and if the websocket drops the UI falls back to SSE and then to
 a 1.5 s poll.

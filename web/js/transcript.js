@@ -5,9 +5,67 @@ import md from './md.js';
 import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName } from './util.js';
 import { state } from './state.js';
 import { call } from './api.js';
-import { confirmBox } from './ui.js';
-import { scrollDown } from './scroll.js';
+import { confirmBox, note } from './ui.js';
+import { markPinned, scrollDown } from './scroll.js';
 import { emit, EV_REFRESH } from './bus.js';
+import { icon, swapIcon } from './icons.js';
+
+// Branching is switched off in the UI, and only in the UI. POST /tip still works and the log still holds a
+// tree — what is gone is the button that moves you onto another branch. Without a tree view there is no way
+// to see which branches exist or to get back to one, and a button that quietly creates one is a trap: you
+// would be typing at the end of a path you cannot find again. The transcript therefore draws the current
+// path only. Re-enabling means the tree UI, not just this constant (docs/design.md, "Deferred").
+const BRANCH_UI = false; // "branch here": a tip move with nothing to run
+
+// Restart stays on, because it is not a way of browsing: it is how a run that stopped half way through the
+// agent loop gets picked up again — a tool result that arrived with no answer after it, an output that died
+// mid-reasoning. It moves the path to the last legal boundary and runs, appending nothing of its own.
+const RESTART_UI = true; // "run again from here": tip move + POST /resume
+
+// resumeFrom says whether a run can be picked up again at this entry, and what that would mean, in words.
+// A request may only end on a user message, a tool result or a compaction summary; a half-finished or
+// failed answer is not such a boundary — its parent is — which is exactly the case this exists for: the
+// answer stopped mid-reasoning, so run again from before it. A finished answer is not offered, because
+// "continue on from your own last answer" is a different and much vaguer question (say that in the box).
+//
+// A compaction entry is a do-over of another kind: it is not a request, it is the result of one. Running it
+// again therefore means making that summary again from the messages that produced it - the path moves back
+// to the summary's parent (with the summary off the path the conversation is exactly what it was when the
+// compaction ran) and a fresh summary is asked for with whatever the compaction would use today. What had
+// followed the old summary leaves the path. Then the rule is the one the loop already follows: what was
+// running keeps running, what had stopped stays stopped - a summary written in the middle of a run has a run
+// to carry on, one written after the model had finished its turn, or by hand while idle, has nothing waiting
+// and must not start a turn nobody asked for. A summary that is still the end of the path has nothing to
+// redo, so there the same distinction only decides whether to ask with it at all (a forced compaction ends a
+// run with "the context was compacted, please send again" - that one is waiting).
+
+// The trigger that wrote a summary is kept in its label, and it is the only trace of whether a run was in
+// progress: "in_loop" is written before sending, inside a run - including the forced compaction after a
+// provider refused the payload - while "end_of_turn" follows a finished turn and "manual" is the button.
+const midLoop = (e) => (e.label || '').includes('in_loop');
+
+function resumeFrom(e) {
+  if (e.kind === 'user') return { anchor: e.id, why: 'ask this message again' };
+  if (e.kind === 'tool') return { anchor: e.id, why: 'send this tool result again and let the model think' };
+  if (e.kind === 'compaction') {
+    if (!e.parentId) return { anchor: '', why: '' };
+    if (e.id === state.status?.tip) {
+      return midLoop(e) ? { anchor: e.id, why: 'ask again with this summary' } : { anchor: '', why: '' };
+    }
+    return {
+      mode: 'recompact',
+      anchor: e.parentId,
+      why: midLoop(e)
+        ? 'make this summary again from the messages before it and let the run continue'
+        : 'make this summary again from the messages before it',
+    };
+  }
+  const broken = e.interrupted || e.finishReason === 'error' || (e.label || '').includes('error');
+  if (e.kind === 'assistant' && broken && e.parentId) {
+    return { anchor: e.parentId, why: 'this answer stopped half way: run again from before it' };
+  }
+  return { anchor: '', why: '' };
+}
 
 export function entryNode(e) {
   let node = state.entries.get(e.id);
@@ -37,23 +95,7 @@ export function entryNode(e) {
   if (e.ts) head.appendChild(el('span', 'eid', new Date(e.ts).toLocaleTimeString()));
   const tools = el('span', 'eid');
   tools.style.marginLeft = 'auto';
-  const del = el('button', 'ghost', 'delete');
-  del.onclick = async () => {
-    const yes = await confirmBox(`delete ${e.id}?`, {
-      title: 'delete entry',
-      detail: 'The entry is marked deleted in the log and its children are re-parented — history around it survives.',
-      ok: 'delete',
-      danger: true,
-    });
-    if (!yes) return;
-    await call('/entry/delete', { id: e.id });
-  };
-  const fork = el('button', 'ghost', 'branch here');
-  fork.onclick = async () => {
-    await call('/tip', { id: e.id });
-    emit(EV_REFRESH);
-  };
-  tools.append(fork, del);
+  tools.appendChild(actions(e, node));
   head.appendChild(tools);
   node.appendChild(head);
 
@@ -66,6 +108,168 @@ export function entryNode(e) {
   state.entries.set(e.id, node);
   logEl().appendChild(node);
   return node;
+}
+
+// ---------------------------------------------------------------- one message's actions
+//
+// Icons, with the words in their titles. This row is repeated on every message in the transcript, so
+// spelled-out buttons would be the loudest thing on the screen; the accessible name still says what the
+// glyph means, because "the square that stops it" has to be legible before it has ever been clicked.
+function actions(e, node) {
+  const row = el('span', 'acts');
+  const act = (name, title, fn, when = true) => {
+    if (!when) return null;
+    const b = el('button', 'act');
+    b.appendChild(icon(name));
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      fn(b);
+    };
+    row.appendChild(b);
+    return b;
+  };
+
+  act('copy', 'copy this message', async (b) => {
+    const ok = await copyText(e.content || '');
+    if (ok) swapIcon(b, 'check', 'copy');
+    else note('nothing was copied — the browser refused clipboard access');
+  }, !!e.content);
+
+  act('raw', 'view the raw text of this message', (b) => toggleRaw(e, node, b), true);
+
+  act(
+    'branch',
+    'branch here — make this entry the end of the path (the entries after it survive, they are just not sent)',
+    async () => {
+      await call('/tip', { id: e.id });
+      emit(EV_REFRESH);
+    },
+    BRANCH_UI, // off until there is a tree view to come back to
+  );
+
+  // Run again from here: the path moves to the last entry that may legally end a request and the loop
+  // starts without appending anything — the tool result that already arrived is reused rather than redone,
+  // and no duplicate user message is written. This is the recovery for a loop that stopped half way.
+  const here = RESTART_UI && state.status?.phase !== 'running' ? resumeFrom(e) : { anchor: '', why: '' };
+  act(
+    'restart',
+    here.anchor
+      ? here.mode === 'recompact'
+        ? `re-make the summary in ${e.id} — ${here.why}`
+        : `run again from ${here.anchor} — ${here.why}`
+      : '',
+    async () => {
+      const remake = here.mode === 'recompact';
+      const idx = state.pathIds.indexOf(here.anchor);
+      const after = idx >= 0 ? state.pathIds.slice(idx + 1) : null; // null: this path has not been drawn yet
+      if (after === null || after.length || here.anchor !== state.status?.tip) {
+        const yes = await confirmBox(remake ? `re-make the summary in ${e.id}?` : `run again from ${here.anchor}?`, {
+          title: remake ? 're-make this summary' : 'run again from here',
+          detail:
+            (remake
+              ? `The messages before it are summarised again${midLoop(e) ? ', and the run continues from the new summary' : ''}. `
+              : '') +
+            (after && !after.length
+              ? `The path already ends at ${here.anchor}, so nothing is given up.`
+              : after
+                ? `${after.length} ${after.length === 1 ? 'entry' : 'entries'} after ${here.anchor} (${after[0]}…${after.at(-1)}) leave the path and will not be sent. They stay in the log; there is no way back to them from here.`
+                : `The path moves to ${here.anchor}; whatever follows it today is given up (it stays in the log).`),
+          ok: remake ? 're-make it' : 'run again',
+          danger: !!(after === null || (after && after.length)),
+        });
+        if (!yes) return;
+      }
+      markPinned(); // following the new answer is the whole point of asking again
+      try {
+        if (here.anchor !== state.status?.tip) await call('/tip', { id: here.anchor });
+        if (remake) {
+          // One compaction request, then - only if this summary was written in the middle of a run - the run
+          // it had been standing in the way of. The old entry's prompt is not carried over: the same trigger
+          // is asked for the summary the same way it would be today. What had stopped stays stopped.
+          await call('/compact', {});
+          if (midLoop(e)) await call('/resume', {});
+        } else {
+          await call('/resume', {});
+        }
+      } finally {
+        emit(EV_REFRESH); // the tip may have moved even when the run refused to start
+      }
+    },
+    !!here.anchor,
+  );
+
+  act(
+    'trash',
+    'delete this entry',
+    async () => {
+      const yes = await confirmBox(`delete ${e.id}?`, {
+        title: 'delete entry',
+        detail: 'The entry is marked deleted in the log and its children are re-parented — history around it survives.',
+        ok: 'delete',
+        danger: true,
+      });
+      if (!yes) return;
+      await call('/entry/delete', { id: e.id });
+    },
+  );
+
+  return row;
+}
+
+// copyText puts the synchronous path first on purpose. It is not legacy decoration: this UI is normally
+// opened as http://192.168.x.x:8090 (a phone, another box), which is not a secure context, so
+// `navigator.clipboard` simply does not exist there - and where it does exist, its promise can sit
+// unresolved until the browser decides the click was real, which would leave a copy button that never
+// answers. The textarea trick is synchronous, works over plain http, and settles the question at once;
+// the API is the fallback, and it is raced against a timeout so a stalled clipboard reports a failure
+// instead of silence.
+async function copyText(text) {
+  const ta = el('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.top = '-1000px';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  if (ok) return true;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await Promise.race([
+        navigator.clipboard.writeText(text),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timed out')), 800)),
+      ]);
+      return true;
+    }
+  } catch {
+    // Nothing else to try: the caller says so out loud rather than failing quietly.
+  }
+  return false;
+}
+
+// toggleRaw swaps a message between what the model asked for and what the model said: the rendered
+// markdown on one side, the stored text untouched on the other. Raw shows text only - an image is the
+// one thing that cannot be shown as raw without shouting 400 KB of base64 across the screen, and
+// transcript already lists its name and size above the text.
+function toggleRaw(e, node, b) {
+  const body = node.querySelector(':scope > .body');
+  if (!body) return;
+  const on = node.classList.toggle('raw');
+  if (on) {
+    body.textContent = '';
+    body.appendChild(el('pre', 'raw-text', e.content || '(no text in this entry)'));
+  } else {
+    fillBody(node, body, e);
+  }
+  b.title = on ? 'show the rendered message again' : 'view the raw text of this message';
 }
 
 function fillBody(node, body, e) {

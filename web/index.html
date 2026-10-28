@@ -13,7 +13,7 @@
       <aside id="side">
         <div class="side-head">
           <b>bareloop</b>
-          <button id="new-session" type="button" title="new session">+</button>
+          <button id="new-session" type="button" class="icon-btn" title="new session" aria-label="new session"><span data-icon="plus"></span></button>
         </div>
         <ul id="session-list"></ul>
         <div class="side-foot">
@@ -24,25 +24,25 @@
 
       <main id="main">
         <header id="topbar">
-          <button id="menu" type="button" class="ghost" title="sessions" aria-label="open the session list">☰</button>
+          <button id="menu" type="button" class="ghost icon-btn" title="sessions" aria-label="open the session list"><span data-icon="menu"></span></button>
           <input id="session-name" class="ghost-input" spellcheck="false" title="rename this session" />
           <span id="tools" class="badge" title="MCP tools"></span>
           <span class="spacer"></span>
-          <button id="btn-inspect" type="button" title="what would be sent next">inspect</button>
-          <button id="btn-settings" type="button" title="model, MCP servers, compaction">settings</button>
+          <button id="btn-inspect" type="button" class="icon-btn" title="what would be sent next" aria-label="inspect what would be sent"><span data-icon="inspect"></span></button>
+          <button id="btn-settings" type="button" class="icon-btn" title="model, MCP servers, compaction" aria-label="session settings"><span data-icon="settings"></span></button>
         </header>
 
         <div id="statusbar">
           <span id="phase" class="badge">idle</span>
           <span id="turn"></span>
           <span class="ctxbar"><span id="ctx-fill"></span><span id="ctx-text"></span></span>
-          <button id="btn-compact" type="button" class="warn" title="compact now">compact</button>
+          <button id="btn-compact" type="button" class="warn" title="compact now: fold the oldest turns into a summary"><span data-icon="compact"></span> compact</button>
         </div>
 
         <div id="log-wrap">
           <div id="log"></div>
           <button id="jump" type="button" class="hidden" title="the transcript stopped following you — click to jump to the newest message">
-            ↓ latest
+            <span data-icon="down"></span> latest
           </button>
         </div>
         <div id="requests"></div>
@@ -57,11 +57,17 @@
           <div class="composer-row">
             <textarea id="input" rows="3" spellcheck="false" placeholder="message — Enter sends, Shift+Enter adds a line, paste or drop images"></textarea>
             <div class="composer-buttons">
-              <button id="btn-send" type="button" class="primary">send</button>
-              <button id="btn-interrupt" type="button" title="stop now, keep what was produced, send this instead">interrupt</button>
-              <button id="btn-stop" type="button" class="danger hidden" title="stop the run">stop</button>
-              <label class="file-btn" title="attach images"
-                >📎<input id="files" type="file" accept="image/*" multiple hidden
+              <!-- One glyph does two jobs, the way llama.cpp's own UI does it: send when the loop is
+                   idle, a red square that stops the run while it is answering. Enter follows the same
+                   rule, so the button never promises something the keyboard does not do.
+                   The accessible name says what the icon means - the icon alone would only be legible
+                   once it has been clicked once, and a stop button has to be legible before that. -->
+              <button id="btn-interrupt" type="button" class="icon-btn hidden" title="interrupt this run and send this message instead"><span data-icon="interrupt"></span></button>
+              <button id="btn-send" type="button" class="send-btn" title="send (Enter)" aria-label="send"><span data-icon="send"></span></button>
+              <button id="btn-stop" type="button" class="stop-btn hidden" title="stop the run" aria-label="stop"><span data-icon="stop"></span></button>
+              <label class="file-btn icon-btn" title="attach images"
+                ><span data-icon="plus"></span
+                ><input id="files" type="file" accept="image/*" multiple hidden
               /></label>
             </div>
           </div>
@@ -71,7 +77,7 @@
       <aside id="panel" class="hidden">
         <div class="side-head">
           <b id="panel-title">inspect</b>
-          <button id="panel-close" type="button">×</button>
+          <button id="panel-close" type="button" class="icon-btn" title="close" aria-label="close the panel"><span data-icon="close"></span></button>
         </div>
         <div id="panel-body"></div>
       </aside>
@@ -102,7 +108,7 @@
           An id is a directory name: lowercase letters, digits and <code>. _ -</code> only. One is
           suggested when this dialog opens - change it freely, or clear it and a new one is made up
           when you press create.
-          <button type="button" class="ghost" id="new-id-again" title="suggest a different id">↻ another id</button>
+          <button type="button" class="ghost inline-icon" id="new-id-again" title="suggest a different id"><span data-icon="restart"></span> another id</button>
         </p>
         <p class="hint">
           The model, MCP servers, system prompt and compaction parameters are inherited from the

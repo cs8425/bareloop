@@ -8,6 +8,7 @@ import { confirmBox, note } from './ui.js';
 import { resetScroll, scrollDown } from './scroll.js';
 import { closeNav } from './nav.js';
 import { entryNode } from './transcript.js';
+import { syncComposer } from './composer.js';
 
 // refresh re-reads the session and rebuilds the transcript. Streams that are still running survive:
 // their nodes are re-appended below the committed entries, so a refresh in the middle of an answer
@@ -22,14 +23,13 @@ export async function refresh() {
   state.entries.clear();
   state.tools.clear();
   const entries = sortByNum(data.entries || []);
+  // The path is what gets sent, and it is the only thing the transcript shows. An entry that is not on it
+  // belongs to another branch: with no tree view there is no way back to that branch, so drawing it would
+  // put history on screen that leads nowhere and nobody can pick up again. It stays in the log.
   const onPath = pathOf(entries, data.status?.tip);
+  state.pathIds = [...onPath].reverse(); // pathOf walks tip -> root; the restart confirm wants root -> tip
   for (const e of entries) {
-    const node = entryNode(e);
-    if (!onPath.has(e.id)) {
-      // Another branch: stored, visible, but not part of what gets sent.
-      node.style.opacity = 0.45;
-      node.title = 'not on the current path (branch)';
-    }
+    if (onPath.has(e.id)) entryNode(e);
   }
   for (const [, s] of state.streams) logEl().appendChild(s.node);
   state.status = data.status;
@@ -96,9 +96,10 @@ export function renderStatus(st) {
   const phase = $('#phase');
   phase.textContent = st.phase;
   phase.className = 'badge ' + st.phase;
-  // The stop button replaces the compact button while a run is live: one control in that slot, and
-  // stopping is the only thing worth reaching for mid-run.
-  $('#btn-stop').classList.toggle('hidden', st.phase !== 'running');
+  // The composer's right-hand slot belongs to the phase: send while idle, the red square and the bolt
+  // while a run is live. One owner for that decision (composer.js), because the glyph and the Enter key
+  // have to agree - Enter interrupts mid-run, so a send arrow sitting there would be a lie.
+  syncComposer(st.phase === 'running');
   const servers = st.servers || [];
   const failed = servers.filter((s) => s.error || !s.connected);
   const tools = servers.reduce((n, s) => n + (s.tools || 0), 0);

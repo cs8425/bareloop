@@ -213,6 +213,8 @@ func (c *wsClient) handle(ctx context.Context, cmd command) {
 		err = sess.Interrupt(cmd.message())
 	case "stop":
 		err = sess.Stop()
+	case "resume":
+		err = sess.Resume(ctx)
 	case "compact":
 		res, cerr := sess.CompactNow(ctx, cmd.textOrBody("instruction"))
 		c.reply(cmd.Req, res, cerr)

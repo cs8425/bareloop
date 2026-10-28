@@ -1,5 +1,5 @@
-// A five-function event bus, used for exactly one thing: letting a leaf module (a tool card's
-// "branch here" button) ask for work that lives in a higher module (re-read the session) without
+// A five-function event bus, used for exactly one thing: letting a leaf module (the gate card's "ask
+// again" button) ask for work that lives in a higher module (re-read the session) without
 // importing it and creating a cycle. Anything that needs more than this should import directly.
 
 const handlers = new Map(); // event -> Set<fn>

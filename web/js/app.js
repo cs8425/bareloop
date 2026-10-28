@@ -34,6 +34,7 @@ import { hidePanel, wirePanel } from './panel.js';
 import { loadSessions, selectSession, refresh } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
+import { bootIcons } from './icons.js';
 
 // compactNow asks for an extra instruction first: "summarise this" and "summarise this, keep every
 // file name" produce very different summaries, and a compaction is only cheap to redo before it is
@@ -155,6 +156,9 @@ function wireKeys() {
 }
 
 function wire() {
+  // Icons first: the markup carries `data-icon` placeholders, and every button is measured and styled
+  // around the glyph that replaces them.
+  bootIcons();
   wireScroll();
   wireNav();
   wireComposer();

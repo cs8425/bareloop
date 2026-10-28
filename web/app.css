@@ -52,6 +52,66 @@ button.warn { background: #4a3a1c; border-color: #6d5626; }
 button.danger { background: #4d2320; border-color: #7a3630; }
 button.ghost { background: transparent; }
 button:disabled { opacity: .45; cursor: default; }
+button:focus-visible,
+label.file-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: no-preference) {
+  button,
+  .file-btn { transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease; }
+}
+
+/* ------------------------------------------------------------------ icons
+   One glyph language for the whole UI (web/js/icons.js, Lucide geometry on a 24x24 box). Two rules are
+   load-bearing: every button is sized around the svg so nothing reflows when a `data-icon` placeholder
+   becomes the real thing, and nothing is drawn below 14px - at 12px an up arrow and a down arrow are the
+   same blob, and this UI asks you to tell those apart. */
+.ico { width: 15px; height: 15px; flex: 0 0 auto; }
+button.icon-btn,
+label.icon-btn { display: inline-grid; place-items: center; width: 30px; height: 28px; padding: 0; }
+button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
+#btn-compact { display: inline-flex; align-items: center; gap: 6px; }
+#jump { display: inline-flex; align-items: center; gap: 6px; }
+
+/* The composer's primary slot: send when idle, the red square while it answers, always the same pixels.
+   A thumb that reached for "stop" mid-run must not find the thing that sends another message. */
+.composer-buttons { display: grid; gap: 5px; justify-items: end; align-content: end; }
+.composer-buttons .file-btn { grid-row: 1; }
+#btn-interrupt { grid-row: 2; }
+#btn-send,
+#btn-stop { grid-row: 3; width: 40px; height: 40px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
+#btn-send .ico,
+#btn-stop .ico { width: 17px; height: 17px; }
+#btn-send { background: var(--bg3); border-color: var(--border); color: var(--muted); }
+#btn-send:not(:disabled) { background: #234876; border-color: #35639f; color: #eaf2ff; }
+#btn-send .ico { stroke-width: 2.4; }
+#btn-stop { background: rgba(226, 104, 95, 0.14); border-color: #7a3630; color: var(--err); box-shadow: 0 0 0 4px rgba(226, 104, 95, 0.1); }
+#btn-stop:hover { background: rgba(226, 104, 95, 0.26); border-color: var(--err); }
+#btn-interrupt:not(:disabled) { color: var(--warn); border-color: #6d5626; }
+/* ids outrank the .hidden utility, exactly as with #scrim below: without this the button that should be
+   gone stays on screen and the composer shows send and stop at the same time. */
+#btn-send.hidden,
+#btn-stop.hidden,
+#btn-interrupt.hidden { display: none; }
+
+/* Per-message actions: present, but quiet until the pointer is on the message. They repeat on every
+   entry, so fully-loud buttons would out-shout the text you came to read. */
+.msg > header .acts { display: flex; gap: 1px; margin-left: 2px; }
+.msg .act {
+  display: inline-grid; place-items: center; width: 25px; height: 23px; padding: 0;
+  background: transparent; border: 1px solid transparent; border-radius: 5px; color: var(--muted); opacity: 0.5;
+}
+.msg .act .ico { width: 14px; height: 14px; }
+.msg:hover .act,
+.msg .act:focus-visible,
+.msg .act:hover { opacity: 1; }
+.msg .act:hover { color: var(--fg); background: var(--bg3); border-color: var(--border); }
+.msg .act[aria-label^='delete']:hover { color: var(--err); border-color: #7a3630; }
+.msg.raw > .body { border-left: 2px solid var(--accent); }
+.msg.raw pre.raw-text { margin: 0; font: 12.5px/1.55 var(--mono); color: #cbd5e3; white-space: pre-wrap; word-break: break-word; }
+/* A touchscreen has no hover to un-stick the row with, so hiding it there would hide the only way to
+   copy, view raw or delete anything. */
+@media (hover: none) {
+  .msg .act { opacity: 1; width: 34px; height: 32px; }
+}
 
 #statusbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 12px; flex: 0 0 auto; }
 .badge { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; color: var(--muted); }
@@ -322,9 +382,20 @@ button,
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   }
   .composer-buttons {
+    display: flex;
     flex-direction: row;
     flex-wrap: wrap;
     justify-content: flex-end;
+    align-items: flex-end;
+  }
+  /* 40px is the smallest thing a thumb hits reliably; the message row stays smaller because it is a
+   * dense row of five, not the primary control - and min-height is reset because the block rule above
+   * gives every button 40px, which would stretch those five into a bar taller than the text. */
+  .msg .act {
+    min-height: 0;
+    width: 38px;
+    height: 34px;
+    opacity: 1;
   }
   /* 16px or iOS Safari zooms the whole page into the field and the layout breaks. */
   input,

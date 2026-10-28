@@ -70,6 +70,47 @@ func (s *Session) Interrupt(msg Message) error {
 	return nil
 }
 
+// Resume starts a run from the current tip without appending anything. The path already ends on a
+// boundary that expects an answer - a user message, a tool result, or a compaction summary - so this is
+// how an interrupted run is picked up again: the tool result is already here, ask the model again.
+//
+// It deliberately does not call needsRun(): that function also drives the loop's own auto-continuation,
+// where a compaction boundary must say no. Here a compaction boundary is exactly what you resume from,
+// because the run that compacted the context ends by asking the user to send again - which should not
+// have to be a new message.
+func (s *Session) Resume(ctx context.Context) error {
+	s.mu.Lock()
+	if s.phase != phaseIdle {
+		s.mu.Unlock()
+		return fmt.Errorf("agent: cannot resume while %s", phaseToString(s.phase))
+	}
+	s.mu.Unlock()
+
+	path := s.path()
+	if len(path) == 0 {
+		return errors.New("agent: nothing to resume: the path is empty")
+	}
+	last := path[len(path)-1]
+	switch last.Kind {
+	case ir.KindUser, ir.KindTool, ir.KindCompaction:
+	default:
+		return fmt.Errorf("agent: cannot resume from %s (kind %s): the path must end with a user message, a tool result or a compaction summary",
+			last.ID, last.Kind)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase != phaseIdle {
+		return fmt.Errorf("agent: cannot resume while %s", phaseToString(s.phase))
+	}
+	s.startRunLocked(ctx, 0)
+	if s.phase != phaseRunning {
+		return errors.New("agent: resume did not start a run")
+	}
+	s.logf("resume: continuing from %s (kind %s, %d entries on the path)", last.ID, last.Kind, len(path))
+	return nil
+}
+
 func (s *Session) takeForceMsg() *Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()

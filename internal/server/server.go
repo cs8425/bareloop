@@ -52,6 +52,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/session/{id}/send", s.handleSend)
 	mux.HandleFunc("POST /api/session/{id}/interrupt", s.handleInterrupt)
 	mux.HandleFunc("POST /api/session/{id}/stop", s.handleStop)
+	mux.HandleFunc("POST /api/session/{id}/resume", s.handleResume)
 	mux.HandleFunc("POST /api/session/{id}/compact", s.handleCompact)
 	mux.HandleFunc("POST /api/session/{id}/gate", s.handleGate)
 	mux.HandleFunc("POST /api/session/{id}/elicit", s.handleElicit)
@@ -234,6 +235,21 @@ func (s *Server) handleInterrupt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleResume continues a run from the current tip: no new message is appended, the path already ends
+// on a boundary that expects an answer (a user message, a tool result, a compaction summary). This is
+// what to press when a run was interrupted half way through the loop.
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	if err := sess.Resume(r.Context()); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "status": sess.Status()})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
