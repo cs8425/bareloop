@@ -2,7 +2,7 @@
 // input request. Everything here renders from the events the server sends; none of it decides
 // anything. Refresh requests go out on the bus so this module does not import the session module.
 import md from './md.js';
-import { $, el, fmtN, logEl, pretty, whoName } from './util.js';
+import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName } from './util.js';
 import { state } from './state.js';
 import { call } from './api.js';
 import { confirmBox } from './ui.js';
@@ -12,13 +12,17 @@ import { emit, EV_REFRESH } from './bus.js';
 export function entryNode(e) {
   let node = state.entries.get(e.id);
   if (node) return node;
-  node = el('div', `msg ${e.kind}${e.interrupted ? ' interrupted' : ''}`);
+  // A committed failure (provider error, stream that died halfway) is drawn as a failure: an
+  // assistant message that says "[generation failed: …]" in normal colours looks like an answer.
+  const bad = e.finishReason === 'error' || (e.label || '').includes('error');
+  node = el('div', `msg ${e.kind}${e.interrupted ? ' interrupted' : ''}${bad ? ' error' : ''}`);
   const head = el('header');
   head.appendChild(el('span', 'who', whoName(e)));
   head.appendChild(el('span', 'eid', e.id));
   if (e.model) head.appendChild(el('span', 'eid', e.model));
   if (e.tool) head.appendChild(el('span', 'eid', `${e.server ? e.server + '/' : ''}${e.tool}`));
   if (e.isError) head.appendChild(el('span', 'state-error', 'error'));
+  if (bad && !e.isError) head.appendChild(el('span', 'state-error', 'failed'));
   if (e.interrupted) head.appendChild(el('span', 'state-running', 'interrupted'));
   if (e.usage) {
     const u = e.usage;
@@ -66,14 +70,26 @@ export function entryNode(e) {
 
 function fillBody(node, body, e) {
   body.textContent = '';
+  // Attachments first, in the order they were stored — the same order the assembler puts on the
+  // wire, so what is on screen is what the model was given.
   for (const p of e.parts || []) {
-    if (p.type === 'image' && p.data) {
+    if (p.type === 'image') {
+      if (!p.data) {
+        // No bytes, only a reference: show the reference. A broken image icon says less than a
+        // path does.
+        body.appendChild(el('div', 'attach-path', p.name || '[image with no data in the log]'));
+        continue;
+      }
+      const mime = p.mimeType || 'image/png';
       const img = el('img');
       img.className = 'attach';
-      img.src = `data:${p.mimeType || 'image/png'};base64,${p.data}`;
+      img.src = `data:${mime};base64,${p.data}`;
       img.alt = p.name || 'image';
+      img.title = `${p.name || 'image'} · ${mime} · ~${Math.round((p.data.length * 3) / 4 / 1024)} KB`;
       body.appendChild(img);
+      continue;
     }
+    if (p.text) body.appendChild(el('div', 'part-text', p.text));
   }
   if (e.kind === 'compaction') {
     body.classList.add('compact');
@@ -100,10 +116,10 @@ function fillBody(node, body, e) {
     }
   } else if (e.kind === 'tool') {
     const pre = el('pre');
-    pre.textContent = e.content;
+    pre.textContent = collapseDataUrls(e.content).text;
     body.appendChild(pre);
   } else {
-    body.appendChild(document.createTextNode(e.content));
+    body.appendChild(document.createTextNode(collapseDataUrls(e.content).text));
   }
 }
 
@@ -201,11 +217,13 @@ export function toolCard(callId, label, cls) {
     el: card,
     attached: false,
     setArgs(text) {
-      args.textContent = pretty(text);
+      args.textContent = pretty(collapseDataUrls(text).text);
       args.style.display = 'block';
     },
     setResult(text, isError) {
-      result.textContent = text || '(empty)';
+      // Base64 is never read in a <pre>: an image arrives as an attachment (rendered above the
+      // tool message) and anything else binary is not worth 250 KB of scrolling.
+      result.textContent = collapseDataUrls(text || '(empty)').text;
       result.className = 'result' + (isError ? ' err' : '');
     },
     setLabel(text) {

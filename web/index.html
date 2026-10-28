@@ -118,6 +118,8 @@
           <label>summary tries <input name="maxAttempts" type="number" min="1" max="9" /></label>
           <label class="check"><input name="auto" type="checkbox" /> automatic compaction</label>
           <label class="check"><input name="inLoop" type="checkbox" /> allow compaction between tool calls (T2)</label>
+          <label class="check"><input name="sendReasoning" type="checkbox" /> re-send the reasoning channel</label>
+          <label class="check"><input name="sendImages" type="checkbox" /> send image attachments to the model</label>
         </div>
         <label>system prompt <textarea name="systemPrompt" rows="4" spellcheck="false"></textarea></label>
         <label>
@@ -127,7 +129,9 @@
         <p class="hint">
           An empty API key keeps the stored one. Each session keeps its own log, MCP servers,
           system prompt, context window and compaction parameters. Saving while a run is active is
-          refused; MCP servers reconnect only when their list actually changed.
+          refused; MCP servers reconnect only when their list actually changed. Turning image
+          attachments off sends the model one line about the image instead of its bytes, which is
+          what a text-only server wants.
         </p>
         <menu>
           <button value="cancel" formmethod="dialog" type="submit" class="ghost">cancel</button>

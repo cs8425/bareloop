@@ -76,7 +76,7 @@ session stores its own copy in `data/<id>/config.json`.
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script (see "What is actually sent") |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
-| `defaults.asm` | payload options: `sendReasoning` (**on** by default), `omitToolResultName` (off) |
+| `defaults.asm` | payload options: `sendReasoning` (**on** by default), `sendImages` (**on**), `omitToolResultName` (off) |
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
 | `sessions[]` | optional sessions to create at startup |
 
@@ -109,6 +109,7 @@ keeps its own default:
 | `compact.auto` | absent = off (T1 after a turn) | `true` |
 | `compact.inLoop` | absent = **on** (T2 between turns) | `false` turns it off |
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
+| `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
 
 `defaults` is merged when a session is **created**; afterwards `data/<id>/config.json` is the
 truth for that session and is re-read on restart.
@@ -117,6 +118,31 @@ The context window (`llm.nCtx`) is probed from `/props`, `/model` and `/models` 
 configured (llama.cpp, vLLM, Ollama and LM Studio all publish it under one of
 `n_ctx`, `max_context`, `context_length`, `max_model_len`). When it stays unknown the trigger
 cannot fire and only a manual compaction does something.
+
+### Images
+
+An attached image is stored in the log as base64 and goes on the wire as an `image_url` part with
+the message's own text next to it: an attachment does not replace what you typed, and a tool result
+keeps its text beside its screenshot.
+
+Whether a server can see at all is one request away: llama.cpp's `/props` answers with
+`{"modalities": {"vision": true, …}}`, and `false` there means no projector is loaded. A text-only
+server — a plain GGUF with nothing attached — has to parse the part anyway, and the base64 is charged
+to the context whether anyone looks at it or not. For those,
+`"asm": {"sendImages": false}`: the payload then carries one line instead of the bytes,
+
+    [attached image4.png (image/png, ~184 KB) is in this conversation but its pixels were NOT
+    sent to you: this session sends text only. You cannot see it, so do not describe it and do
+    not guess what it shows — say that you cannot see the image and ask the user …]
+
+which is worded as an instruction because the polite version does not work: a note that only mentions
+that a picture was in the conversation gets answered with an invention. In a real session a model
+produced a confident four-point description of an image it had never received, and its own reasoning
+channel said why — "the prompt says the image was not sent … but since I am a multimodal model, I can
+actually see the image". If `sendImages` is off, the only honest answer is "I cannot see it".
+
+The UI always shows the real image, and an attachment stored as a reference rather than as bytes is
+shown as that reference: a path is more use than a broken image icon.
 
 ### MCP notes
 
@@ -136,7 +162,7 @@ serves legacy server-initiated `elicitation/create` requests).
 (`-web`, default `./web`). Events arrive over a websocket, falling back to SSE and then to a
 1.5 s poll; every action is a REST call, so a button never waits on the event transport.
 
-Two behaviours are worth knowing, because both were bugs once:
+A few behaviours are worth knowing, because each of them was a bug first:
 
 - **Following is opt-out.** The transcript scrolls with the output only while you are at the
   bottom; scrolling up (or wheeling up) unpins immediately and a floating `↓ latest` counts what
@@ -197,6 +223,23 @@ non-ASCII string in the Go code or the UI), so the model answers in whatever it 
 prefer unless the system prompt says otherwise — which is how a Traditional Chinese question
 comes back in Simplified. `defaults.systemPrompt` in `config.example.json` pins both: same
 language, same script, no unrequested switching.
+
+### When a request fails
+
+A provider error is retried at most twice, and only where a retry can plausibly help: a transport
+failure (the request never got an answer), 429, and the 5xx family. A 400/401/403/413/422 is an
+answer about the request itself and will be identical forever, so it is not retried at all.
+
+Either way, **the turn ends with an entry**. If nothing ever came back, the loop commits an assistant
+message that says so —
+
+    [generation failed: llm: 500 Internal Server Error: {"error": …}]
+
+— and the UI draws it as a failure rather than as an answer. That commit is not decoration: the loop
+owes an answer exactly while the path ends with a user or a tool message, so committing nothing
+leaves it owing one forever. A provider that answers 500 reliably then produces a storm — one
+identical request per round, each with a payload line and an error event, forever. As the belt to
+those braces, a round that committed nothing stops the run instead of starting another round.
 
 ## HTTP API
 

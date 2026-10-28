@@ -13,6 +13,7 @@ package asm
 
 import (
 	"encoding/json"
+	"strconv"
 	"unicode/utf8"
 
 	"bareloop/internal/ir"
@@ -29,11 +30,36 @@ type ImageURL struct {
 	URL string `json:"url"`
 }
 
-// ContentPart is an element of a multi-part content array.
+// ContentPart is an element of a multi-part content array. Marshalling is explicit — see
+// MarshalJSON: a text part always carries "text", an image part never does.
 type ContentPart struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *ImageURL `json:"image_url,omitempty"`
+	Type     string
+	Text     string
+	ImageURL *ImageURL
+}
+
+// MarshalJSON writes exactly the two shapes a chat server expects.
+//
+// This exists because strict OpenAI-compatible servers reject a text part whose "text" key was
+// left out: llama.cpp's server reads part.at("text") for every part and answers the whole request
+// with 500 "key 'text' not found" — which an image with no text used to trigger, because
+// `json:"text,omitempty"` dropped the key. Field order is fixed by the structs below, so a rebuild
+// produces the same bytes (KV cache prefix).
+func (p ContentPart) MarshalJSON() ([]byte, error) {
+	if p.ImageURL != nil {
+		return json.Marshal(struct {
+			Type     string    `json:"type"`
+			ImageURL *ImageURL `json:"image_url"`
+		}{PartTypeImage, p.ImageURL})
+	}
+	typ := p.Type
+	if typ == "" {
+		typ = PartTypeText
+	}
+	return json.Marshal(struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}{typ, p.Text})
 }
 
 // ToolCallOut is a tool call as it appears in an assistant message.
@@ -71,10 +97,17 @@ type Options struct {
 	SendReasoning *bool `json:"sendReasoning,omitempty"`
 	// OmitToolResultName skips the `name` field on tool results.
 	OmitToolResultName bool `json:"omitToolResultName,omitempty"`
+	// SendImages puts image attachments on the wire as data URLs. Default on. Turn it off when
+	// the model cannot see (a text-only llama.cpp has no projector loaded): the base64 then costs
+	// neither the request nor the context, and the message says the image is there instead.
+	SendImages *bool `json:"sendImages,omitempty"`
 }
 
 // SendReasoningOn is the effective value of SendReasoning: on unless explicitly disabled.
 func (o Options) SendReasoningOn() bool { return o.SendReasoning == nil || *o.SendReasoning }
+
+// SendImagesOn is the effective value of SendImages: on unless explicitly disabled.
+func (o Options) SendImagesOn() bool { return o.SendImages == nil || *o.SendImages }
 
 // Built is the assembled payload plus the entries it came from.
 type Built struct {
@@ -132,13 +165,13 @@ func messageFor(e *ir.Entry, opts Options) Message {
 	m := Message{Role: e.Role}
 	switch e.Role {
 	case "tool":
-		m.Content = content(e)
+		m.Content = content(e, opts.SendImagesOn())
 		m.ToolCallID = e.ToolCallID
 		if !opts.OmitToolResultName && e.Server != "" {
 			m.Name = e.Server
 		}
 	case "assistant":
-		if c := content(e); c != nil {
+		if c := content(e, opts.SendImagesOn()); c != nil {
 			m.Content = c
 		}
 		for _, tc := range e.ToolCalls {
@@ -156,31 +189,46 @@ func messageFor(e *ir.Entry, opts Options) Message {
 			m.ReasoningContent = e.Reasoning
 		}
 	default: // user
-		m.Content = content(e)
+		m.Content = content(e, opts.SendImagesOn())
 	}
 	return m
 }
 
-// content builds the content value: a plain string when there are no attachments, a
-// [images..., text] array when there are. Deterministic, so both the live push and every
+// content builds the content value: a plain string when there is no image on the wire, a
+// [images..., text] array when there is. Deterministic, so both the live push and every
 // rebuild produce identical bytes.
-func content(e *ir.Entry) any {
+//
+// Three rules that were missing:
+//
+//   - the entry's own text survives next to an attachment. A user message with an image still
+//     says what was asked, and a tool result still carries its text; `Parts` used to replace
+//     `Content`, so "你看到了啥?" simply never reached the model.
+//   - there is never an empty text part. Strict parsers throw on it, and it carries no
+//     information anyway.
+//   - when images are switched off the bytes are not sent at all, but the model is told an image
+//     is there — otherwise it answers a question about a picture it was never given, silently.
+func content(e *ir.Entry, sendImages bool) any {
 	var imgs []ContentPart
-	var text string
-	if len(e.Parts) > 0 {
-		var texts []string
-		for _, pt := range e.Parts {
-			switch pt.Type {
-			case ir.PartImage:
-				imgs = append(imgs, ContentPart{Type: PartTypeImage,
-					ImageURL: &ImageURL{URL: DataURL(pt)}})
-			default:
+	var texts []string
+	for _, pt := range e.Parts {
+		switch {
+		case pt.Type == ir.PartImage && sendImages:
+			imgs = append(imgs, ContentPart{Type: PartTypeImage,
+				ImageURL: &ImageURL{URL: DataURL(pt)}})
+		case pt.Type == ir.PartImage:
+			texts = append(texts, imageNote(pt))
+		default:
+			if pt.Text != "" {
 				texts = append(texts, pt.Text)
 			}
 		}
-		text = join(texts, "\n")
-	} else {
-		text = e.Content
+	}
+	text := e.Content
+	if extra := join(texts, "\n"); extra != "" && extra != text {
+		if text != "" {
+			text += "\n"
+		}
+		text += extra
 	}
 	if len(imgs) == 0 {
 		if e.Role == "assistant" && text == "" {
@@ -190,8 +238,32 @@ func content(e *ir.Entry) any {
 	}
 	parts := make([]ContentPart, 0, len(imgs)+1)
 	parts = append(parts, imgs...)
-	parts = append(parts, ContentPart{Type: PartTypeText, Text: text})
+	if text != "" {
+		parts = append(parts, ContentPart{Type: PartTypeText, Text: text})
+	}
 	return parts
+}
+
+// imageNote is what an image looks like to a text-only model: one line naming it, no base64.
+//
+// The wording is the whole point. A note that only mentions that a picture was here gets answered
+// with an invention — a chatty model would rather describe an image than admit it cannot see one,
+// which is exactly what happened in a real session: it produced a confident four-point description
+// of pixels that were never sent, while its own reasoning noticed the note and overruled it.
+func imageNote(p ir.Part) string {
+	name := p.Name
+	if name == "" {
+		name = "image"
+	}
+	mt := p.MimeType
+	if mt == "" {
+		mt = "unknown type"
+	}
+	kb := len(p.Data) * 3 / 4 / 1024 // base64 → real bytes → KB
+	return "[attached " + name + " (" + mt + ", ~" + strconv.Itoa(kb) + " KB) is in this conversation " +
+		"but its pixels were NOT sent to you: this session sends text only. You cannot see it, so do " +
+		"not describe it and do not guess what it shows — say that you cannot see the image and ask " +
+		"the user to describe it or to turn image sending on.]"
 }
 
 // DataURL renders an image part as a data URL (one encoding, everywhere).

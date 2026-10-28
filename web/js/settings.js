@@ -41,6 +41,10 @@ export async function openSettings() {
   fld(f, 'maxTurns').value = cfg.maxTurns || '';
   fld(f, 'auto').checked = cfg.compact?.auto === true; // off unless explicitly on
   fld(f, 'inLoop').checked = cfg.compact?.inLoop !== false; // on unless explicitly off
+  // Both assembler switches are on unless the config says otherwise, so the checkboxes start from
+  // "not false" rather than from "true".
+  fld(f, 'sendReasoning').checked = cfg.asm?.sendReasoning !== false;
+  fld(f, 'sendImages').checked = cfg.asm?.sendImages !== false;
   fld(f, 'systemPrompt').value = cfg.systemPrompt || '';
   fld(f, 'mcp').value = JSON.stringify(cfg.mcp || [], null, 2);
   $('#dlg-settings').showModal();
@@ -76,6 +80,13 @@ export async function saveSettings() {
       keepTarget: Number(fld(f, 'keepTarget').value) || 50,
       summaryMax: Number(fld(f, 'summaryMax').value) || 70,
       maxAttempts: Number(fld(f, 'maxAttempts').value) || 3,
+    },
+    // The whole assembler block goes back, checked values and all: `omitToolResultName` is a plain
+    // bool on the server, so an absent field there cannot mean "off".
+    asm: {
+      ...(cfg.asm || {}),
+      sendReasoning: fld(f, 'sendReasoning').checked,
+      sendImages: fld(f, 'sendImages').checked,
     },
     mcp,
   };

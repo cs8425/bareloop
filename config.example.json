@@ -25,6 +25,7 @@
 
     "asm": {
       "sendReasoning": true,
+      "sendImages": true,
       "omitToolResultName": false
     },
 

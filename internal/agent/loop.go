@@ -112,12 +112,23 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 	}()
 
 	for {
+		grown := len(s.path())
 		aborted, err := s.turns(ctx)
 		if err != nil {
 			s.emit(Event{Type: EvtError, Info: err.Error()})
 			s.logf("run error: %v", err)
 		}
 		if aborted {
+			return
+		}
+		if len(s.path()) == grown {
+			// Nothing was committed this round, so needsRun() still says an answer is owed and the
+			// loop below would ask the provider the same question again — forever. One round per
+			// failure is enough: the error has been emitted, and it is the user's turn now.
+			if err == nil {
+				s.logf("no entry committed this round: stopping the loop")
+				s.emit(Event{Type: EvtInfo, Info: "nothing was committed this round: stopping"})
+			}
 			return
 		}
 		// End-of-turn trigger (spec §1.1 T1) — the only automatic trigger by default.
@@ -254,6 +265,32 @@ func (s *Session) turnCount() int {
 	return s.turn
 }
 
+// maxLLMRetries is how often a request that failed before returning anything is repeated. It is
+// deliberately small: it exists for a server that is momentarily busy, not as a way of waiting for
+// a broken request to fix itself.
+const maxLLMRetries = 2
+
+// transientLLMError sorts a provider failure into "ask again" and "do not ask again". A transport
+// error never reached the model, and the 5xx family plus 429 say the server could not serve this
+// request just now. A 4xx that describes the request itself — bad JSON, too long, bad key — is
+// answered identically every time, and re-sending it is how one bad message becomes a flood.
+//
+// The status is read out of the provider's own message ("llm: 503 Service Unavailable: …"), which
+// is what internal/llm builds for every non-2xx response.
+func transientLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	for _, code := range []string{"400", "401", "402", "403", "404", "405", "406", "410",
+		"413", "414", "415", "422", "431", "451"} {
+		if strings.Contains(s, "llm: "+code+" ") {
+			return false
+		}
+	}
+	return true
+}
+
 // generate streams one assistant message and returns the entry to commit.
 func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.Tool, turn int) (*ir.Entry, string, bool) {
 	cfg := s.Config()
@@ -261,6 +298,7 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	s.setGenerating(true)
 	defer s.setGenerating(false)
 	streamID := fmt.Sprintf("%s-t%d-%d", s.ID, turn, time.Now().UnixMilli())
+	start := time.Now()
 	req := llm.Request{
 		Model:           cfg.LLM.Model,
 		Messages:        built.All(),
@@ -271,16 +309,51 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 		ReasoningEffort: cfg.ReasoningEffort,
 		Extra:           cfg.Extra,
 	}
-	ch, err := s.provider.Stream(ctx, req)
+	// Ask the provider, retrying only what a retry can fix. Two extra attempts cover a busy
+	// llama.cpp or a dropped connection; a request the server rejected (400, 401, 413 …) is not
+	// retried, because the same bytes will keep failing the same way.
+	var (
+		ch  <-chan llm.Event
+		err error
+	)
+	for attempt := 0; ; attempt++ {
+		ch, err = s.provider.Stream(ctx, req)
+		if err == nil || ctx.Err() != nil || attempt >= maxLLMRetries || !transientLLMError(err) {
+			break
+		}
+		wait := time.Duration(attempt+1) * 800 * time.Millisecond
+		s.logf("turn %d: llm request failed (%v): retry %d/%d in %s", turn, err, attempt+1, maxLLMRetries, wait)
+		s.emit(Event{Type: EvtInfo,
+			Info: fmt.Sprintf("llm retry %d/%d in %s: %s", attempt+1, maxLLMRetries, wait, clip(err.Error(), 200))})
+		select {
+		case <-ctx.Done():
+		case <-time.After(wait):
+		}
+	}
 	if err != nil {
 		s.emit(Event{Type: EvtError, Info: "llm: " + err.Error()})
-		return nil, streamID, ctx.Err() != nil
+		s.logf("turn %d: llm request failed: %v", turn, err)
+		if ctx.Err() != nil {
+			return nil, streamID, true // stopped or interrupted before anything came back
+		}
+		// Commit the failure as the answer. This is what ends the turn: while the path ends with
+		// the user message the loop still owes it an answer, so it asks again — and a provider that
+		// answers 500 will keep doing so, forever, one identical request per round. The entry says
+		// what went wrong, so the user rather than the loop decides what happens next.
+		return &ir.Entry{
+			Kind:    ir.KindAssistant,
+			Role:    "assistant",
+			Content: "[generation failed: " + clip(err.Error(), 600) + "]",
+			Model:   cfg.LLM.Model,
+			Finish:  "error",
+			Label:   "llm error",
+			Ms:      time.Since(start).Milliseconds(),
+		}, streamID, false
 	}
 
 	var (
 		content   strings.Builder
 		reasoning strings.Builder
-		start     = time.Now()
 		finish    string
 		usage     *ir.Usage
 		streamErr string
@@ -372,6 +445,16 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	if content.Len() == 0 && reasoning.Len() == 0 && len(calls) == 0 && streamErr == "" && !aborted {
 		entry.Content = "[empty completion]"
 	}
+	if streamErr != "" && !aborted {
+		// A stream that died halfway leaves the output up to that point. Say so: an answer that is
+		// quietly truncated reads like an answer that is complete.
+		entry.Label = "llm error"
+		if entry.Content == "" {
+			entry.Content = "[generation failed: " + clip(streamErr, 600) + "]"
+		} else {
+			entry.Content += "\n\n[stream error: " + clip(streamErr, 300) + "]"
+		}
+	}
 	if usage != nil && usage.HasPrompt {
 		s.mu.Lock()
 		s.ctxUsed, s.ctxKnown = usage.ContextUsed(), true
@@ -427,11 +510,13 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 			Role:       "tool",
 			ToolCallID: tc.ID,
 			Tool:       tc.Name,
-			Server:     ref.Server,
-			Content:    text,
-			Parts:      parts,
-			IsError:    isErr,
-			Ms:         ms,
+			// A failed call never reports which server it was going to call, so fall back to what the
+			// registry had assigned: a dead stdio server still owns its own error.
+			Server:  refOr(ref.Server, run.Server),
+			Content: text,
+			Parts:   parts,
+			IsError: isErr,
+			Ms:      ms,
 		})
 		if aerr != nil {
 			s.emit(Event{Type: EvtError, Info: "commit tool result: " + aerr.Error()})
@@ -443,13 +528,35 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 			run.Error = text
 		}
 		run.Result = text
-		run.Images = len(parts)
+		run.Images = countImages(parts)
 		run.Ms = ms
 		s.emit(Event{Type: EvtToolResult, Run: run})
 		s.emit(Event{Type: EvtEntry, Entry: entry})
 		s.emitState()
 	}
 	return aborted
+}
+
+// countImages counts the images in a tool result — the number the UI reports, and text parts
+// have never been images.
+func countImages(parts []ir.Part) int {
+	n := 0
+	for _, p := range parts {
+		if p.Type == ir.PartImage {
+			n++
+		}
+	}
+	return n
+}
+
+// refOr names an attachment by whatever the server actually gave us.
+func refOr(xs ...string) string {
+	for _, x := range xs {
+		if x != "" {
+			return x
+		}
+	}
+	return "unnamed"
 }
 
 // toolOutput flattens an MCP call result into the text plus image parts we store.
@@ -461,20 +568,36 @@ func toolOutput(res *mcp.CallResult) (string, []ir.Part) {
 	for _, c := range res.Content {
 		switch {
 		case c.Type == "image":
-			if mime, data, ok := c.Image(); ok {
+			if data, mime, ok := c.Image(); ok {
 				parts = append(parts, ir.Part{Type: ir.PartImage, MimeType: mime, Data: data, Name: c.Name})
+			} else {
+				// An image block with no bytes is a reference. Keep it visible: a tool result that
+				// silently dropped the screenshot says less than one that says file:///tmp/shot.png.
+				parts = append(parts, ir.Part{Type: ir.PartText,
+					Text: "[image " + refOr(c.URI, c.Name) + " — the result carried no image data]"})
 			}
 		case c.Type == "audio":
-			if mime, _, ok := c.Audio(); ok {
+			if _, mime, ok := c.Audio(); ok {
 				parts = append(parts, ir.Part{Type: ir.PartText, Text: fmt.Sprintf("[audio result, %s, not shown]", mime)})
 			}
 		case c.Type == "resource":
-			if c.Resource != nil {
-				if c.Resource.Text != "" {
-					parts = append(parts, ir.Part{Type: ir.PartText, Text: c.Resource.Text})
-				} else if c.Resource.Blob != "" {
-					parts = append(parts, ir.Part{Type: ir.PartText, Text: fmt.Sprintf("[resource %s, %d bytes of binary data]", c.Resource.URI, len(c.Resource.Blob))})
-				}
+			if c.Resource == nil {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(c.Resource.MimeType, "image/") && c.Resource.Blob != "":
+				// An embedded image is an image: it belongs in the parts, where it can be shown
+				// (and sent as one), not dumped into the text as base64.
+				parts = append(parts, ir.Part{Type: ir.PartImage, MimeType: c.Resource.MimeType,
+					Data: c.Resource.Blob, Name: refOr(c.Name, c.Resource.URI)})
+			case c.Resource.Text != "":
+				parts = append(parts, ir.Part{Type: ir.PartText, Text: c.Resource.Text})
+			case c.Resource.Blob != "":
+				parts = append(parts, ir.Part{Type: ir.PartText,
+					Text: fmt.Sprintf("[resource %s, %d bytes of binary data]", c.Resource.URI, len(c.Resource.Blob))})
+			default:
+				parts = append(parts, ir.Part{Type: ir.PartText,
+					Text: "[resource " + refOr(c.Resource.URI, c.Name) + " — the result carried no data]"})
 			}
 		}
 	}

@@ -550,8 +550,17 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.SystemPrompt == "" {
 		patch.SystemPrompt = old.SystemPrompt
 	}
-	if patch.ASM == (asm.Options{}) {
-		patch.ASM = old.ASM
+	// Assembler options merge field by field: a block that only carries sendImages must not reset
+	// sendReasoning. Same rule as above — what a patch does not say is not a change. (The one plain
+	// bool can only be switched on, never off, by a patch: send the whole asm block for that.)
+	if patch.ASM.SendReasoning == nil {
+		patch.ASM.SendReasoning = old.ASM.SendReasoning
+	}
+	if patch.ASM.SendImages == nil {
+		patch.ASM.SendImages = old.ASM.SendImages
+	}
+	if !patch.ASM.OmitToolResultName {
+		patch.ASM.OmitToolResultName = old.ASM.OmitToolResultName
 	}
 	if patch.ReasoningEffort == "" {
 		patch.ReasoningEffort = old.ReasoningEffort

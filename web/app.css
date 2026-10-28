@@ -85,6 +85,13 @@ button:disabled { opacity: .45; cursor: default; }
 .msg.stream .body::after { content: "▋"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0 } }
 .msg img.attach { max-width: 220px; max-height: 160px; border-radius: 6px; margin: 4px 6px 0 0; border: 1px solid var(--border); }
+/* An attachment with no bytes is a reference — a path or URI. Worth printing: "the tool wrote
+   /tmp/shot.png" is information, a broken image icon is not. */
+.msg .attach-path { display: block; margin: 6px 0 0; padding: 4px 7px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font: 11.5px var(--mono); word-break: break-all; }
+.msg .part-text { white-space: pre-wrap; word-break: break-word; margin-top: 6px; }
+/* A failed generation is a failure, not an answer. */
+.msg.error > .body { border-left: 2px solid var(--err); padding-left: 8px; }
+.msg.error > header .who { color: var(--err); }
 .reasoning { margin: 0 12px 9px; border: 1px dashed var(--border); border-radius: 6px; padding: 6px 9px; color: var(--muted); white-space: pre-wrap; font-size: 12.5px; }
 .reasoning > summary { color: #9a8fc7; cursor: pointer; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 

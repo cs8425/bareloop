@@ -30,12 +30,26 @@ export const pretty = (text) => {
   }
 };
 
+// collapseDataUrls swaps every inline data: URL in a piece of text for a one-line marker and hands
+// back the images it found. A quarter megabyte of base64 in a <pre> is not readable, it makes the
+// transcript unscrollable and it freezes the tab; an image is something to look at, not to read.
+const DATA_URL = /data:([\w.+-]+\/[\w.+-]+);base64,([A-Za-z0-9+/\s=]+)/g;
+
+export function collapseDataUrls(text) {
+  const images = [];
+  if (!text || typeof text !== 'string') return { text: text || '', images };
+  const out = text.replace(DATA_URL, (whole, mime, data) => {
+    images.push({ mimeType: mime, data });
+    return `[${mime}, ~${Math.round((data.length * 3) / 4 / 1024)} KB of base64 not shown]`;
+  });
+  return { text: out, images };
+}
+
 // Entry ids are zero-padded decimal strings, which sort as strings only while the width holds.
 export const numId = (id) => {
   const n = Number(id);
   return Number.isFinite(n) ? n : 0;
 };
-
 export const sortByNum = (list) => list.slice().sort((a, b) => numId(a.id) - numId(b.id));
 
 // pathOf walks parents from the tip and returns the ids that are actually sent: everything else is
