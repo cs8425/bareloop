@@ -55,18 +55,28 @@ async function compactNow() {
 }
 
 function wireNewSession() {
-  $('#new-session').onclick = () => $('#dlg-new').showModal();
+  const dlg = $('#dlg-new');
+  $('#new-session').onclick = () => dlg.showModal();
+  // data-close buttons are the only way out besides create. A button that both submitted and closed
+  // the dialog used to create a session when the user meant to back out of one.
+  dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(b.dataset.close || 'cancel'); });
   $('#new-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    // Enter in the id field also submits the form; only the create button means it.
+    if (e.submitter && e.submitter.value !== 'create') return;
     const f = e.target;
-    const body = { id: f.elements.namedItem('id').value.trim(), name: f.elements.namedItem('name').value.trim() };
+    const id = (f.elements.namedItem('id').value || '').trim();
+    // The server used to invent an id when this was empty, so one stray submit dropped a session
+    // named after the clock into the data directory. An id nobody typed is not worth creating.
+    if (!id) { note('an id is required'); return; }
+    const body = { id, name: f.elements.namedItem('name').value.trim() };
     const data = await api('/api/sessions', { body }).catch((err) => {
       fail(err);
       return null;
     });
     if (!data) return; // a rejected id leaves the dialog open so it can be retyped
     f.reset();
-    $('#dlg-new').close();
+    dlg.close('create');
     if (data.id) await selectSession(data.id);
   });
 }

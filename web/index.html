@@ -85,7 +85,10 @@
         <h3>new session</h3>
         <label>
           id
-          <input name="id" spellcheck="false" pattern="[A-Za-z0-9_.-]+" placeholder="letters, digits, . _ -" />
+          <!-- The pattern is compiled with the regexp `v` flag: an unescaped `-` right after `.` is a
+               syntax error there, which used to make constraint validation throw on click. -->
+          <input name="id" required spellcheck="false" maxlength="64" pattern="[A-Za-z0-9_.\-]+"
+            title="letters, digits, dot, underscore, dash" placeholder="letters, digits, . _ -" autocomplete="off" />
         </label>
         <label>
           name
@@ -96,8 +99,10 @@
           server configuration; change them per session in settings.
         </p>
         <menu>
-          <button value="cancel" formmethod="dialog" type="submit" class="ghost">cancel</button>
-          <button type="submit" class="primary">create</button>
+          <!-- A submit button that closes the dialog was still creating a session when the user
+               pressed it, so cancel is a plain button and the submit handler checks who sent it. -->
+          <button type="button" value="cancel" class="ghost" data-close="cancel">cancel</button>
+          <button type="submit" value="create" class="primary">create</button>
         </menu>
       </form>
     </dialog>
@@ -134,8 +139,10 @@
           what a text-only server wants.
         </p>
         <menu>
-          <button value="cancel" formmethod="dialog" type="submit" class="ghost">cancel</button>
-          <button id="settings-save" type="submit" class="primary">save</button>
+          <!-- Same rule as the new-session dialog: neither button submits. Enter in a field is handled
+               by the form's submit listener, which saves. -->
+          <button type="button" value="cancel" class="ghost" data-close="cancel">cancel</button>
+          <button id="settings-save" type="button" value="save" class="primary">save</button>
         </menu>
       </form>
     </dialog>

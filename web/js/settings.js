@@ -99,18 +99,27 @@ export async function saveSettings() {
 }
 
 export function wireSettings() {
-  $('#btn-settings').onclick = openSettings;
-  $('#settings-save').onclick = async (e) => {
-    e.preventDefault();
+  const dlg = $('#dlg-settings');
+  // One save path for both ways of leaving the dialog: the save button, and Enter inside a field.
+  // The form had no submit listener, so Enter was an implicit submission of a form with no action —
+  // a page reload that threw the edits away.
+  const save = async () => {
     try {
       await saveSettings();
-      $('#dlg-settings').close();
+      dlg.close();
     } catch (err) {
       // Bad MCP JSON is the user's own text: it is already on screen, and the dialog stays open so
       // it can be fixed. Anything else (a run in progress, a rejected config) is worth a toast too.
       if (!(err instanceof SyntaxError)) fail(err);
     }
   };
+  $('#btn-settings').onclick = openSettings;
+  $('#settings-save').onclick = save;
+  $('#settings-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    save();
+  });
+  dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(b.dataset.close || 'cancel'); });
   // Renaming lives in the top bar, so it patches just the name on top of what the server has.
   $('#session-name').addEventListener('change', async (e) => {
     if (!state.id) return;
