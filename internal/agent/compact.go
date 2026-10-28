@@ -334,6 +334,13 @@ func (s *Session) commitCompaction(cfg Config, p compact.Params, plan *compact.P
 	// Rebuild the in-memory session array with the assembler (§3.8 step 4). The loop re-reads
 	// storage before every send, and new entries hang off the tip, which is now the
 	// compaction entry — so the workflow attach point moved with it (§3.8 step 3).
+	// The usage cached from the last completed turn priced the payload we just replaced, so it is
+	// no longer a measurement of anything (spec 1.5). Drop it rather than substitute a number:
+	// usedNow() then reports "unavailable", guardFit uses the built payload size (the only honest
+	// answer for an unsent request), and the next completed turn restores the real value.
+	s.mu.Lock()
+	s.ctxUsed, s.ctxKnown = 0, false
+	s.mu.Unlock()
 	_, sizes, _ := s.build()
 	res.Committed = true
 	res.EntryID = entry.ID

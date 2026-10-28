@@ -292,8 +292,11 @@ func (s *Session) Status() *Status {
 
 	_, _, cmp := s.effective()
 	if !known {
-		// Fall back to the last real usage on the path (never an estimate).
-		if u := ir.LastUsage(s.path()); u != nil && u.HasPrompt {
+		// Fall back to the last real usage on the path (never an estimate), stopping at the active
+		// compaction entry: usage from before it describes a payload that no longer exists (1.5),
+		// so the honest answer for that turn is contextKnown=false and a dashed-down bar.
+		stop := cmp != nil && cmp.Compaction != nil && !cmp.Compaction.Broken
+		if u := ir.LastUsage(s.path(), stop); u != nil && u.HasPrompt {
 			used, known = u.ContextUsed(), true
 		}
 	}
@@ -753,7 +756,10 @@ func (s *Session) Inspect() *Inspection {
 		ins.BoundaryID = cmp.Compaction.BoundaryID
 		ins.Broken = cmp.Compaction.Broken
 	}
-	if u := ir.LastUsage(s.path()); u != nil && u.HasPrompt {
+	// Same rule as the trigger and the progress bar (1.5): stop at the active compaction entry,
+	// because a usage from before it prices a payload that is no longer built.
+	stop := cmp != nil && cmp.Compaction != nil && !cmp.Compaction.Broken
+	if u := ir.LastUsage(s.path(), stop); u != nil && u.HasPrompt {
 		ins.ContextUsed, ins.ContextKnown = u.ContextUsed(), true
 	}
 	cfg := s.Config()

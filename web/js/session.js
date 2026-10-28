@@ -110,11 +110,17 @@ export function renderStatus(st) {
   $('#turn').textContent = st.turn ? `turn ${st.turn}` : '';
   const used = st.contextUsed || 0;
   const nctx = st.nCtx || 0;
-  const pct = nctx > 0 ? clamp((100 * used) / nctx, 0, 100) : 0;
+  // contextKnown=false means the only number we have priced a payload that no longer exists —
+  // right after a compaction, and for the one turn until a request is actually sent. Show a dash
+  // rather than a stale percentage (and never a fake 0%).
+  const known = st.contextKnown !== false;
+  const pct = nctx > 0 && known ? clamp((100 * used) / nctx, 0, 100) : 0;
   $('#ctx-fill').style.width = pct.toFixed(1) + '%';
   $('#ctx-text').textContent =
     nctx > 0
-      ? `${fmtN(used)} / ${fmtN(nctx)} (${pct.toFixed(0)}%, trigger ${st.thresholdPct ?? '-'}%)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
+      ? known
+        ? `${fmtN(used)} / ${fmtN(nctx)} (${pct.toFixed(0)}%, trigger ${st.thresholdPct ?? '-'}%)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
+        : `– / ${fmtN(nctx)} (no measurement since the last compaction)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
       : `${fmtN(used)} tokens · n_ctx unknown`;
   $('#session-name').value = st.name || st.session || '';
 }

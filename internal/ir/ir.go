@@ -163,7 +163,10 @@ func Path(entries map[string]*Entry, id string) []*Entry {
 //   - only the last compaction entry on the path is active
 //   - boundary absent  -> kept = entries after the compaction entry
 //   - boundary found   -> kept = boundary .. end, everything up to the entry replaced by it
-//   - boundary missing -> fail open: the whole path, with Broken marked on the meta
+//   - boundary missing -> fail open: everything except the active entry, Broken marked on meta
+//
+// A boundary id is resolved over the whole path: the commit appends the compaction entry at the
+// tip, so the id it records points backwards at the first kept message (see the body for specs).
 //
 // The returned kept slice never contains the compaction entry itself; the caller splices
 // the summary in front of it (with role user).
@@ -204,26 +207,50 @@ func Effective(entries map[string]*Entry, path []*Entry) ([]*Entry, *Entry) {
 		return kept, cmp
 	}
 	bid := *meta.BoundaryID
-	if bid == "" {
-		meta.Broken = true
-		return path, cmp
-	}
-	for i := idx + 1; i < len(path); i++ {
+	// The boundary is resolved against the whole path. The commit appends the compaction entry at
+	// the tip (spec 3.8 step 1: parent = last entry of the pre-compaction path), so the id it
+	// records necessarily points *backwards* at the first kept message. Spec 2.5: broken means "id
+	// present but not found on the path", not "not found after the entry". An empty id matches no
+	// entry and therefore lands in the broken branch below, as before.
+	for i := range path {
 		if path[i].ID == bid {
+			// withoutOlder also drops compaction entries: the caller splices the summary in front,
+			// so the active entry is never sent as an ordinary message (and older ones live inside
+			// the rolling summary, spec 3.6).
 			return withoutOlder(i), cmp
 		}
 	}
-	// Boundary id present but not found after the compaction entry (branch, deleted
-	// message, imported legacy data): broken -> fail open, send everything.
+	// Not on the path at all (branch, that message deleted, imported legacy data): broken -> fail
+	// open. Send everything except the active entry itself: spec 2.5 says "ignore the compaction
+	// entry", and its text is exactly what the caller splices in front, so keeping it here would
+	// send the summary twice. Older compaction entries stay -- with no summary spliced in there is
+	// nothing else holding their content.
 	meta.Broken = true
-	return path, cmp
+	all := make([]*Entry, 0, len(path)-1)
+	for _, e := range path {
+		if e != cmp {
+			all = append(all, e)
+		}
+	}
+	return all, cmp
 }
 
 // LastUsage returns the real usage of the last completed assistant turn on the path,
 // or nil when no turn has run yet (spec: "unavailable -> do not check, do not guess").
-func LastUsage(path []*Entry) *Usage {
+//
+// stopAtCompaction implements spec 1.5. An active compaction entry folded everything before it
+// into a summary, so a usage recorded before it prices a payload that no longer exists: the walk
+// therefore stops at the newest compaction entry and reports the number as unavailable for the
+// one turn that follows a commit, instead of handing back a value that is too high (which made
+// every compaction followed by exactly one redundant compaction, and let guardFit refuse a
+// payload that had just shrunk). Callers pass false when the boundary is broken: fail-open sends
+// everything (spec 2.5), so there the pre-entry usage really is still the price of the wire.
+func LastUsage(path []*Entry, stopAtCompaction bool) *Usage {
 	for i := len(path) - 1; i >= 0; i-- {
 		e := path[i]
+		if stopAtCompaction && e.IsCompaction() {
+			return nil
+		}
 		if e.Kind == KindAssistant && e.Usage != nil && e.Usage.HasPrompt {
 			return e.Usage
 		}

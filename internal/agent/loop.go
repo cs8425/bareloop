@@ -680,7 +680,13 @@ func (s *Session) usedNow() (int, bool) {
 	if known {
 		return used, true
 	}
-	if u := ir.LastUsage(s.path()); u != nil && u.HasPrompt {
+	// Nothing cached (fresh process, or the cache was invalidated by a commit): re-derive from the
+	// log, but only from the region that is still on the wire. A usage older than the active
+	// compaction boundary is a stale number, and spec 1.3 says unavailable means "do not check, do
+	// not guess" - the pre-send guard already falls back to the built payload size in that case.
+	_, _, cmp := s.effective()
+	stop := cmp != nil && cmp.Compaction != nil && !cmp.Compaction.Broken
+	if u := ir.LastUsage(s.path(), stop); u != nil && u.HasPrompt {
 		return u.ContextUsed(), true
 	}
 	return 0, false

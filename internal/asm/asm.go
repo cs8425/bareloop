@@ -14,6 +14,7 @@ package asm
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"bareloop/internal/ir"
@@ -302,6 +303,9 @@ func repair(b *Built) int {
 		if e.Role == "tool" && !calls[e.ToolCallID] {
 			continue // orphan
 		}
+		if unsendableAssistant(e) {
+			continue // nothing a provider would accept (see unsendableAssistant)
+		}
 		outEntries = append(outEntries, e)
 		outMsgs = append(outMsgs, b.Messages[i])
 		if e.Role != "assistant" || len(e.ToolCalls) == 0 {
@@ -334,6 +338,27 @@ func repair(b *Built) int {
 	}
 	b.Entries, b.Messages = outEntries, outMsgs
 	return synth
+}
+
+// unsendableAssistant reports an assistant message a provider will refuse outright: no content, no
+// tool_calls and no image parts. An interrupted turn leaves exactly that -- reasoning only -- and
+// reasoning is not message content, so sending it back is a guaranteed 400 that then poisons every
+// later turn of the session. Dropping it here changes only what goes on the wire: the entry stays
+// in the log and in the UI, where the partial reasoning is still worth reading. Same defence as the
+// synthesised tool result for an unanswered call above, seen from the other side.
+func unsendableAssistant(e *ir.Entry) bool {
+	if e == nil || e.Role != "assistant" || len(e.ToolCalls) > 0 {
+		return false
+	}
+	if strings.TrimSpace(e.Content) != "" {
+		return false
+	}
+	for _, p := range e.Parts {
+		if p.Type == ir.PartImage || strings.TrimSpace(p.Text) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // Bytes returns the serialised size of the payload (inspector helper column, never a
