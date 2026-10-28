@@ -10,6 +10,25 @@ import { closeNav } from './nav.js';
 import { entryNode } from './transcript.js';
 import { syncComposer } from './composer.js';
 
+// The URL names the session you are looking at: `#/s/<id>`. It is written here and read on boot, which is what
+// makes a reload, a bookmark or a pasted link land on the same conversation instead of whatever the list
+// happens to start with. Nothing else in the app touches the hash, so this module owns it - and that is also
+// why it has to keep it honest: a hash naming a session that no longer exists gets corrected, not left there
+// to fail on the next reload.
+export const idFromHash = () =>
+  location.hash.startsWith('#/s/') ? decodeURIComponent(location.hash.slice(4)) : '';
+
+// writeHash reports whether it moved anything. Equal hashes are skipped, and that is also what keeps the
+// hashchange listener from being called back on itself: selectSession writes the hash, the listener then
+// sees the id it has already selected and stops. `replace` is for boot and corrections, where no history
+// entry was asked for; picking a session is a real navigation and can be stepped back through.
+export function writeHash(id, replace = false) {
+  const url = id ? `#/s/${encodeURIComponent(id)}` : location.pathname + location.search;
+  if ((id && location.hash === url) || (!id && !location.hash)) return false;
+  history[replace ? 'replaceState' : 'pushState'](null, '', url);
+  return true;
+}
+
 // refresh re-reads the session and rebuilds the transcript. Streams that are still running survive:
 // their nodes are re-appended below the committed entries, so a refresh in the middle of an answer
 // does not blank the answer.
@@ -66,6 +85,7 @@ export async function loadSessions() {
       await api(`/api/session/${s.id}`, { method: 'DELETE' }).catch((err) => note(err.message, 'error'));
       if (state.id === s.id) {
         state.id = null;
+        writeHash(''); // a conversation that has been deleted must not stay in the address bar
         logEl().textContent = '';
       }
       loadSessions();
@@ -78,6 +98,7 @@ export async function loadSessions() {
 // selectSession is the only place that clears the view: everything the previous session owned goes
 // away at once, so no half of the page can render the wrong session.
 export async function selectSession(id) {
+  writeHash(id); // the address bar follows the view, so a reload or a shared link comes back here
   state.id = id;
   closeNav(); // on a phone the drawer covered the transcript only to pick this
   logEl().textContent = '';

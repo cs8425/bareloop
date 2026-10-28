@@ -236,6 +236,13 @@ each of them was a bug first.
   else is `public, max-age=60, must-revalidate`. Both carry an `ETag`, so a revalidation costs a 304 and
   no body, and a hard refresh always bypasses the lot. Editing `web/` while the server runs therefore
   shows up on the next navigation (or immediately on reload).
+- **The URL is the session.** `#/s/<id>` is written when a session is picked and read on boot, so a reload, a
+  bookmark or a pasted link lands on the conversation it names (a closed one too - a deep link is deliberate,
+  while the no-URL default only has to guess), and Back steps through the sessions you looked at. An id the
+  list does not know gets the list re-read once, then a note and the current session written back into the
+  address bar: the URL never claims something the page is not showing. `session.js` owns the hash and nothing
+  else touches it, which is also why the `hashchange` listener cannot fight `selectSession` - writing an equal
+  hash does nothing, so the listener just sees the id it has already selected and stops.
 - **Following is opt-out, and the composer never loses.** The transcript scrolls with the output only
   while you are at the bottom; scrolling up (or wheeling up) unpins immediately and a floating
   `↓ latest` counts what you missed. A wall of tokens must never steal the viewport from the composer,

@@ -31,7 +31,7 @@ import { api } from './api.js';
 import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
-import { loadSessions, selectSession, refresh } from './session.js';
+import { loadSessions, selectSession, refresh, idFromHash, writeHash } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
 import { bootIcons } from './icons.js';
@@ -169,15 +169,44 @@ function wire() {
   $('#btn-compact').onclick = compactNow;
   on(EV_REFRESH, () => refresh().catch(() => {}));
   on(EV_SESSIONS, () => loadSessions().catch(() => {}));
+  // A hash change is somebody asking to look at another session: the back button, the forward button, or an
+  // edited address bar. An id the list does not know is answered by reading the list once more - the session
+  // may be brand new or just deleted - and then by putting the session actually on screen back into the URL.
+  window.addEventListener('hashchange', async () => {
+    const id = idFromHash();
+    if (!id) {
+      writeHash(state.id, true); // the hash was wiped by hand: make the URL describe the view again
+      return;
+    }
+    if (id === state.id) return; // selectSession wrote this hash itself
+    if (!state.sessions.some((s) => s.id === id)) {
+      await loadSessions().catch(() => {});
+      if (!state.sessions.some((s) => s.id === id)) {
+        note(`no session ${id}`);
+        writeHash(state.id, true);
+        return;
+      }
+    }
+    selectSession(id).catch(() => {});
+  });
   window.addEventListener('beforeunload', () => state.es?.close());
 }
 
 async function main() {
   wire();
   await loadSessions();
-  const initial = state.sessions.find((s) => !s.closed)?.id;
+  // The URL wins over "the first session": a reload, a bookmark or a link someone pasted has to land on the
+  // conversation it names, closed or not - a deep link is deliberate, while the default only has to guess.
+  // A hash that names nothing is corrected by the selection below, so the address bar always ends up
+  // describing what is on the screen.
+  const linked = idFromHash();
+  const initial =
+    state.sessions.find((s) => s.id === linked)?.id || state.sessions.find((s) => !s.closed)?.id;
   if (initial) await selectSession(initial);
-  else note('no session yet — create one');
+  else {
+    note('no session yet — create one');
+    writeHash('');
+  }
   connect();
 }
 

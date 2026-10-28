@@ -71,6 +71,10 @@ BARELOOP_API_KEY=sk-... BARELOOP_MODEL=gpt-4.1-mini ./bin/bareloopd -config conf
 of the file. `-data` is where sessions live (default `./data`), `-web` where the UI files are (default
 `./web`).
 
+The UI puts the session in the URL (`#/s/<id>`): reload, bookmark or paste the link and you are back at that
+conversation, the back button steps through the sessions you looked at, and a link naming a session that is
+not there says so and puts the current one back into the address bar.
+
 ## Using it
 
 The transcript is the log: what you see is what is stored. In the composer **Enter** sends, **Shift+Enter**
