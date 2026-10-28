@@ -166,6 +166,13 @@ and LM Studio publish it under one of `n_ctx`, `max_context`, `context_length`, 
 needs no config edit; `status.nCtx` is the number in use, and `nCtxConfig` / `nCtxSource` say where
 it came from.
 
+A session that outgrows the window is repaired rather than stuck: the provider refuses the request, the
+window is probed again, the oversized region is folded by the serial chain, and the run stops with
+`the context was compacted, please send again` - the next message is answered normally. **Refusing one
+request is the accepted design**, not a bug to pre-empt: until a request has been measured or refused
+there is no real number to split on, and splitting on a character estimate would compact a session the
+provider would have accepted. Nothing is guessed while `n_ctx` is unknown.
+
 When the conversation is too large to hand to the summariser in one request - which is also what
 happens after one oversized message, since the summary request is bound by the same window - the
 summary is produced **serially**: the region is cut into parts that each fit, and each call folds the
