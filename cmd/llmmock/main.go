@@ -43,10 +43,10 @@ type fnCall struct {
 }
 
 type toolCall struct {
-	Index    int      `json:"index,omitempty"`
-	ID       string   `json:"id,omitempty"`
-	Type     string   `json:"type,omitempty"`
-	Function fnCall   `json:"function"`
+	Index    int    `json:"index,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function fnCall `json:"function"`
 }
 
 type message struct {
