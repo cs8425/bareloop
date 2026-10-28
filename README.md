@@ -23,7 +23,11 @@ go mod tidy
 go build ./...
 ```
 
-Go 1.22 or newer (the HTTP routes use the method-and-wildcard patterns added in 1.22).
+Go 1.27 or newer — that is what `go.mod` asks for, and an older toolchain refuses to build. The code
+itself needs much less (the HTTP routes use the method-and-wildcard patterns added in 1.22), so
+raising the requirement costs nothing and buys the 1.27 standard library: `encoding/json` is backed by
+the v2 implementation there, and `filepath.IsLocal` is what keeps session ids from being named `con`
+on Windows.
 
 ## Run it against mocks
 
@@ -116,7 +120,10 @@ case folded away two sessions cannot differ only in how they are spelled, which 
 filesystem itself guarantee uniqueness. `POST /api/sessions` requires an id and answers **400** without
 one (it used to invent `s<timestamp>`, which left a session nobody asked for in the data directory);
 creating over an existing directory is a **409**, and `DELETE` refuses an id that is not a valid name.
-The API still refuses to guess, but the UI will: it suggests an id (`quiet-otter-1f3`) when the dialog
+The last gate is `filepath.IsLocal`, the standard library's own answer to "is this a name a directory can
+have": on Windows it rejects `con`, `nul`, `com1` and trailing dots, and everywhere it rejects separators.
+Its rules belong to the running system, so a `data/` prepared on Linux can still hold a name that Windows
+would refuse. The API still refuses to guess, but the UI will: it suggests an id (`quiet-otter-1f3`) when the dialog
 opens, offers another on request, folds what you type into lowercase, and makes one up if you clear the
 field — because the person pressing create asked for it, in front of them. The id is not the label you
 see either: `name` is free-form, so spaces and non-ASCII text belong there.

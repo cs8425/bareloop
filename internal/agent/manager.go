@@ -379,6 +379,14 @@ func validID(id string) error {
 	if id == "." || id == ".." || strings.Contains(id, "..") {
 		return fmt.Errorf("agent: id %q is not allowed", id)
 	}
+	// filepath.IsLocal is the standard library's own name gate: on Windows it rejects the reserved
+	// device names (con, nul, com1, lpt1, ...) and the trailing dots and spaces that FAT cannot store,
+	// and everywhere it rejects separators and the \\?\ namespace. Its rules belong to the running
+	// system, so a data directory prepared on Linux can still hold a name Windows would refuse - the
+	// same direction of trade that making ids lowercase makes in the other one.
+	if !filepath.IsLocal(id) {
+		return fmt.Errorf("agent: id %q is not a name this filesystem accepts", id)
+	}
 	return nil
 }
 
