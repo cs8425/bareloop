@@ -37,7 +37,7 @@ async function showInspect() {
     el(
       'div',
       '',
-      `${data.contextKnown === false ? 'no real measurement since the last compaction' : `${fmtN(data.contextUsed)} of ${fmtN(data.nCtx)} tokens`}${data.estimated ? ' (estimated: the provider gives no per-request usage)' : ''}`,
+      `${data.contextKnown === false ? 'no real measurement ' + (data.summary ? 'since the last compaction' : 'yet') : `${fmtN(data.contextUsed)} of ${fmtN(data.nCtx)} tokens`}${data.estimated ? ' (estimated: the provider gives no per-request usage)' : ''}`,
     ),
   );
   head.appendChild(

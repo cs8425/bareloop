@@ -120,7 +120,7 @@ export function renderStatus(st) {
     nctx > 0
       ? known
         ? `${fmtN(used)} / ${fmtN(nctx)} (${pct.toFixed(0)}%, trigger ${st.thresholdPct ?? '-'}%)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
-        : `– / ${fmtN(nctx)} (no measurement since the last compaction)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
+        : `– / ${fmtN(nctx)} (no measurement${st.summary ? ' since the last compaction' : ' yet'})${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
       : `${fmtN(used)} tokens · n_ctx unknown`;
   $('#session-name').value = st.name || st.session || '';
 }
