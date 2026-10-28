@@ -2,3 +2,7 @@
 /data/
 config.json
 *.log
+
+cmd/bareloopd/bareloopd
+cmd/llmmock/llmmock
+cmd/mcpstub/mcpstub
