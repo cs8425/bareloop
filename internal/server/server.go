@@ -174,10 +174,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 // sendRequest is the body of /send and /interrupt.
 type sendRequest struct {
-	Text   string    `json:"text"`
-	Images []ir.Part `json:"images,omitempty"`
+	Text   string        `json:"text"`
+	Images []ir.Part     `json:"images,omitempty"`
 	Files  []uploadImage `json:"files,omitempty"`
-	Label  string    `json:"label,omitempty"`
+	Label  string        `json:"label,omitempty"`
 	// Req is echoed back so a client can match a reply; it is ignored over REST.
 	Req string `json:"req,omitempty"`
 }

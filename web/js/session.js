@@ -121,7 +121,7 @@ export function renderStatus(st) {
       ? known
         ? `${fmtN(used)} / ${fmtN(nctx)} (${pct.toFixed(0)}%, trigger ${st.thresholdPct ?? '-'}%)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
         : `– / ${fmtN(nctx)} (no measurement${st.summary ? ' since the last compaction' : ' yet'})${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
-      : `${fmtN(used)} tokens · n_ctx unknown`;
+      : `${fmtN(used)} tokens · n_ctx unknown: set it in Settings (the server reported no window)`;
   $('#session-name').value = st.name || st.session || '';
 }
 

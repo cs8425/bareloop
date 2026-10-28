@@ -30,19 +30,19 @@ type StdioConfig struct {
 }
 
 type stdio struct {
-	cfg      StdioConfig
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdoutR  *bufio.Reader
-	stderrR  *bufio.Reader
-	wmu      sync.Mutex
-	d        *demux
-	in       chan *msg
-	ids      idSource
-	closed   bool
-	exitErr  error // why the child died (guarded by cmu)
-	cmu      sync.Mutex
-	logf     func(string, ...any)
+	cfg        StdioConfig
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdoutR    *bufio.Reader
+	stderrR    *bufio.Reader
+	wmu        sync.Mutex
+	d          *demux
+	in         chan *msg
+	ids        idSource
+	closed     bool
+	exitErr    error // why the child died (guarded by cmu)
+	cmu        sync.Mutex
+	logf       func(string, ...any)
 	readerDone chan struct{} // stdout reader finished
 	stderrDone chan struct{} // stderr reader finished
 	reaped     chan struct{} // cmd.Wait() has returned
@@ -359,10 +359,10 @@ type callResult struct {
 }
 
 type pendingCall struct {
-	id      json.RawMessage
-	ch      chan callResult
-	onMsg   func(*msg)
-	tokens  map[string]bool
+	id     json.RawMessage
+	ch     chan callResult
+	onMsg  func(*msg)
+	tokens map[string]bool
 }
 
 type demux struct {

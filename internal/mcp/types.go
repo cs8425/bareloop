@@ -23,10 +23,10 @@ type Tool struct {
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 	// ExecutableSchema is new in 2026-07-28 (optional).
-	ExecutableSchema json.RawMessage     `json:"executableSchema,omitempty"`
-	OutputSchema     json.RawMessage     `json:"outputSchema,omitempty"`
-	Annotations      *ToolAnnotations    `json:"annotations,omitempty"`
-	Meta             map[string]any      `json:"_meta,omitempty"`
+	ExecutableSchema json.RawMessage  `json:"executableSchema,omitempty"`
+	OutputSchema     json.RawMessage  `json:"outputSchema,omitempty"`
+	Annotations      *ToolAnnotations `json:"annotations,omitempty"`
+	Meta             map[string]any   `json:"_meta,omitempty"`
 }
 
 // ToolAnnotations carries MCP tool hints.
@@ -50,12 +50,12 @@ func (t Tool) DisplayName() string {
 // image, audio, resource_link and embedded-resource (resource) blocks, plus the legacy
 // "resource" wrapper shape.
 type ContentBlock struct {
-	Type       string `json:"type"`
-	Text       string `json:"text,omitempty"`
-	Data       string `json:"data,omitempty"`
-	MimeType   string `json:"mimeType,omitempty"`
-	URI        string `json:"uri,omitempty"`
-	Name       string `json:"name,omitempty"`
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Data        string `json:"data,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+	URI         string `json:"uri,omitempty"`
+	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
 	// Resource is the nested payload of a legacy "resource" block.
 	Resource *ResourceContents `json:"resource,omitempty"`
@@ -164,30 +164,30 @@ type InputRequest struct {
 
 // InputResponse answers one InputRequest.
 type InputResponse struct {
-	Behavior string         `json:"behavior"`
-	Content  map[string]any `json:"content,omitempty"`
-	Action   string         `json:"action,omitempty"`
-	Message  string         `json:"message,omitempty"`
+	Behavior string          `json:"behavior"`
+	Content  map[string]any  `json:"content,omitempty"`
+	Action   string          `json:"action,omitempty"`
+	Message  string          `json:"message,omitempty"`
 	Result   json.RawMessage `json:"result,omitempty"`
 }
 
 // DiscoverResult is the result of server/discover (2026-07-28). It is the only version
 // negotiation probe on the modern path — no initialize handshake exists.
 type DiscoverResult struct {
-	SupportedVersions []string                    `json:"supportedVersions,omitempty"`
-	LatestVersion     string                      `json:"latestVersion,omitempty"`
-	Versions          []VersionEntry              `json:"versions,omitempty"`
-	Capabilities      map[string]json.RawMessage  `json:"capabilities,omitempty"`
-	Meta              map[string]json.RawMessage  `json:"_meta,omitempty"`
-	TTLMs             *int                        `json:"ttlMs,omitempty"`
-	CacheScope        string                      `json:"cacheScope,omitempty"`
+	SupportedVersions []string                   `json:"supportedVersions,omitempty"`
+	LatestVersion     string                     `json:"latestVersion,omitempty"`
+	Versions          []VersionEntry             `json:"versions,omitempty"`
+	Capabilities      map[string]json.RawMessage `json:"capabilities,omitempty"`
+	Meta              map[string]json.RawMessage `json:"_meta,omitempty"`
+	TTLMs             *int                       `json:"ttlMs,omitempty"`
+	CacheScope        string                     `json:"cacheScope,omitempty"`
 }
 
 // VersionEntry is one entry of the versions array.
 type VersionEntry struct {
-	Version      string `json:"version"`
-	Available    *bool  `json:"available,omitempty"`
-	DeprecatedAt string `json:"deprecatedAt,omitempty"`
+	Version      string          `json:"version"`
+	Available    *bool           `json:"available,omitempty"`
+	DeprecatedAt string          `json:"deprecatedAt,omitempty"`
 	Info         *Implementation `json:"info,omitempty"`
 }
 
@@ -207,11 +207,11 @@ func (d *DiscoverResult) ServerInfo() Implementation {
 
 // ServerCapabilities is the subset of the capability map this client reacts to.
 type ServerCapabilities struct {
-	Tools        map[string]any `json:"tools,omitempty"`
-	Resources    map[string]any `json:"resources,omitempty"`
-	Prompts      map[string]any `json:"prompts,omitempty"`
-	Elicitation  map[string]any `json:"elicitation,omitempty"`
-	Logging      map[string]any `json:"logging,omitempty"`
+	Tools         map[string]any `json:"tools,omitempty"`
+	Resources     map[string]any `json:"resources,omitempty"`
+	Prompts       map[string]any `json:"prompts,omitempty"`
+	Elicitation   map[string]any `json:"elicitation,omitempty"`
+	Logging       map[string]any `json:"logging,omitempty"`
 	Subscriptions map[string]any `json:"subscriptions,omitempty"`
 }
 
@@ -236,17 +236,17 @@ func (c ServerCapabilities) Has(name string) bool {
 
 // InitializeResult is the legacy (2025-11-25) handshake result.
 type InitializeResult struct {
-	ProtocolVersion string                    `json:"protocolVersion"`
+	ProtocolVersion string                     `json:"protocolVersion"`
 	Capabilities    map[string]json.RawMessage `json:"capabilities,omitempty"`
-	ServerInfo      Implementation            `json:"serverInfo,omitempty"`
-	Instructions    string                    `json:"instructions,omitempty"`
+	ServerInfo      Implementation             `json:"serverInfo,omitempty"`
+	Instructions    string                     `json:"instructions,omitempty"`
 }
 
 // ToolsListResult is the tools/list result (both revisions).
 type ToolsListResult struct {
-	Tools []Tool   `json:"tools,omitempty"`
-	NextCursor string `json:"nextCursor,omitempty"`
-	Meta     map[string]any `json:"_meta,omitempty"`
+	Tools      []Tool         `json:"tools,omitempty"`
+	NextCursor string         `json:"nextCursor,omitempty"`
+	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
 // ---- header mirroring (2026-07-28 transport) ----

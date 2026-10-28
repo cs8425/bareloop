@@ -147,10 +147,34 @@ keeps its own default:
 `defaults` is merged when a session is **created**; afterwards `data/<id>/config.json` is the
 truth for that session and is re-read on restart.
 
-The context window (`llm.nCtx`) is probed from `/props`, `/model` and `/models` when it is not
-configured (llama.cpp, vLLM, Ollama and LM Studio all publish it under one of
-`n_ctx`, `max_context`, `context_length`, `max_model_len`). When it stays unknown the trigger
-cannot fire and only a manual compaction does something.
+The context window (`llm.nCtx`) is a **ceiling you set, not a fact about the server**. The effective
+window is the smaller of the two numbers that exist:
+
+| config | server | used | why |
+|---|---|---|---|
+| not set | reports 40960 | 40960 | the server knows best |
+| 16384 | 40960 | 16384 | you are deliberately spending less of the window |
+| 262144 | 40960 | 40960 | more than the server has cannot be honoured: it would only be refused |
+| 262144 | silent | 262144 | nothing to ask |
+| not set | silent | unknown | compaction and the fit check stay off until you fill it in (Settings → `n_ctx`) |
+
+The server is asked at exactly two moments: once before a session sends anything, and once when the
+provider refused a request for being too large (which may mean the window was made smaller while the
+session was idle). `/props`, `/model` and `/models` are tried in that order (llama.cpp, vLLM, Ollama
+and LM Studio publish it under one of `n_ctx`, `max_context`, `context_length`, `max_model_len`).
+**A probed number is never written back to config**, so moving to a server with a different window
+needs no config edit; `status.nCtx` is the number in use, and `nCtxConfig` / `nCtxSource` say where
+it came from.
+
+When the conversation is too large to hand to the summariser in one request - which is also what
+happens after one oversized message, since the summary request is bound by the same window - the
+summary is produced **serially**: the region is cut into parts that each fit, and each call folds the
+next part into the summary of everything before it (`cmp1 + part 2 -> cmp2`, and so on). A message
+too large to fit even on its own is read at its beginning and its end, and the summary is told that
+its middle was omitted, so that it does not invent one. Set `compact.summaryMode: "iterative"` to use
+the chain even when everything would fit. `"map-reduce"` (summarise the parts in parallel, then
+merge) is reserved for that future implementation and currently runs the serial chain - deliberately,
+because on a local model parallel parts queue on the same GPU instead of helping.
 
 ### Images
 

@@ -174,6 +174,13 @@ func (s *Session) logPayload(turn int, built *asm.Built, tools []llm.Tool) {
 func (s *Session) turns(ctx context.Context) (bool, error) {
 	cfg := s.Config()
 	for {
+		// Ask the server once, before this session has sent anything: the configured window is a
+		// ceiling, not a fact, and discovering that it shrank by means of a refused request costs a
+		// failed turn (see nctx.go for the two moments we probe).
+		if s.needsProbe() {
+			s.probeNCTX("first send of this session")
+		}
+
 		// Rebuild the payload from storage on every turn. This is the mechanism that injects
 		// a message the user sent mid-run: it is already on the path, so it simply becomes
 		// part of this turn's payload, right after the tool results.
@@ -224,6 +231,26 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		s.emit(Event{Type: EvtEntry, Entry: committed})
 		s.emit(Event{Type: EvtDelta, Delta: &Delta{StreamID: streamID, Done: true}})
 		s.emitState()
+
+		// "That request does not fit" is both an error and a measurement. Re-probe (the second and
+		// last moment we ask) and fold the context now: with the serial summary there is always a
+		// way to make the payload fit again, while leaving it alone would brick the session, since
+		// every later turn would send the same oversized payload and be refused the same way.
+		if entry.Label == "llm error" && isContextOverflow(entry.Content) {
+			s.probeNCTX("the provider refused the request as too large")
+			window := s.nctxLocked()
+			res := s.compactHere(ctx, compact.TriggerInLoop, true)
+			if res.Committed {
+				s.emit(Event{Type: EvtCompact, Data: res})
+				return false, fmt.Errorf("request did not fit the model window (%d tokens): the context was compacted, please send again", window)
+			}
+			skip := res.Skipped
+			if skip == "" {
+				skip = "no legal boundary"
+			}
+			return false, fmt.Errorf("request does not fit the model window (%d tokens) and compaction could not shrink it (%s): trim the input or lower compact.keepTarget",
+				window, skip)
+		}
 
 		if aborted {
 			// Force-interrupt: keep the half output, append the user's message and keep
@@ -458,9 +485,6 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	if usage != nil && usage.HasPrompt {
 		s.mu.Lock()
 		s.ctxUsed, s.ctxKnown = usage.ContextUsed(), true
-		if s.nctx == 0 {
-			s.nctx = s.provider.NCTX(context.Background())
-		}
 		s.mu.Unlock()
 		s.logf("turn %d: contextUsed=%d (prompt=%d cache=%d completion=%d)",
 			turn, usage.ContextUsed(), usage.PromptTokens, usage.CacheTokens, usage.CompletionTokens)

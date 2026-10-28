@@ -124,8 +124,8 @@ func (p Params) Normalise() Params {
 		p.Marker = d.Marker
 	}
 	switch p.SummaryMode {
-	case ModeTranscript:
-		p.SummaryMode = ModeTranscript
+	case ModeTranscript, ModeIterative, ModeMapReduce:
+		// legal values, kept as written (map-reduce runs the serial chain until it is implemented)
 	default:
 		p.SummaryMode = ModePrefixStable
 	}

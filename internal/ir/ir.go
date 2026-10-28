@@ -103,7 +103,7 @@ type Entry struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
 	// Reasoning is the model's chain-of-thought channel (never sent back to the model).
-	Reasoning string `json:"reasoning,omitempty"`
+	Reasoning string     `json:"reasoning,omitempty"`
 	Parts     []Part     `json:"parts,omitempty"`
 	ToolCalls []ToolCall `json:"toolCalls,omitempty"`
 

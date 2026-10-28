@@ -450,7 +450,7 @@ func rawText(raw json.RawMessage) string {
 	return ""
 }
 
-func (m msgPayload) text() string  { return rawText(m.Content) }
+func (m msgPayload) text() string { return rawText(m.Content) }
 func (m msgPayload) reasoning() string {
 	s := rawText(m.ReasoningContent)
 	if s == "" {

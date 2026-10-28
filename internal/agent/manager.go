@@ -389,5 +389,3 @@ func validID(id string) error {
 	}
 	return nil
 }
-
-

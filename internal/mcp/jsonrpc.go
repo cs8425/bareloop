@@ -17,9 +17,9 @@ type msg struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
-func (m *msg) isRequest() bool     { return m.Method != "" && len(m.ID) > 0 }
+func (m *msg) isRequest() bool      { return m.Method != "" && len(m.ID) > 0 }
 func (m *msg) isNotification() bool { return m.Method != "" && len(m.ID) == 0 }
-func (m *msg) isResponse() bool    { return m.Method == "" && len(m.ID) > 0 }
+func (m *msg) isResponse() bool     { return m.Method == "" && len(m.ID) > 0 }
 
 // rpcError is a JSON-RPC error object.
 type rpcError struct {
@@ -51,14 +51,14 @@ func (e *rpcError) Modern() bool {
 
 // Error codes (2026-07-28 allocation policy).
 const (
-	CodeParseError          = -32700
-	CodeInvalidRequest      = -32600
-	CodeMethodNotFound      = -32601
-	CodeInvalidParams       = -32602
-	CodeInternalError       = -32603
-	CodeHeaderMismatch      = -32020
+	CodeParseError              = -32700
+	CodeInvalidRequest          = -32600
+	CodeMethodNotFound          = -32601
+	CodeInvalidParams           = -32602
+	CodeInternalError           = -32603
+	CodeHeaderMismatch          = -32020
 	CodeMissingClientCapability = -32021
-	CodeUnsupportedVersion  = -32022
+	CodeUnsupportedVersion      = -32022
 )
 
 // idSource hands out JSON-RPC ids.
@@ -84,20 +84,20 @@ const (
 
 // Methods we speak.
 const (
-	mDiscover            = "server/discover"
-	mInitialize          = "initialize"
-	mInitialized         = "notifications/initialized"
-	mToolsList           = "tools/list"
-	mToolsCall           = "tools/call"
-	mCancelled           = "notifications/cancelled"
-	mSubscribe           = "subscriptions/listen"
-	mElicitation         = "elicitation/create"
-	mRootsList           = "roots/list"
-	mSamplingCreate      = "sampling/createMessage"
-	mNotifySubAck        = "notifications/subscriptions/acknowledged"
-	mToolsListChanged    = "notifications/tools/list_changed"
-	mLogging             = "notifications/message"
-	mProgress            = "notifications/progress"
+	mDiscover         = "server/discover"
+	mInitialize       = "initialize"
+	mInitialized      = "notifications/initialized"
+	mToolsList        = "tools/list"
+	mToolsCall        = "tools/call"
+	mCancelled        = "notifications/cancelled"
+	mSubscribe        = "subscriptions/listen"
+	mElicitation      = "elicitation/create"
+	mRootsList        = "roots/list"
+	mSamplingCreate   = "sampling/createMessage"
+	mNotifySubAck     = "notifications/subscriptions/acknowledged"
+	mToolsListChanged = "notifications/tools/list_changed"
+	mLogging          = "notifications/message"
+	mProgress         = "notifications/progress"
 )
 
 // Implementation list (the only one we need).

@@ -60,29 +60,36 @@ type Session struct {
 	st  *store.State
 	cfg Config
 
-	phase    phase
-	cancel   context.CancelFunc
-	done     chan struct{}
+	phase  phase
+	cancel context.CancelFunc
+	done   chan struct{}
 	// generating is true only while an LLM stream is open. Compaction may run between turns
 	// of a run (the loop calls it itself) but never while tokens are flowing (§1.1).
 	generating bool
-	forceMsg *Message // set when the user interrupts with a message to send now
-	turn     int
+	forceMsg   *Message // set when the user interrupts with a message to send now
+	turn       int
 	// sentTip is the path tip that was included in the payload we last sent. Everything on
 	// the path after it is "pending": a message the user typed while the loop was running.
-	sentTip   string
-	streamNo  int
-	lastRun   *RunInfo
-	ctxUsed   int
-	ctxKnown  bool
-	nctx      int
-	updated_at time.Time
+	sentTip  string
+	streamNo int
+	lastRun  *RunInfo
+	ctxUsed  int
+	ctxKnown bool
+	nctx     int // effective window: see nctx.go (never persisted)
+	// nctxCfg is what config.json says (the operator's ceiling); nctxServer is what the server
+	// last reported. Keeping them apart is the only way to explain a decision, and nctx itself is
+	// derived from the two on every probe.
+	nctxCfg     int
+	nctxServer  int
+	nctxProbed  bool // asked since this process started
+	nctxProbing bool // probe in flight (they are cheap but they are HTTP)
+	updated_at  time.Time
 
 	// compaction lock (§1.4): taken before the first await, covers summary + gate wait.
-	compMu   sync.Mutex
+	compMu     sync.Mutex
 	compacting bool
-	gate     chan gateDecision
-	gateID   string
+	gate       chan gateDecision
+	gateID     string
 
 	// pendingElicit waits for the UI to answer an MCP input request.
 	pmu           sync.Mutex
@@ -145,11 +152,11 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	s.reg = newRegistry(s.emit, s.logf, cfg.NotifyTools)
 	s.reg.askElicit = s.askElicit
 	s.sentTip = tipOfPending(st)
-	if cfg.LLM.NCTX > 0 {
-		s.nctx = cfg.LLM.NCTX
-	} else if n := prov.NCTX(ctx); n > 0 {
-		s.nctx = n
-	}
+	// The configured window is the starting point only: before the session sends anything the
+	// server is asked once and the effective value is re-derived (nctx.go). Nothing probed is ever
+	// written back to config.json.
+	s.nctxCfg = cfg.LLM.NCTX
+	s.nctx = cfg.LLM.NCTX
 	for _, id := range st.Adopted {
 		s.logf("adopted orphan compaction entry %s onto the path tip (§3.10)", id)
 	}
@@ -287,7 +294,7 @@ func (s *Session) Status() *Status {
 	entries := len(s.st.Entries)
 	turn := s.turn
 	used, known := s.ctxUsed, s.ctxKnown
-	nctx := s.nctx
+	nctx, cfgN, srvN := s.nctx, s.nctxCfg, s.nctxServer
 	s.mu.Unlock()
 
 	_, _, cmp := s.effective()
@@ -306,6 +313,8 @@ func (s *Session) Status() *Status {
 		Name:         cfg.Name,
 		Model:        cfg.LLM.Model,
 		NCTX:         nctx,
+		NCTXSource:   nctxSource(cfgN, srvN),
+		NCTXConfig:   cfgN,
 		ContextUsed:  used,
 		ContextKnown: known,
 		ThresholdPct: cfg.Compact.ThresholdPct,
@@ -417,7 +426,6 @@ func (s *Session) endsWithUserMsg() bool {
 }
 
 // Stop and Interrupt live in loop.go.
-
 
 // ---------------------------------------------------------------- entry editing
 
@@ -605,17 +613,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		}
 		s.mu.Lock()
 		s.provider = prov
-		if patch.LLM.NCTX > 0 {
-			s.nctx = patch.LLM.NCTX
-		} else {
-			s.nctx = 0
-		}
+		s.nctxCfg = patch.LLM.NCTX
+		s.nctx = patch.LLM.NCTX
+		// A new endpoint may be a different server: forget what the old one reported and ask again
+		// before the next send. The probe is deliberately not done here, so PATCH stays fast.
+		s.nctxServer, s.nctxProbed, s.nctxProbing = 0, false, false
 		s.mu.Unlock()
-		if n := prov.NCTX(ctx); n > 0 {
-			s.mu.Lock()
-			s.nctx = n
-			s.mu.Unlock()
-		}
 	}
 	if reconnectMCP {
 		s.reg.closeAll()
@@ -705,26 +708,26 @@ func (s *Session) AnswerElicitation(id, behavior string, content map[string]any)
 // Inspection is the "what will actually be sent" view: every entry of the payload with its
 // derived size, plus the plan the compactor would produce right now.
 type Inspection struct {
-	Session      string        `json:"session"`
-	NCTX         int           `json:"nCtx"`
-	ContextUsed  int           `json:"contextUsed"`
-	ContextKnown bool          `json:"contextKnown"`
-	Budget       int           `json:"budget"`
-	SummaryCap   int           `json:"summaryCap"`
-	Summary      bool          `json:"summary"`
-	BoundaryID   *string       `json:"boundaryId,omitempty"`
-	Broken       bool          `json:"boundaryBroken,omitempty"`
-	Messages     []InspectRow  `json:"messages"`
-	SystemBytes  int           `json:"systemBytes"`
+	Session      string       `json:"session"`
+	NCTX         int          `json:"nCtx"`
+	ContextUsed  int          `json:"contextUsed"`
+	ContextKnown bool         `json:"contextKnown"`
+	Budget       int          `json:"budget"`
+	SummaryCap   int          `json:"summaryCap"`
+	Summary      bool         `json:"summary"`
+	BoundaryID   *string      `json:"boundaryId,omitempty"`
+	Broken       bool         `json:"boundaryBroken,omitempty"`
+	Messages     []InspectRow `json:"messages"`
+	SystemBytes  int          `json:"systemBytes"`
 	// System is the exact system head that will be sent. Empty means no system message is sent at
 	// all, which is the difference between a steered model and whatever the model defaults to.
-	System       string        `json:"system,omitempty"`
-	TotalBytes   int           `json:"totalBytes"`
-	Synthetic    int           `json:"syntheticToolResults"`
-	Plan         *compact.Plan `json:"plan,omitempty"`
-	PlanReason   string        `json:"planReason,omitempty"`
-	Estimated    bool          `json:"estimated"`
-	Tools        []string      `json:"tools,omitempty"`
+	System     string        `json:"system,omitempty"`
+	TotalBytes int           `json:"totalBytes"`
+	Synthetic  int           `json:"syntheticToolResults"`
+	Plan       *compact.Plan `json:"plan,omitempty"`
+	PlanReason string        `json:"planReason,omitempty"`
+	Estimated  bool          `json:"estimated"`
+	Tools      []string      `json:"tools,omitempty"`
 }
 
 // InspectRow is one payload entry in the inspector.

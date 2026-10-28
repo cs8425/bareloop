@@ -24,9 +24,9 @@ import (
 // never re-used, so adding a tool never renames the others and the `tools` array the chat
 // template renders stays stable (spec §5.3).
 type registry struct {
-	mu      sync.RWMutex
-	servers map[string]*mcp.Client
-	order   []string // deterministic server order
+	mu       sync.RWMutex
+	servers  map[string]*mcp.Client
+	order    []string          // deterministic server order
 	assigned map[string]string // "server\x00tool" -> model-visible name
 	byName   map[string]toolRef
 	defs     []llm.Tool

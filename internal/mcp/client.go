@@ -73,7 +73,7 @@ type Config struct {
 	Timeout time.Duration `json:"-"`
 	HTTP    *http.Client  `json:"-"`
 	// Startup bounds the connect/negotiate phase. Default 30s.
-	Startup time.Duration `json:"-"`
+	Startup time.Duration                    `json:"-"`
 	Logf    func(format string, args ...any) `json:"-"`
 	// Roots are offered to legacy servers that ask for them.
 	Roots []Root `json:"roots,omitempty"`

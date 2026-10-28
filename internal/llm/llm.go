@@ -87,10 +87,10 @@ type Provider interface {
 
 // Config configures a provider.
 type Config struct {
-	Kind     string `json:"kind"` // "openai" (default)
-	BaseURL  string `json:"baseUrl"`
-	APIKey   string `json:"apiKey"`
-	Model    string `json:"model"`
+	Kind    string `json:"kind"` // "openai" (default)
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+	Model   string `json:"model"`
 	// Headers are extra request headers (e.g. extra authorisation).
 	Headers map[string]string `json:"headers"`
 	// NCTX is the model context window; 0 = ask the server / unknown.

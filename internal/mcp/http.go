@@ -19,17 +19,17 @@ type HTTPConfig struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers,omitempty"`
 	// Timeout for the whole request round trip. 0 = no timeout (streams are exempt).
-	Timeout time.Duration `json:"-"`
-	HTTP    *http.Client  `json:"-"`
+	Timeout time.Duration                    `json:"-"`
+	HTTP    *http.Client                     `json:"-"`
 	Logf    func(format string, args ...any) `json:"-"`
 }
 
 type httpTransport struct {
-	cfg   HTTPConfig
-	era   string
-	hc    *http.Client
-	ids   idSource
-	in    chan *msg
+	cfg      HTTPConfig
+	era      string
+	hc       *http.Client
+	ids      idSource
+	in       chan *msg
 	nmu      sync.Mutex
 	onNotify func(*msg)
 	// legacy session id, learned from the initialize response
@@ -66,11 +66,11 @@ func newHTTP(cfg HTTPConfig, era string) *httpTransport {
 		hc = &http.Client{}
 	}
 	return &httpTransport{
-		cfg:   cfg,
-		era:   era,
-		hc:    hc,
-		in:    make(chan *msg, 32),
-		logf:  cfg.Logf,
+		cfg:  cfg,
+		era:  era,
+		hc:   hc,
+		in:   make(chan *msg, 32),
+		logf: cfg.Logf,
 	}
 }
 
