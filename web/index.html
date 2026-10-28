@@ -85,15 +85,25 @@
         <h3>new session</h3>
         <label>
           id
-          <!-- The pattern is compiled with the regexp `v` flag: an unescaped `-` right after `.` is a
-               syntax error there, which used to make constraint validation throw on click. -->
-          <input name="id" required spellcheck="false" maxlength="64" pattern="[A-Za-z0-9_.\-]+"
-            title="letters, digits, dot, underscore, dash" placeholder="letters, digits, . _ -" autocomplete="off" />
+          <!-- Not required: an empty id means "make one up", which the dialog does when it opens and
+               the submit handler does on create. An id is a directory name, and directory names are
+               case-insensitive on Windows and macOS, so ids are lowercase - that is what lets the
+               filesystem be the thing that guarantees uniqueness. The pattern is compiled with the
+               regexp `v` flag, where an unescaped `-` right after `.` is a syntax error. -->
+          <input name="id" spellcheck="false" maxlength="64" pattern="[a-z0-9_.\-]+"
+            title="lowercase letters, digits, dot, underscore, dash" placeholder="lowercase, or leave empty"
+            autocomplete="off" autocapitalize="off" autocorrect="off" />
         </label>
         <label>
           name
           <input name="name" placeholder="optional display name" />
         </label>
+        <p class="hint">
+          An id is a directory name: lowercase letters, digits and <code>. _ -</code> only. One is
+          suggested when this dialog opens - change it freely, or clear it and a new one is made up
+          when you press create.
+          <button type="button" class="ghost" id="new-id-again" title="suggest a different id">↻ another id</button>
+        </p>
         <p class="hint">
           The model, MCP servers, system prompt and compaction parameters are inherited from the
           server configuration; change them per session in settings.

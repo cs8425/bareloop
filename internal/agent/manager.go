@@ -181,7 +181,7 @@ func (m *Manager) Get(ctx context.Context, id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return m.open(ctx, cfg)
+	return m.open(ctx, id, cfg)
 }
 
 // Peek returns an already-open session without opening anything.
@@ -201,13 +201,21 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	cfg = m.MergeDefaults(cfg)
-	if _, err := os.Stat(filepath.Join(m.dir(cfg.ID), "log.jsonl")); err == nil {
-		return nil, fmt.Errorf("agent: session %q already exists", cfg.ID)
+	// The directory is the identity, so an existing directory means the id is taken - even when no log
+	// has been written yet (a session interrupted before its first entry, or a directory someone made
+	// by hand, used to be overwritten without a word because only log.jsonl was checked).
+	if fi, err := os.Stat(m.dir(cfg.ID)); err == nil {
+		if fi.IsDir() {
+			return nil, fmt.Errorf("agent: session %q already exists (%s)", cfg.ID, m.dir(cfg.ID))
+		}
+		return nil, fmt.Errorf("agent: %s exists and is not a directory", m.dir(cfg.ID))
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 	if err := m.saveConfig(cfg); err != nil {
 		return nil, err
 	}
-	return m.open(ctx, cfg)
+	return m.open(ctx, cfg.ID, cfg)
 }
 
 // SaveConfig persists a session config (used before opening and on edits).
@@ -240,26 +248,41 @@ func (m *Manager) loadConfig(id string) (Config, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return cfg, fmt.Errorf("agent: bad config for %q: %w", id, err)
 	}
-	if cfg.ID == "" {
+	// The directory is the session's identity. It is what List, the HTTP route, Remove and the log
+	// path all use, so a config file must not be able to re-home a session: two directories holding
+	// "id": "test" used to be one session, and the other directory's log was never read at all.
+	// A disagreeing file is reported and rewritten so it cannot mislead the next reader.
+	stale := cfg.ID != id
+	if stale && cfg.ID != "" {
+		m.logf("session %q: config.json says id %q; the directory name wins, rewriting config.json", id, cfg.ID)
+	}
+	if stale {
 		cfg.ID = id
 	}
 	cfg.Compact = cfg.Compact.Normalise()
+	if stale {
+		if err := m.saveConfig(cfg); err != nil {
+			m.logf("session %q: could not fix the id in config.json: %v", id, err)
+		}
+	}
 	return cfg, nil
 }
 
-func (m *Manager) open(ctx context.Context, cfg Config) (*Session, error) {
+// open returns the session of the directory id, opening it when needed. id is always the directory
+// name; cfg.ID is kept as a copy of it, never the other way round.
+func (m *Manager) open(ctx context.Context, id string, cfg Config) (*Session, error) {
 	m.mu.Lock()
-	if s, ok := m.sessions[cfg.ID]; ok {
+	if s, ok := m.sessions[id]; ok {
 		m.mu.Unlock()
 		return s, nil
 	}
 	m.mu.Unlock()
-	s, err := openSession(ctx, m, cfg)
+	s, err := openSession(ctx, m, id, cfg)
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
-	m.sessions[cfg.ID] = s
+	m.sessions[id] = s
 	m.mu.Unlock()
 	go s.emitState()
 	return s, nil
@@ -283,7 +306,7 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 			m.logf("skip session %s: %v", de.Name(), err)
 			continue
 		}
-		if _, err := m.open(ctx, cfg); err != nil {
+		if _, err := m.open(ctx, de.Name(), cfg); err != nil {
 			m.logf("open session %s: %v", de.Name(), err)
 		}
 	}
@@ -292,6 +315,10 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 
 // Remove closes a session and deletes its directory.
 func (m *Manager) Remove(id string) error {
+	// The route hands us {id} straight from the URL, and this is a RemoveAll: validate before deleting.
+	if err := validID(id); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if ok {
@@ -323,17 +350,28 @@ func (m *Manager) DefaultSessionConfig(id, name string) Config {
 	return m.MergeDefaults(Config{ID: id, Name: name})
 }
 
+// ValidID reports whether id can be used as a session id. An id is also the session's directory name
+// and the key of every route, so this is the portability gate for the whole data directory.
+func ValidID(id string) error { return validID(id) }
+
 // validID keeps session ids filesystem-safe.
 func validID(id string) error {
 	if id == "" {
 		return errors.New("agent: empty id")
+	}
+	// An id is a directory name, and directories are only case-insensitive on some filesystems
+	// (Windows, macOS, exFAT drives, synced folders). Forcing lowercase makes "no two session ids
+	// differ only in case" true by construction, so the filesystem's own uniqueness is enough on
+	// every platform - and a hand-made data/Test/ directory cannot be opened under the name test.
+	if lower := strings.ToLower(id); lower != id {
+		return fmt.Errorf("agent: session ids are lowercase (did you mean %q?)", lower)
 	}
 	if len(id) > 64 {
 		return errors.New("agent: id too long")
 	}
 	for _, r := range id {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
 		default:
 			return fmt.Errorf("agent: id %q contains an unsupported character %q", id, r)
 		}

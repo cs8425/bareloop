@@ -54,28 +54,87 @@ async function compactNow() {
   if (res) onCompaction(res);
 }
 
+// Session ids are directory names, and nobody has one ready when a dialog asks for it, so one is
+// suggested here rather than by the server: an id the server invents is a name nobody asked for, and
+// the UI can show, change and keep a suggestion. Two readable words plus a short suffix read well in
+// `ls data/` and cannot contain anything a filesystem would object to.
+const ID_ADJECTIVES = ['amber', 'brisk', 'cosmic', 'crisp', 'gentle', 'humble', 'jolly', 'lunar', 'mellow', 'nimble', 'polite', 'quiet', 'quaint', 'solar', 'spry', 'tidy', 'vivid', 'wry', 'zesty', 'zippy'];
+const ID_NOUNS = ['otter', 'cactus', 'beacon', 'kettle', 'maple', 'nebula', 'pixel', 'quill', 'raft', 'saddle', 'thimble', 'violin', 'warbler', 'zephyr', 'anchor', 'cinder', 'dollop', 'ember', 'fathom', 'grotto', 'harbor', 'island', 'lantern', 'orbit'];
+
+function randomBelow(n) {
+  const c = window.crypto;
+  if (c && c.getRandomValues) {
+    const buf = new Uint32Array(1);
+    c.getRandomValues(buf);
+    return buf[0] % n;
+  }
+  return Math.floor(Math.random() * n);
+}
+
+function newSessionId() {
+  const pick = (list) => list[randomBelow(list.length)];
+  const suffix = randomBelow(46656).toString(36).padStart(3, '0');
+  return `${pick(ID_ADJECTIVES)}-${pick(ID_NOUNS)}-${suffix}`;
+}
+
 function wireNewSession() {
   const dlg = $('#dlg-new');
-  $('#new-session').onclick = () => dlg.showModal();
+  const form = $('#new-form');
+  const idField = form.elements.namedItem('id');
+  // What the app made up, so a collision can be resolved without overwriting a hand-typed id.
+  let suggested = '';
+  const suggest = () => {
+    suggested = newSessionId();
+    idField.value = suggested;
+  };
+  // Ids are lowercase (see index.html): folding the text while typing beats rejecting it after the
+  // fact, and lowercasing never changes the length, so the caret does not move.
+  idField.addEventListener('input', () => {
+    const lower = idField.value.toLowerCase();
+    if (idField.value !== lower) idField.value = lower;
+  });
+  $('#new-id-again').onclick = suggest;
+  $('#new-session').onclick = () => {
+    if (!idField.value.trim()) suggest();
+    dlg.showModal();
+  };
   // data-close buttons are the only way out besides create. A button that both submitted and closed
   // the dialog used to create a session when the user meant to back out of one.
   dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(b.dataset.close || 'cancel'); });
-  $('#new-form').addEventListener('submit', async (e) => {
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
     // Enter in the id field also submits the form; only the create button means it.
     if (e.submitter && e.submitter.value !== 'create') return;
-    const f = e.target;
-    const id = (f.elements.namedItem('id').value || '').trim();
-    // The server used to invent an id when this was empty, so one stray submit dropped a session
-    // named after the clock into the data directory. An id nobody typed is not worth creating.
-    if (!id) { note('an id is required'); return; }
-    const body = { id, name: f.elements.namedItem('name').value.trim() };
-    const data = await api('/api/sessions', { body }).catch((err) => {
-      fail(err);
-      return null;
-    });
-    if (!data) return; // a rejected id leaves the dialog open so it can be retyped
-    f.reset();
+    const name = form.elements.namedItem('name').value.trim();
+    let id = idField.value.trim().toLowerCase();
+    // An empty id is an explicit "I don't care": make one up and say so, rather than sending nothing
+    // or letting the server guess behind the scenes.
+    if (!id) {
+      id = newSessionId();
+      suggested = id;
+      idField.value = id;
+      note(`suggested id: ${id}`);
+    } else {
+      suggested = '';
+    }
+    const send = (theId) => api('/api/sessions', { body: { id: theId, name } });
+    let data = await send(id).catch((err) => ({ err }));
+    if (data && data.err) {
+      // Two browsers can be handed the same suggestion; only the server knows what it has already.
+      // A hand-typed id is not ours to change, so it keeps its error and stays open for a fix.
+      if (id === suggested) {
+        const again = newSessionId();
+        const retry = await send(again).catch(() => null);
+        if (retry) {
+          id = again;
+          data = retry;
+          note(`that id was taken - used ${again}`);
+        }
+      }
+      if (!data.id) { fail(data.err || new Error('create returned no id')); return; }
+    }
+    form.reset();
+    suggested = '';
     dlg.close('create');
     if (data.id) await selectSession(data.id);
   });

@@ -95,6 +95,32 @@ how an empty API key keeps the key, and why `compact: {}` means "unchanged". It 
 cannot clear a system prompt or switch `asm.sendReasoning` back to its unset state over the API;
 stop the server, edit `data/<id>/config.json` and start again for that.
 
+### Session identity
+
+The session **id is its directory name**: `data/test-1/` *is* session `test-1`, and the `"id"` field
+inside `data/test-1/config.json` is a copy of that name, nothing more. Whenever a session is loaded
+the two are compared, and a file that disagrees is reported and rewritten:
+
+```text
+session "test-1": config.json says id "test"; the directory name wins, rewriting config.json
+```
+
+Nothing else is allowed to re-home a session — the log path, the session list, `PATCH` and `DELETE`
+all work from the directory. The reason is concrete: a directory whose config carried another
+session's id became that session, so messages typed into one were appended to the other's log while
+its own `log.jsonl` was never read.
+
+An id is a directory name, so it is validated on the way in: lowercase `a-z 0-9 . _ -`, at most 64 characters,
+no `..`. Lowercase is not cosmetics: directory names are case-insensitive on Windows and macOS, so with
+case folded away two sessions cannot differ only in how they are spelled, which is what lets the
+filesystem itself guarantee uniqueness. `POST /api/sessions` requires an id and answers **400** without
+one (it used to invent `s<timestamp>`, which left a session nobody asked for in the data directory);
+creating over an existing directory is a **409**, and `DELETE` refuses an id that is not a valid name.
+The API still refuses to guess, but the UI will: it suggests an id (`quiet-otter-1f3`) when the dialog
+opens, offers another on request, folds what you type into lowercase, and makes one up if you clear the
+field — because the person pressing create asked for it, in front of them. The id is not the label you
+see either: `name` is free-form, so spaces and non-ASCII text belong there.
+
 ### Leaving a value out
 
 Nothing is put into the request body unless it is set, so an unset field means the LLM server
@@ -247,7 +273,7 @@ those braces, a round that committed nothing stops the run instead of starting a
 |---|---|---|
 | GET | `/api/health` | liveness |
 | GET | `/api/sessions` | every session with its status |
-| POST | `/api/sessions` | create a session (body: a config; `{}` is enough) |
+| POST | `/api/sessions` | create a session (body: a config; `id` is required, lowercase, and becomes the directory name — 400 without it, 409 if the directory exists) |
 | GET | `/api/session/{id}` | config (without the API key), status, every entry sorted by id, pending ids |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |
 | DELETE | `/api/session/{id}` | close and delete the session |

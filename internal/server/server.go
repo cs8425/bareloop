@@ -78,11 +78,20 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	cfg.ID = strings.TrimSpace(cfg.ID)
+	// An id is a directory name, so the server never invents one: a stray submit used to leave a
+	// session named after the clock in the data directory, which nobody asked for.
 	if cfg.ID == "" {
-		cfg.ID = fmt.Sprintf("s%d", time.Now().Unix())
+		writeErr(w, http.StatusBadRequest, errors.New("a session id is required"))
+		return
+	}
+	if err := agent.ValidID(cfg.ID); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
 	}
 	sess, err := s.mgr.Create(r.Context(), cfg)
 	if err != nil {
+		// The usual case is that the directory already exists: the directory is the identity.
 		writeErr(w, http.StatusConflict, err)
 		return
 	}

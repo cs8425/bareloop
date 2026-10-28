@@ -97,13 +97,15 @@ type Session struct {
 	lastTools []llm.Tool
 }
 
-// openSession opens (creating if needed) one session.
-func openSession(ctx context.Context, mgr *Manager, cfg Config) (*Session, error) {
+// openSession opens (creating if needed) the session stored in the directory named id. The directory
+// is the identity, so cfg.ID is set from it rather than trusted.
+func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Session, error) {
 	cfg.Compact = cfg.Compact.Normalise()
-	if cfg.ID == "" {
+	if id == "" {
 		return nil, errors.New("agent: session id is required")
 	}
-	dir := filepath.Join(mgr.root, cfg.ID)
+	cfg.ID = id
+	dir := filepath.Join(mgr.root, id)
 	if _, err := os.Stat(dir); err != nil {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
@@ -132,7 +134,7 @@ func openSession(ctx context.Context, mgr *Manager, cfg Config) (*Session, error
 		return nil, err
 	}
 	s := &Session{
-		ID:            cfg.ID,
+		ID:            id,
 		mgr:           mgr,
 		log:           log,
 		cfg:           cfg,
