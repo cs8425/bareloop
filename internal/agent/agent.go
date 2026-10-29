@@ -39,6 +39,7 @@ const (
 	EvtError       = "error"
 	EvtInfo        = "info"
 	EvtRemoved     = "removed" // an entry was deleted
+	EvtTools       = "tools"   // the published tool set changed (a policy change landed)
 )
 
 // Event is one UI event.
@@ -105,19 +106,26 @@ type Status struct {
 	// is the ceiling this session was configured with. The gap between the two is the drift an
 	// operator has to see: a configured window larger than the server's is silently clamped, and a
 	// session with no number at all can neither compact nor check that a request fits.
-	NCTXSource   string         `json:"nCtxSource,omitempty"`
-	NCTXConfig   int            `json:"nCtxConfig,omitempty"`
-	ContextUsed  int            `json:"contextUsed"`
-	ContextKnown bool           `json:"contextKnown"`
-	ThresholdPct int            `json:"thresholdPct"`
-	UsedPct      int            `json:"usedPct"`
-	Tip          string         `json:"tip,omitempty"`
-	Entries      int            `json:"entries"`
-	Summary      bool           `json:"summary,omitempty"`
-	Broken       bool           `json:"boundaryBroken,omitempty"`
-	Pending      int            `json:"pending,omitempty"`
-	Turn         int            `json:"turn,omitempty"`
+	NCTXSource   string `json:"nCtxSource,omitempty"`
+	NCTXConfig   int    `json:"nCtxConfig,omitempty"`
+	ContextUsed  int    `json:"contextUsed"`
+	ContextKnown bool   `json:"contextKnown"`
+	ThresholdPct int    `json:"thresholdPct"`
+	UsedPct      int    `json:"usedPct"`
+	Tip          string `json:"tip,omitempty"`
+	Entries      int    `json:"entries"`
+	Summary      bool   `json:"summary,omitempty"`
+	Broken       bool   `json:"boundaryBroken,omitempty"`
+	Pending      int    `json:"pending,omitempty"`
+	Turn         int    `json:"turn,omitempty"`
+	// Tools is what a request would carry right now; ToolsEnabled is what the session's policy
+	// says it will carry once any run in flight has finished. The two differ only while a tool
+	// change is waiting (§tools), and ToolsTotal is what the servers offer in total — the gap
+	// between that and ToolsEnabled is what this session switched off.
 	Tools        int            `json:"tools"`
+	ToolsEnabled int            `json:"toolsEnabled"`
+	ToolsTotal   int            `json:"toolsTotal"`
+	ToolsPending bool           `json:"toolsPending,omitempty"`
 	Servers      []ServerStatus `json:"servers,omitempty"`
 	AutoCompact  bool           `json:"autoCompact"`
 	InLoop       bool           `json:"inLoop"`
@@ -129,12 +137,79 @@ type ServerStatus struct {
 	Name      string `json:"name"`
 	Transport string `json:"transport"`
 	Connected bool   `json:"connected"`
-	Era       string `json:"era,omitempty"`
-	Version   string `json:"protocolVersion,omitempty"`
-	Impl      string `json:"impl,omitempty"`
-	Tools     int    `json:"tools"`
+	// Disabled means this session switched the whole server off: not connected, and deliberately
+	// not an error. Enabled/Hidden split the tools it offers between the ones a request carries
+	// and the ones this session switched off individually.
+	Disabled bool   `json:"disabled,omitempty"`
+	Enabled  int    `json:"enabled"`
+	Hidden   int    `json:"hidden"`
+	Era      string `json:"era,omitempty"`
+	Version  string `json:"protocolVersion,omitempty"`
+	Impl     string `json:"impl,omitempty"`
+	Tools    int    `json:"tools"`
+	Error    string `json:"error,omitempty"`
+	Info     string `json:"instructions,omitempty"`
+}
+
+// ToolRow is one tool in the tools drawer. The drawer shows every tool the session's servers
+// offer, published or not: a switched-off tool is still in the transcript, and seeing what it is
+// worth is the only way to decide whether it earns its place in the prompt.
+type ToolRow struct {
+	// Name is the model-visible name — the tool's own name, "<prefix>_<tool>", or "<server>_<tool>"
+	// when two tools want the same name; RawName is always the tool's own name from tools/list, which
+	// is what a policy entry is matched against. RenamedFrom is set when a collision means Name is not
+	// the name the policy asked for.
+	Name        string `json:"name"`
+	RawName     string `json:"rawName"`
+	RenamedFrom string `json:"renamedFrom,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Schema is the tool's input schema as the model sees it. The drawer renders it as the parameter
+	// table: switching a tool off should not require reading the server's source to find out what the
+	// tool wants or even what its name means.
+	Schema   json.RawMessage `json:"schema,omitempty"`
+	Enabled  bool            `json:"enabled"`
+	ReadOnly bool            `json:"readOnly,omitempty"`
+	// EstTokens is a bytes/4 estimate of what the definition costs per request, not a measurement.
+	EstTokens int    `json:"estTokens"`
+	Uses      int    `json:"uses"`
+	LastUsed  string `json:"lastUsed,omitempty"`
+}
+
+// ToolsServer is one MCP server with its tools, as the drawer shows them.
+type ToolsServer struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"`
+	Connected bool   `json:"connected"`
+	Disabled  bool   `json:"disabled,omitempty"`
 	Error     string `json:"error,omitempty"`
-	Info      string `json:"instructions,omitempty"`
+	Impl      string `json:"impl,omitempty"`
+	// Prefix is the model-visible prefix in force; empty means no namespace at all, which is the
+	// default. ConfiguredPrefix is what config.json says (toolPrefix), so a difference between the two
+	// can only be whitespace.
+	Prefix           string    `json:"prefix"`
+	ConfiguredPrefix string    `json:"configuredPrefix,omitempty"`
+	Known            int       `json:"known"`
+	Enabled          int       `json:"enabled"`
+	Note             string    `json:"note,omitempty"`
+	Tools            []ToolRow `json:"tools"`
+}
+
+// ToolsView is the tools drawer: what the model may call right now, roughly what each tool costs,
+// and whether a change is still waiting for the end of the run.
+type ToolsView struct {
+	Session        string        `json:"session"`
+	Servers        []ToolsServer `json:"servers"`
+	Visible        int           `json:"visible"`
+	Total          int           `json:"total"`
+	PendingChanges bool          `json:"pendingChanges"`
+	// AppliesTo is when a change takes effect. "next-run" is the only mode there is: the tool
+	// block is rendered in front of the history, so replacing it mid-run would invalidate the KV
+	// prefix of everything already generated — and a request that is already on the wire cannot
+	// change at all.
+	AppliesTo   string    `json:"appliesTo"`
+	ContextUsed int       `json:"contextUsed"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // GateAsk is the "needs user confirmation" card for an oversized summary (§3.4).

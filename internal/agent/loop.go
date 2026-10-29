@@ -30,6 +30,14 @@ func (s *Session) startRunLocked(ctx context.Context, _ int) {
 	s.cancel = cancel
 	s.done = make(chan struct{})
 	s.turn = 0
+	// The run publishes one tool array from start to finish, snapshotted here. The tool block is
+	// rendered in front of the history, so a policy change that slipped in at turn three would
+	// invalidate the KV prefix of everything already generated — and could not be undone anyway,
+	// because turn one's request is long gone. Changes made now take effect when this run is over
+	// (an abort counts as over); see Session.SetToolPolicy.
+	s.tmu.Lock()
+	s.toolSnapshot = s.reg.Tools()
+	s.tmu.Unlock()
 	go s.run(runCtx, cancel)
 }
 
@@ -131,6 +139,17 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 			s.logf("panic in run: %v", r)
 		}
 		cancel()
+		// A tool policy that waited for this run is applied here, before the session reports itself
+		// idle again: a run started by the very next message must not pick up the previous tool
+		// array. The registry only re-filters the tools/list results it already cached, so running
+		// this at every run end is free — and it beats a stored "pending" flag, which could only be
+		// a second answer to "did the change land?", and a stale one at that.
+		toolsChanged := s.reg.SetPolicy(s.Config().MCP)
+		// The snapshot is dropped while the phase still says running, so no new run can have taken
+		// one yet and this cannot wipe somebody else's.
+		s.tmu.Lock()
+		s.toolSnapshot = nil
+		s.tmu.Unlock()
 		s.mu.Lock()
 		s.phase = phaseIdle
 		s.cancel = nil
@@ -147,6 +166,10 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 			if e, err := s.appendEntry(s.userEntry(*force)); err == nil {
 				s.emit(Event{Type: EvtEntry, Entry: e})
 			}
+		}
+		if toolsChanged {
+			s.logf("tool policy applied now that the run is over")
+			s.emitTools()
 		}
 		s.emitState()
 		s.emitPending()

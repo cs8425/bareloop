@@ -53,7 +53,10 @@ export function handleEvent(ev) {
       state.requests.delete(ev.info);
       break;
     case 'log':
-      note(ev.data?.line || '');
+      // Two producers use this frame: the daemon logger sends {data:{line}}, a session talking about
+      // itself sends {info, level} — a tool name collision is the second kind, and it must not fade
+      // out in nine seconds the way chatter does, because the user needs it while reading the drawer.
+      note(ev.info || ev.data?.line || '', ev.level === 'warn' ? 'warn' : 'note');
       break;
     case 'info':
       note(ev.info || '');

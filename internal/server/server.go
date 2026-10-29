@@ -49,6 +49,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/session/{id}", s.handleDelete)
 	mux.HandleFunc("GET /api/session/{id}/inspect", s.handleInspect)
 	mux.HandleFunc("GET /api/session/{id}/payload", s.handlePayload)
+	mux.HandleFunc("GET /api/session/{id}/tools", s.handleTools)
+	mux.HandleFunc("POST /api/session/{id}/tools", s.handleToolsSet)
 	mux.HandleFunc("POST /api/session/{id}/send", s.handleSend)
 	mux.HandleFunc("POST /api/session/{id}/interrupt", s.handleInterrupt)
 	mux.HandleFunc("POST /api/session/{id}/stop", s.handleStop)
@@ -262,6 +264,53 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// toolsRequest is the body of POST /api/session/{id}/tools: one server's tool switches, and/or
+// the prefix its tools are published under. Absent fields are not changes — which is what lets the
+// drawer send one small object instead of the whole config.
+type toolsRequest struct {
+	Server        string   `json:"server"`
+	DisabledTools []string `json:"disabledTools"`
+	ToolPrefix    *string  `json:"toolPrefix"`
+}
+
+// handleTools is the tools drawer: every tool the session's MCP servers offer, what each one is
+// estimated to cost, how often this session used it, and whether a change is still waiting for the
+// end of the run. It answers in any phase and never asks an MCP server anything.
+func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, sess.Tools())
+}
+
+// handleToolsSet is the narrow alternative to PATCH /api/session/{id}: it changes only the tool
+// policy of one MCP server, and it works while the session is running, because the change waits
+// for the end of the run instead of invalidating the payload in flight. The whole-config PATCH
+// still refuses mid-run on purpose — it can change the model or the assembler, which is a
+// different promise. See README (§tools).
+func (s *Server) handleToolsSet(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var q toolsRequest
+	if err := decodeJSON(r, &q); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(q.Server) == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("server is required"))
+		return
+	}
+	view, err := sess.SetToolPolicy(strings.TrimSpace(q.Server), q.DisabledTools, q.ToolPrefix)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, view)
 }
 
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {

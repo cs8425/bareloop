@@ -226,6 +226,24 @@ func (c *wsClient) handle(ctx context.Context, cmd command) {
 	case "inspect":
 		c.reply(cmd.Req, sess.Inspect(), nil)
 		return
+	case "tools":
+		c.reply(cmd.Req, sess.Tools(), nil)
+		return
+	case "toolsSet":
+		// Same three fields as POST /api/session/{id}/tools: absent means "not a change", so the
+		// drawer can flip one switch without resending the rest.
+		var b struct {
+			Server        string   `json:"server"`
+			DisabledTools []string `json:"disabledTools"`
+			ToolPrefix    *string  `json:"toolPrefix"`
+		}
+		_ = json.Unmarshal(cmd.Body, &b)
+		if strings.TrimSpace(b.Server) == "" {
+			b.Server = cmd.textOrBody("server")
+		}
+		view, verr := sess.SetToolPolicy(strings.TrimSpace(b.Server), b.DisabledTools, b.ToolPrefix)
+		c.reply(cmd.Req, view, verr)
+		return
 	case "status":
 		c.reply(cmd.Req, sess.Status(), nil)
 		return

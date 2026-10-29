@@ -77,6 +77,32 @@ type Config struct {
 	Logf    func(format string, args ...any) `json:"-"`
 	// Roots are offered to legacy servers that ask for them.
 	Roots []Root `json:"roots,omitempty"`
+
+	// Disabled turns this server off: it is never started or connected, and none of its tools are
+	// offered. Unlike the two fields below it really does change the connection, so it belongs to
+	// Identity.
+	Disabled bool `json:"disabled,omitempty"`
+	// DisabledTools switches individual tools off. Entries are matched against the tool's own name
+	// as tools/list reports it — never the model-visible name, which is a derived value (a prefix, or
+	// a server name when two tools collide). An entry is an exact name or a glob ("write_*").
+	// This is tool policy: changing it reconnects nothing and re-lists nothing.
+	DisabledTools []string `json:"disabledTools,omitempty"`
+	// ToolPrefix puts a namespace in front of this server's tools: "vr" turns fs_read into vr_fs_read.
+	// The default is no prefix at all — a tool is published under its own name. Set it when two
+	// servers offer tools with the same names and "which server" has to be readable from the name
+	// alone; a prefix that collides with another server's published name pushes the loser to
+	// "<server>_<tool>", which the log says out loud. Policy, like DisabledTools.
+	ToolPrefix string `json:"toolPrefix,omitempty"`
+}
+
+// Identity is the part of a config that decides how the server is reached: the transport, plus
+// whether it is switched on at all. Tool policy (DisabledTools, ToolPrefix) is deliberately not
+// part of it — switching one tool off must never take a working MCP connection down with it, and
+// must never restart a stdio child process. Two configs with the same Identity can be served by
+// the same live client; two that differ cannot.
+func (c Config) Identity() string {
+	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q dir=%s url=%s headers=%v roots=%v",
+		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.Dir, c.URL, c.Headers, c.Roots)
 }
 
 // Event is a notification received from the server.

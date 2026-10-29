@@ -164,6 +164,43 @@ what the server reports, and `status.nCtx` / `nCtxSource` tell you which won. Le
 server is asked; if neither knows, compaction stays off until you fill it in
 ([the five cases](docs/design.md#the-context-window)).
 
+### Tools: switches, prefixes and the cache
+
+A tool is published under its **own name**: `fs_list`, not `mcp-vroot__fs_list`. Nothing is namespaced
+unless you ask for it, because a tool whose name needs a prefix to be understood is a badly named tool.
+Three things are configured **per session**, all in `mcp[]`:
+
+| field | default | what it does |
+|---|---|---|
+| `disabled` | `false` | do not connect to this server at all (this used to be a dead key; the `mcp-` trick in a config is no longer needed) |
+| `disabledTools` | none | hide these tools from the model; matches the **raw** name (`fs_list`) exactly or as a `path.Match` glob (`fs_*`, `*`), case sensitive |
+| `toolPrefix` | none | namespace in front of this server's tools: `"vr"` ⇒ `vr_fs_list` (one underscore) |
+
+Two tools that want the same name are a collision, and the **later** one moves: it is published as
+`<server>_<tool>`, never as `fs_read_2`, because a name you cannot read is a name you cannot use. It is
+logged when it happens — `tool name collision: beta/fs_read would be "fs_read", which another tool
+already owns; publishing it as "beta_fs_read" instead` — and `GET .../tools` reports the same fact per tool
+as `renamedFrom`, so the drawer can say why a switch is called what it is. The first claimer never moves:
+renaming tools every time a server is added would invalidate the KV prefix of every session that already
+has history. A prefix changed and then changed back hands the original names straight back, and every name
+a tool was published under stays resolvable to it, so old history never becomes unrunnable.
+
+Hiding a tool is cheap in the direction you want to think about: the schema leaves the request, so the
+prompt shrinks (~118 tokens per small tool on a Gemma-class model, ~165 on Qwen-class) **and** the prefix
+cache breaks, because `tools` is serialized after the system block. Measured on a 14 000-token history:
++14.3 s (Gemma) / +22.8 s (Qwen) per turn, paid again when you toggle back. The only cost-free moment is
+before the first request of a session. That is why `GET /api/session/{id}/tools` reports `estTokens` per
+tool, a `contextUsed` figure, and `pendingChanges`.
+
+What the model may call, and what each tool wants, is the same call: per server the prefix and connection
+state, per tool the published name, the raw name, `title`, `description`, `schema` (its input schema, i.e.
+its parameters), `estTokens`, `uses`. The tools drawer renders exactly that, so switching a tool off never
+means hunting for a name in a server's source first.
+
+Changes apply at the **next run**: a run in flight keeps the tool array it started with, because switching
+mid-run would break the prefix cache and strand a `tool_call` whose tool vanished. `pendingChanges` says
+when something is waiting; `toolsPending` in the status says the same thing in one bit.
+
 ### Compaction, in short
 
 A turn is folded away when `contextUsed > n_ctx × threshold%`: the newest suffix that fits `keepTarget%`
@@ -207,6 +244,8 @@ otherwise the model answers in whatever it prefers
 | POST | `/api/session/{id}/reload` | re-read the log from disk |
 | GET | `/api/session/{id}/inspect` | what would be sent: the system head, per-message token sizes, the plan, the tool list |
 | GET | `/api/session/{id}/payload` | the exact body of the next request: `{system, messages, tools}` |
+| GET | `/api/session/{id}/tools` | every server and every tool, with `enabled`, `estTokens`, `uses`, `prefix`, `schema` (its parameters), `renamedFrom` and `pendingChanges` |
+| POST | `/api/session/{id}/tools` | `{server, disabledTools[], toolPrefix}` — set the per-session tool policy; `{}` reads it |
 | GET | `/api/session/{id}/events` | the event stream as SSE (fallback transport) |
 | GET | `/ws` | the event stream as a websocket (primary transport) |
 
@@ -218,12 +257,14 @@ because images travel as base64 inside one message.
 
 Commands a browser may send: `ping`, `subscribe` (`{session: "a,b"}`, empty means all), `snapshot`, `send`,
 `interrupt`, `stop`, `resume`, `compact`, `gate`, `elicit`, `inspect`, `status`, `pending`, `entryPatch`,
-`entryDelete`, `tip`, `name`. Every action also exists as REST, which is what the bundled UI uses - so a
+`entryDelete`, `tip`, `name`, `tools`, `toolsSet`. Every action also exists as REST, which is what the
+bundled UI uses - so a
 button never waits on the event transport, and if the websocket drops the UI falls back to SSE and then to
 a 1.5 s poll.
 
 Event types: `hello`, `entry`, `delta`, `tool_call`, `tool_result`, `state`, `pending`, `compaction`,
-`request`, `request_done`, `log`, `info`, `error`, `removed`.
+`request`, `request_done`, `log`, `info`, `error`, `removed`, `tools` (the tool set was rebuilt; the body is
+the same view `GET .../tools` returns).
 
 ### Message queue
 

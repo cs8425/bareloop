@@ -102,6 +102,16 @@ type Session struct {
 	// of the summary request (spec §5.2).
 	lastSent  []asm.Message
 	lastTools []llm.Tool
+
+	// tmu guards toolSnapshot. It is deliberately not mu: the tool snapshot is read by build(), and
+	// build() is also called from paths that hold mu (the summary request), so a nested mu would
+	// be a deadlock.
+	tmu sync.Mutex
+	// toolSnapshot is the tool array the current run sends on every turn, snapshotted when the run
+	// starts so a policy change cannot slip into a run in flight. nil means "no run: use the live
+	// published set". Whether a policy change is still waiting is never stored: it is derived from
+	// "config vs registry" (registry.PolicyPending), so it cannot go stale.
+	toolSnapshot []llm.Tool
 }
 
 // openSession opens (creating if needed) the session stored in the directory named id. The directory
@@ -151,6 +161,9 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	}
 	s.reg = newRegistry(s.emit, s.logf, cfg.NotifyTools)
 	s.reg.askElicit = s.askElicit
+	// Install the tool policy before any server is listed, so tools are filtered from the first
+	// tools/list rather than published for one turn and taken back.
+	s.reg.SetPolicy(cfg.MCP)
 	s.sentTip = tipOfPending(st)
 	// The configured window is the starting point only: before the session sends anything the
 	// server is asked once and the effective value is re-derived (nctx.go). Nothing probed is ever
@@ -244,7 +257,20 @@ func (s *Session) build() (*asm.Built, *asm.Sizes, []llm.Tool) {
 	_, kept, cmp := s.effective()
 	built := asm.Assemble(asm.Payload{System: s.Config().SystemPrompt, Kept: kept, Summary: cmp}, s.cfgOptions())
 	sizes := asm.DeriveSizes(built)
-	return built, sizes, s.reg.Tools()
+	return built, sizes, s.visibleTools()
+}
+
+// visibleTools is the tool array of the payload being built: the run's snapshot while a run is in
+// flight, the published set otherwise. The snapshot is what makes "a tool switch never affects a
+// request that is already on the wire" true by construction rather than by timing.
+func (s *Session) visibleTools() []llm.Tool {
+	s.tmu.Lock()
+	snap := s.toolSnapshot
+	s.tmu.Unlock()
+	if snap != nil {
+		return snap
+	}
+	return s.reg.Tools()
 }
 
 func (s *Session) cfgOptions() asm.Options {
@@ -298,6 +324,8 @@ func (s *Session) Status() *Status {
 	s.mu.Unlock()
 
 	_, _, cmp := s.effective()
+	published, enabled, total := s.reg.counts()
+	pendingTools := s.reg.PolicyPending(cfg.MCP)
 	if !known {
 		// Fall back to the last real usage on the path (never an estimate), stopping at the active
 		// compaction entry: usage from before it describes a payload that no longer exists (1.5),
@@ -324,7 +352,10 @@ func (s *Session) Status() *Status {
 		Turn:         turn,
 		AutoCompact:  cfg.Compact.Auto,
 		InLoop:       cfg.Compact.UseInLoop(),
-		Tools:        len(s.reg.Tools()),
+		Tools:        published,
+		ToolsEnabled: enabled,
+		ToolsTotal:   total,
+		ToolsPending: pendingTools,
 		Servers:      s.reg.statusSnapshot(),
 		UpdatedAt:    time.Now().UTC(),
 	}
@@ -606,6 +637,13 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if err := s.mgr.SaveConfig(patch); err != nil {
 		return err
 	}
+	// Tool policy (which tools are on, under which prefix) travels with the MCP list but is not a
+	// connection change, so it is installed whatever else changed: before a reconnect, so a
+	// re-listed server is filtered from the first tools/list, or right here if the servers were
+	// left alone. UpdateConfig only runs while idle, so there is no run snapshot to wait for.
+	if s.reg.SetPolicy(patch.MCP) {
+		s.emitTools()
+	}
 	if llmChanged {
 		prov, err := llm.New(patch.LLM)
 		if err != nil {
@@ -640,8 +678,140 @@ func sameMCP(a, b []mcp.Config) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	// fmt prints maps in sorted key order, so this is a stable deep comparison.
-	return fmt.Sprint(a) == fmt.Sprint(b)
+	// Identity is the transport plus whether the server is on: tool policy (disabledTools,
+	// toolPrefix) is not part of it, so switching one tool off never takes a working MCP server
+	// down with it (and never restarts a stdio child process). See mcp.Config.Identity.
+	for i := range a {
+		if a[i].Identity() != b[i].Identity() {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------- tool policy
+
+// Tools reports the tools drawer: every tool this session's MCP servers have listed, what each is
+// estimated to cost, how often the transcript used it, and whether a change is still waiting for
+// the end of the run. It works in any phase — a run in flight is exactly when you want to know
+// which tool is eating the context — and it never asks a server anything, because the registry
+// caches the last tools/list result of every server it knows about.
+func (s *Session) Tools() *ToolsView {
+	cfg := s.Config()
+	view := s.reg.view(cfg.MCP)
+	view.Session = s.ID
+	view.UpdatedAt = time.Now().UTC()
+
+	view.PendingChanges = s.reg.PolicyPending(cfg.MCP)
+	s.mu.Lock()
+	view.ContextUsed = s.ctxUsed
+	s.mu.Unlock()
+
+	// Uses and LastUsed come from the transcript: "never called in forty turns" is the argument
+	// for switching a tool off, and the data is already in the log.
+	uses := map[string]int{}
+	lastUsed := map[string]string{}
+	for _, e := range s.path() {
+		if e.Kind != ir.KindTool || e.Tool == "" {
+			continue
+		}
+		uses[e.Tool]++
+		lastUsed[e.Tool] = e.Ts.UTC().Format(time.RFC3339)
+	}
+	total, visible := 0, 0
+	for i := range view.Servers {
+		for j := range view.Servers[i].Tools {
+			t := &view.Servers[i].Tools[j]
+			t.Uses, t.LastUsed = uses[t.Name], lastUsed[t.Name]
+			total++
+			if t.Enabled {
+				visible++
+			}
+		}
+	}
+	view.Total, view.Visible = total, visible
+	return view
+}
+
+// SetToolPolicy is the drawer's write path: it switches tools of one MCP server off or on for this
+// session and/or changes the prefix that server's tools are published under — both per session,
+// because both live in this session's config.json (mcp[].disabledTools, mcp[].toolPrefix).
+//
+// Unlike UpdateConfig, it is allowed while the session is running, and it still cannot affect a
+// turn that is already on the wire: the decision goes to config.json immediately (a restart must
+// not silently undo it), while the registry keeps publishing the previous array until the run
+// ends. The reason is the one UpdateConfig gives for refusing outright — the tool block is
+// rendered in front of the history, so the moment it changes is the moment the KV prefix of
+// everything already generated stops matching.
+//
+// A nil disabled slice or a nil prefix pointer means "not a change"; an empty non-nil slice means
+// "everything on again", which is what the drawer's "all tools" button sends, and an empty prefix
+// means "no namespace", which is what a server without toolPrefix gets.
+func (s *Session) SetToolPolicy(server string, disabled []string, prefix *string) (*ToolsView, error) {
+	s.mu.Lock()
+	cfg := s.cfg
+	// s.cfg.MCP is the very slice we are about to change: copy it, so no half-written policy is
+	// observable by a reader that only holds the lock briefly.
+	mcpCfg := make([]mcp.Config, len(cfg.MCP))
+	copy(mcpCfg, cfg.MCP)
+	cfg.MCP = mcpCfg
+	idx := -1
+	for i := range cfg.MCP {
+		if cfg.MCP[i].Name == server {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("agent: session %s has no MCP server %q", s.ID, server)
+	}
+	if disabled != nil {
+		clean := make([]string, 0, len(disabled))
+		for _, d := range disabled {
+			if d = strings.TrimSpace(d); d != "" {
+				clean = append(clean, d)
+			}
+		}
+		cfg.MCP[idx].DisabledTools = clean
+	}
+	if prefix != nil {
+		raw := strings.TrimSpace(*prefix)
+		if len(raw) > 32 {
+			s.mu.Unlock()
+			return nil, errors.New("agent: a tool prefix is at most 32 characters")
+		}
+		// The prefix becomes part of every tool name this session sends, so it is held to the
+		// character set function calling accepts — and to no silent fixups: a typo that quietly turns
+		// "my/server" into "my_server" would rename tools behind their back.
+		if raw != "" && sanitize(raw) != raw {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("agent: a tool prefix may only use A-Z a-z 0-9 _ - and may not start or end with _ or - (got %q)", raw)
+		}
+		cfg.MCP[idx].ToolPrefix = raw
+	}
+	running := s.phase != phaseIdle
+	s.cfg = cfg
+	s.mu.Unlock()
+
+	if err := s.mgr.SaveConfig(cfg); err != nil {
+		return nil, err
+	}
+	if running {
+		// The registry keeps publishing what this run is committed to; the change lands when the
+		// run releases its snapshot (loop.go), which is also when the drawer's ⏳ disappears.
+		s.logf("tool policy for %s changed during a run: it takes effect when the run ends", server)
+	} else if s.reg.SetPolicy(cfg.MCP) {
+		s.logf("tool policy for %s applied", server)
+		s.emitTools()
+	}
+	s.emitState()
+	return s.Tools(), nil
+}
+
+// emitTools publishes the drawer view, so every tab showing this session redraws its tool list.
+func (s *Session) emitTools() {
+	s.emit(Event{Type: EvtTools, Data: s.Tools()})
 }
 
 // Close stops everything this session owns.
