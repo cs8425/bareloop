@@ -2,7 +2,7 @@
 // input request. Everything here renders from the events the server sends; none of it decides
 // anything. Refresh requests go out on the bus so this module does not import the session module.
 import md from './md.js';
-import { makeRenderGate } from './scheduler.js';
+import { makeRenderGate, resolveStreamMode } from './scheduler.js';
 import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName, tps, MIN_UNCACHED } from './util.js';
 import { state } from './state.js';
 import { call } from './api.js';
@@ -391,6 +391,76 @@ function markStreamFinished(id) {
   if (finishedStreams.size > 200) finishedStreams.delete(finishedStreams.values().next().value);
 }
 
+// ------------------------------------------------------------------ the streaming drawer
+//
+// makeStreamDrawer draws a reply that is still arriving. It is handed a way to read the text (`getText`)
+// rather than the text itself: the stream object stays the only place an accumulated reply lives, so the
+// drawer cannot drift out of date with it.
+//
+// Its DOM is two sibling divs inside the message body, and that split is the entire point. `innerHTML`
+// rebuilds whatever it is given, so with a single container there is no such thing as "redraw the new
+// part": every frame would re-parse and re-create every block the reply finished writing a minute ago.
+// Two containers let the finished part be written once and then never touched again. Both carry the `md`
+// class, and every markdown rule in the stylesheet is a descendant rule, so nothing about how a reply
+// looks changes; the split only exists while text is moving, and the committed entry replaces the whole
+// node with an ordinary single-part body when it arrives.
+//
+// What each mode hands the parser per frame, for a reply of length n:
+//
+//   full   n       — the path that shipped before the render gate; n² over a reply
+//   tail   n − frozen — usually a few hundred characters; n over a reply
+//   plain  0       — one parse when the stream is over
+export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz } = {}) {
+  const frozen = el('div', 'md frozen');
+  const live = el('div', 'md live');
+  host.append(frozen, live);
+  if (mode === 'plain') host.classList.add('plain'); // text mode wants its newlines back (see app.css)
+  const d = { mode, host, frozen, live, frozenLen: 0, draws: 0, parsed: 0 };
+  d.paint = () => {
+    const text = getText();
+    d.draws++;
+    if (mode === 'plain') {
+      d.live.textContent = text; // one text node per frame: no parse, no subtree rebuild
+      return;
+    }
+    if (mode !== 'tail') {
+      d.parsed += text.length;
+      md.renderTo(d.frozen, text); // everything, every time; `live` stays empty by design
+      return;
+    }
+    // `frozen` only ever grows, and only up to a boundary that a blank line guarantees no construct is
+    // crossing (md.lastSafeBoundary). Everything still open — a paragraph, an unclosed bold, a table that
+    // may gain a row, a fence that has not closed — stays in `live` and is repainted until it closes.
+    const cut = md.lastSafeBoundary(text);
+    if (cut > d.frozenLen) {
+      d.parsed += cut - d.frozenLen;
+      md.renderTo(d.frozen, text.slice(0, cut));
+      d.frozenLen = cut;
+    }
+    const tail = text.slice(d.frozenLen);
+    d.parsed += tail.length;
+    md.renderTo(d.live, tail);
+  };
+  d.gate = makeRenderGate(d.paint, hz);
+  d.mark = () => d.gate.mark();
+  // finish is `done`. It flushes the gate so nothing stays pending, then draws the whole reply once and
+  // empties the live part — so the DOM at the end of a stream is *by construction* what one clean render
+  // produces, instead of "however the last boundary happened to fall". That single render per reply is
+  // what the old path paid per frame, and the committed entry renders it again anyway.
+  d.finish = () => {
+    const text = getText();
+    d.gate.flush();
+    d.draws++;
+    d.parsed += text.length;
+    md.renderTo(d.frozen, text);
+    d.live.innerHTML = '';
+    d.frozenLen = text.length;
+  };
+  // repaint is what a tab becoming visible asks for: the gate drew nothing while it was hidden.
+  d.repaint = () => d.gate.flush();
+  return d;
+}
+
 function streamStart(streamId) {
   if (state.streams.has(streamId)) return state.streams.get(streamId);
   if (finishedStreams.has(streamId)) return null;
@@ -406,11 +476,9 @@ function streamStart(streamId) {
   node.appendChild(body);
   logEl().appendChild(node);
   const s = { id: streamId, node, body, reasoning, content: '', reasoningText: '', rText: null, tools: new Map(), args: new Map() };
-  // The whole point of the gate: `body` used to be rebuilt from the entire accumulated reply on every
-  // single fragment, which is why a long answer got slower the further it went. `s.content` keeps
-  // accumulating either way, so a frame that is skipped costs nothing and loses nothing — the next
-  // render draws everything up to now.
-  s.gate = makeRenderGate(() => md.renderTo(s.body, s.content));
+  // The drawer decides what to redraw; the gate inside it decides how often. `s.content` keeps accumulating
+  // either way, so a skipped frame loses no characters and a frozen block costs nothing to repaint.
+  s.drawer = makeStreamDrawer(body, () => s.content);
   state.streams.set(streamId, s);
   scrollDown();
   return s;
@@ -429,7 +497,7 @@ export function streamDelta(d) {
   }
   if (d.content) {
     s.content += d.content;
-    s.gate.mark();
+    s.drawer.mark();
   }
   const tc = d.toolCall;
   if (tc) {
@@ -445,12 +513,12 @@ export function streamDelta(d) {
     const card = s.tools.get(key);
     if (card) card.setArgs(s.args.get(key) || '');
   }
-  // `done` closes the window: whatever is still unpainted gets painted now, unconditionally. Without
-  // this the last few tokens of a reply could sit in `s.content` until the committed entry arrived,
-  // because the rule "render when the window has passed" needs a new delta to be evaluated, and there
-  // is no delta after the last one.
+  // `done` closes the window: whatever is still unpainted gets painted now, and the split disappears into
+  // one clean render. Without this the last few tokens of a reply could sit in `s.content` until the
+  // committed entry arrived, because "render when the window has passed" is only evaluated when new text
+  // arrives, and there is no text after the last one.
   if (d.done) {
-    s.gate.flush();
+    s.drawer.finish();
     streamFinish(s);
   }
   scrollDown();
@@ -460,7 +528,7 @@ export function streamDelta(d) {
 // it was hidden the gate drew nothing (a background tab has no reader), so the text on screen is behind
 // the text we have already been sent.
 export function flushStreams() {
-  for (const s of state.streams.values()) s.gate.flush();
+  for (const s of state.streams.values()) s.drawer.repaint();
 }
 
 function streamFinish(s) {

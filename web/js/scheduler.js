@@ -46,6 +46,34 @@ export function resolveHz(fallback = DEFAULT_HZ) {
   return number(fromUrl) ?? number(stored) ?? number(fallback) ?? DEFAULT_HZ;
 }
 
+// The three things a stream can do with markdown while it is still arriving. They differ in what they
+// hand the parser per frame, which is the only cost that matters while text is streaming in:
+//
+//   tail   freeze the blocks that can never change, parse only the part after them. The default: it is
+//          the difference between parsing the reply once per frame and parsing it once per token.
+//   plain  no markdown at all while it streams (text only), one parse when it is over. For a machine that
+//          cannot afford even 1 Hz of parsing; the reply is unreadable-styled but never frozen.
+//   full   parse the whole accumulated reply every frame. This is what shipped before the render gate —
+//          kept reachable because a benchmark you can turn off is evidence, and one you cannot is a rumour.
+export const MODES = ['tail', 'plain', 'full'];
+
+// resolveStreamMode resolves the mode the same way resolveHz resolves the rate: URL, then the pinned
+// setting, then the default. `?mode=full` on a reply is how you compare the two paths side by side.
+export function resolveStreamMode(fallback = 'tail') {
+  const pick = (raw) => {
+    const v = raw === null || raw === undefined ? '' : String(raw).trim();
+    return MODES.includes(v) ? v : null;
+  };
+  let stored = null;
+  try {
+    stored = localStorage.getItem('bareloop.streamMode');
+  } catch {
+    // Same as resolveHz: a profile without localStorage still gets a working default.
+  }
+  const fromUrl = typeof location === 'object' ? new URLSearchParams(location.search).get('mode') : null;
+  return pick(fromUrl) ?? pick(stored) ?? pick(fallback) ?? 'tail';
+}
+
 // makeRenderGate wraps one stream's render function. `render` must be synchronous and must draw whatever
 // the caller has accumulated so far — the gate never tells it what changed, only whether now is allowed.
 export function makeRenderGate(render, hz = resolveHz()) {

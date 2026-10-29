@@ -223,12 +223,60 @@ export function render(src) {
   return out.join('\n');
 }
 
+// lastSafeBoundary answers one question about an unfinished reply: how much of it can never change
+// again? The return value is an index into `src` — the part before it is finished, the part from it
+// onwards may still grow. A stream renderer freezes the prefix and repaints only the tail, which is what
+// turns "redraw the whole reply on every fragment" (O(n²) in total) back into O(n).
+//
+// The rule is one line wide and it is the whole safety argument: **cut after a blank line, unless that
+// blank line is inside a fenced block**. Every construct this renderer has ends at a blank line —
+// paragraphs flush, tables stop, lists break, blockquotes stop — so a tail that begins after a blank line
+// cannot be a continuation of anything before it, and `render(prefix) + render(tail)` is the same document
+// as `render(src)`. Fences are the one exception (they swallow blank lines), which is why fence state is
+// tracked and nothing is cut while one is open.
+//
+// Everything the renderer joins across lines — a paragraph, an unclosed `**bold`, an open code span, a
+// table's next row — is therefore left in the tail, repainted until it closes and never frozen half
+// written. It returns 0 when nothing may be frozen (no blank line yet, or the reply opened a fence on its
+// first line): the caller then repaints the whole reply, which is the honest fallback, not a wrong answer.
+//
+// Indices refer to `src` exactly as given, so unlike `render` this does NOT normalise CRLF — an index into
+// a different string would be worse than useless. `\r` needs no special case either: it is whitespace, and
+// every test below already allows trailing whitespace.
+//
+// The one non-obvious rule: a blank line only separates if something follows it. A stream fragment ends
+// mid-reply, and `split('\n')` hands back a trailing `''` for text ending in a newline — that is not a
+// blank line, it is the absence of a next line. Treating it as one freezes whatever is still being written:
+// a pipe table whose next row arrives a moment later, or a paragraph that is about to continue, would be
+// frozen short and then contradict the finished document. This is not hypothetical — it is the first thing
+// the bench's boundary property caught.
+export function lastSafeBoundary(src) {
+  const text = String(src ?? '');
+  let cut = 0;
+  let fence = null; // the marker that opened the fence we are inside ('```' or '~~~'), or null
+  let at = 0; // index in `text` of the line being read
+  for (const line of text.split('\n')) {
+    // Deliberately the same pattern `render` uses to recognise a fence: if the two ever disagree, the
+    // boundary must not be smarter than the renderer it is trying to split.
+    const marker = line.match(/^\s*(```|~~~)\s*[\w+-]*\s*$/);
+    if (fence) {
+      if (marker && marker[1] === fence) fence = null; // its own kind closes it; anything else is code
+    } else if (marker) {
+      fence = marker[1]; // blank lines inside are code, so no boundary may be taken here
+    } else if (/^\s*$/.test(line) && at + line.length + 1 < text.length) {
+      cut = at + line.length + 1; // the blank line belongs to the prefix; the tail starts on the next line
+    }
+    at += line.length + 1;
+  }
+  return cut;
+}
+
 // renderTo replaces the contents of an element with rendered markdown.
 export function renderTo(el, src) {
   el.innerHTML = render(src);
 }
 
-export const md = { register, render, renderTo, escape, extensions };
+export const md = { register, render, renderTo, escape, lastSafeBoundary, extensions };
 
 if (typeof window !== 'undefined') {
   window.bareloopMarkdown = md;

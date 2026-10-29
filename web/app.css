@@ -136,6 +136,9 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .msg > header .eid { font-family: var(--mono); white-space: nowrap; } /* a number broken across two lines reads as two numbers */
 .msg > .body { padding: 9px 12px; white-space: pre-wrap; word-break: break-word; }
 .msg > .body.md { white-space: normal; }
+/* plain stream mode (js/scheduler.js): markdown is switched off while the reply arrives, so it is text
+   and its newlines have to survive — the `.md` rule above would otherwise collapse them into one line. */
+.msg > .body.plain > div { white-space: pre-wrap; }
 .msg.user { border-left: 3px solid #35639f; }
 .msg.assistant { border-left: 3px solid #3f7d5c; }
 .msg.tool { border-left: 3px solid #7a6a3c; }

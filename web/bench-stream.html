@@ -3,26 +3,32 @@
   The measuring stick for T1 (stream rendering). It exists because "順不順" is not a fact anyone can argue
   from: every number this page prints is one the real app produces too, on the machine you are typing on.
 
-  It renders through the real renderer (`js/md.js`) and the real render gate (`js/scheduler.js`) into the
-  real message markup and stylesheet — a bench that reimplements the thing it measures is a fiction.
+  It drives the real thing. `js/md.js` is the real renderer, `js/scheduler.js` is the real render gate, and
+  the drawing is done by `makeStreamDrawer` imported from the app's own `js/transcript.js` — a bench that
+  reimplements the thing it measures is a fiction, and it drifts the moment the app changes.
 
-  Modes (one row each):
-    full        every fragment rebuilds the whole accumulated reply. This is what shipped until T1.
-    full+gate   the same render, allowed to run at most `?gatehz=` times a second (L0).
-    plain       no markdown while it streams: append a text node per fragment, render once at `done`.
-    tail+gate   reserved for L2 (render only the unclosed tail); it appears here once it exists.
+  The rows are (mode, gate) pairs, where `hz: 1000` means "no gate" (a 1 ms window passes every fragment):
+
+    full,  no gate    the path that shipped before T1: parse the whole reply per fragment. O(n²).
+    full,  gate 20Hz  the same redraws, throttled. L0 alone — it caps the rate, not the size of a frame.
+    tail,  no gate    freeze closed blocks, redraw only the tail. L2 alone.
+    tail,  gate 20Hz   the shipped default: both.
+    plain, gate 20Hz   no markdown at all until the stream is over.
 
   What each column is for:
     render ms      main thread spent drawing. Everything else on the page waits for this.
     max render ms  the longest single task a click could land behind — the reason "stop" feels dead.
     max frame gap  the worst gap a rAF loop saw while feeding: how long the page was audibly frozen.
-    parsed KB      total characters handed to the markdown parser. O(n²) shows up here first: the old path
-                   re-parses the whole reply for every fragment, so this grows with size squared.
-    DOM ok         the final DOM must equal one clean render of the whole text — a throttle that drops
-                   the last few tokens is a bug, not a optimisation. This column is the guard.
+    parsed KB      total characters handed to the markdown parser. This is the O(n²) signature: the old
+                   path re-parses the whole reply for every fragment, so it grows with size squared.
+    DOM ok         the final DOM must equal one clean render of the whole text — a throttle that drops the
+                   last few tokens is a bug, not an optimisation. This column is the guard.
+    mid-stream     the L2 invariant, checked while the stream runs: what has been frozen must never be
+                   redrawn, and must be exactly the head of what the finished reply will render to.
 
   Drive it from the console (that is how the numbers in state/render-throttle-plan.md were taken):
-    await window.__benchRun({ sizes: [1, 8, 40], gap: 12, chunk: 4 })
+    await window.__benchRun({ sizes: [8, 40], gap: 3, chunk: 12 })
+    window.__boundaryTests()
   and read window.__bench. CPU throttling is applied from outside with CDP
   Emulation.setCPUThrottlingRate, so one page can be measured at 1x / 4x / 6x.
 -->
@@ -32,45 +38,51 @@
 <style>
   body { padding: 18px 20px 40px; }
   h1 { font-size: 15px; margin: 0 0 4px; }
-  p.lede { color: var(--muted); font-size: 12px; margin: 0 0 14px; max-width: 78ch; }
+  h2 { font-size: 13px; margin: 22px 0 6px; }
+  p.lede { color: var(--muted); font-size: 12px; margin: 0 0 14px; max-width: 88ch; }
   table { border-collapse: collapse; font-size: 11.5px; }
   th, td { padding: 3px 10px; border-bottom: 1px solid var(--border); text-align: right; }
   th:first-child, td:first-child { text-align: left; }
   td.num { font-family: var(--mono); }
-  td.bad { color: var(--err); }
+  td.bad, .fail { color: var(--err); }
   #stage { position: fixed; left: 0; top: 0; width: 720px; visibility: hidden; pointer-events: none; }
-  #controls { margin: 0 0 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; }
+  #controls { margin: 0 0 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; flex-wrap: wrap; }
   #controls input { width: 62px; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; }
+  #tests li { font-family: var(--mono); font-size: 11px; }
 </style>
 
 <h1>bench · stream rendering</h1>
 <p class="lede">
-  Same script, four ways of drawing it. Feed rate mimics a real provider (~80–100 fragments/s) rather than
-  a synchronous loop, because the thing being destroyed is the main thread's ability to answer a click.
+  One script, drawn five ways. Feed rate mimics a real provider (roughly 80–100 fragments/s) rather than a
+  synchronous loop, because the thing being destroyed is the main thread's ability to answer a click.
 </p>
 <div id="controls">
-  <label>gap <input id="gap" value="12" /> ms</label>
-  <label>chunk <input id="chunk" value="4" /> chars</label>
+  <label>gap <input id="gap" value="3" /> ms</label>
+  <label>chunk <input id="chunk" value="12" /> chars</label>
   <label>gate <input id="gatehz" value="20" /> Hz</label>
-  <button id="run" type="button">run 1 / 8 / 40 KB</button>
+  <button id="run" type="button">run 8 / 40 KB</button>
   <span id="status" class="dim"></span>
 </div>
 <div id="out"></div>
+
+<h2>lastSafeBoundary — the property L2 stands on</h2>
+<p class="lede" id="testsSummary">running…</p>
+<ul id="tests"></ul>
 
 <!-- the transcript's real markup, so CSS and layout cost match the app -->
 <div id="stage"><div class="msg assistant"><div class="body md"></div></div></div>
 
 <script type="module">
 import md from './js/md.js';
-import { makeRenderGate } from './js/scheduler.js';
+import { makeStreamDrawer } from './js/transcript.js';
 
 const q = (s) => document.querySelector(s);
-const body = q('#stage .body');
+const stage = () => q('#stage .body');
 const q2 = new URLSearchParams(location.search);
 
 // A sample has to contain the shapes the real renderer is worst at, or the bench measures the easy path:
 // an unclosed fence and an unclosed bold are exactly what makes a naive re-render jump around, and a pipe
-// table is the block most likely to break if a future tail-only renderer cuts in the wrong place.
+// table is the block most likely to break if a tail-only renderer ever cuts in the wrong place.
 function sample(kb) {
   const para = 'the quick brown fox jumps over the lazy dog while bareloop checks whether this request fits the window at all. ';
   const paraLine = (n) => `X.${n} ${para}`;
@@ -116,128 +128,187 @@ function frames() {
   return { stop: () => ((alive = false), max), reset: () => (last = 0) };
 }
 
-// One mode's drawer: what it does per fragment, and what it does when the stream says it is finished.
-const MODES = {
-  full: () => {
-    let renders = 0, ms = 0, parsed = 0, max = 0;
-    return {
-      name: 'full (every fragment)',
-      onChunk(text, el) {
-        const t0 = performance.now();
-        el.innerHTML = md.render(text);
-        const dt = performance.now() - t0;
-        renders++; ms += dt; parsed += text.length; max = Math.max(max, dt);
-      },
-      onDone(text, el) {
-        if (renders) return { renders, ms, parsed, max };
-        const t0 = performance.now();
-        el.innerHTML = md.render(text);
-        const dt = performance.now() - t0;
-        return { renders: 1, ms: dt, parsed: text.length, max: dt };
-      },
-    };
-  },
-  gate: (hz) => {
-    const drawn = { renders: 0, ms: 0, parsed: 0, max: 0 };
-    let gate = null;
-    return {
-      name: `full + gate ${hz}Hz`,
-      start(el) {
-        gate = makeRenderGate(() => {
-          const t0 = performance.now();
-          el.innerHTML = md.render(gate.text);
-          const dt = performance.now() - t0;
-          drawn.renders++; drawn.ms += dt; drawn.parsed += gate.text.length; drawn.max = Math.max(drawn.max, dt);
-        }, hz);
-      },
-      onChunk(text, el) {
-        gate.text = text;
-        gate.mark();
-        return gate.stats;
-      },
-      onDone(text, el) {
-        gate.text = text;
-        gate.flush();
-        return { ...drawn, stats: { ...gate.stats } };
-      },
-    };
-  },
-  plain: () => {
-    let drawn = { renders: 0, ms: 0, parsed: 0, max: 0 };
-    return {
-      name: 'plain text, render at done',
-      onChunk(text, el) {
-        el.textContent = text; // append-only in effect: one text node, no parse, no subtree rebuild
-        return {};
-      },
-      onDone(text, el) {
-        const t0 = performance.now();
-        el.innerHTML = md.render(text);
-        const dt = performance.now() - t0;
-        drawn = { renders: 1, ms: dt, parsed: text.length, max: dt };
-        return drawn;
-      },
-    };
-  },
-};
+// The five rows. `hz: 1000` is scheduler.js's documented way of opening the gate all the way.
+const RUNS = [
+  { id: 'full', mode: 'full', hz: 1000, name: 'full, no gate (pre-T1)' },
+  { id: 'full20', mode: 'full', hz: 20, name: 'full + gate 20Hz' },
+  { id: 'tail', mode: 'tail', hz: 1000, name: 'tail, no gate' },
+  { id: 'tail20', mode: 'tail', hz: 20, name: 'tail + gate 20Hz (default)' },
+  { id: 'plain', mode: 'plain', hz: 20, name: 'plain text, render at done' },
+];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function runOne(modeName, text, { gap, chunk, gatehz }) {
-  body.innerHTML = '';
-  const mode = MODES[modeName](gatehz);
-  if (mode.start) mode.start(body);
+// One run: feed the reply in fragments at a realistic rate, and time the drawing the drawer does.
+async function runOne(run, text, { gap, chunk }) {
+  const host = stage();
+  host.innerHTML = '';
+  let acc = '';
+  const drawer = makeStreamDrawer(host, () => acc, { mode: run.mode, hz: run.hz });
   const lt = longtasks();
   const fr = frames();
   const t0 = performance.now();
   let deltas = 0;
   for (let i = 0; i < text.length; i += chunk) {
-    mode.onChunk(text.slice(0, i + chunk), body);
+    acc = text.slice(0, i + chunk);
+    drawer.mark();
     deltas++;
     await sleep(gap);
   }
-  const drawn = mode.onDone(text, body);
   const wall = performance.now() - t0;
+  drawer.finish();
   fr.reset();
   await sleep(60); // let one more frame land so the thermometer sees the tail of the stream
   const maxFrameGap = fr.stop();
   lt.stop();
-  body.innerHTML = '';
+  const ok = finalDomOk(drawer, text);
+  host.innerHTML = '';
   return {
-    mode: mode.name,
+    mode: run.name,
     kb: Math.round(text.length / 1024),
     deltas,
-    renders: drawn.renders,
-    parsedKB: +(drawn.parsed / 1024).toFixed(1),
-    renderMs: +drawn.ms.toFixed(1),
-    maxRenderMs: +drawn.max.toFixed(1),
+    renders: drawer.gate.stats.renders,
+    parsedKB: +(drawer.parsed / 1024).toFixed(1),
+    renderMs: +drawer.gate.stats.ms.toFixed(1),
+    maxRenderMs: +drawer.gate.stats.max.toFixed(1),
     longtasks: lt.count(),
     maxFrameGapMs: +maxFrameGap.toFixed(1),
     wallMs: +wall.toFixed(0),
-    stats: drawn.stats || null,
+    ok,
+    stats: { marks: drawer.gate.stats.marks, frozenKB: +(drawer.frozenLen / 1024).toFixed(1) },
   };
 }
 
 // The guard every timing row depends on: the stream must end at exactly the DOM a single clean render
-// would have produced. A gate that swallows the last fragment shows up here, not in a millisecond column.
-// The comparison is DOM-to-DOM (`innerHTML` read back after a parse), never string-to-DOM: a parser
-// rewrites markup as it goes (`<br>` becomes `<br>`… sometimes not), and a comparison that lies about
-// correctness is worse than no guard at all.
-async function check(modeName, text, opts) {
-  body.innerHTML = '';
-  const mode = MODES[modeName](opts.gatehz);
-  if (mode.start) mode.start(body);
-  for (let i = 0; i < text.length; i += opts.chunk) {
-    mode.onChunk(text.slice(0, i + opts.chunk), body);
-    await sleep(0);
-  }
-  mode.onDone(text, body);
-  const got = body.innerHTML;
+// would have produced. The comparison is DOM-to-DOM — `innerHTML` read back after a parse, never a parser's
+// output string against a DOM's serialisation — because a comparison that lies about correctness is worse
+// than no guard at all.
+function finalDomOk(drawer, text) {
   const reference = document.createElement('div');
   reference.innerHTML = md.render(text);
-  body.innerHTML = '';
-  return got === reference.innerHTML;
+  return drawer.frozen.innerHTML === reference.innerHTML && drawer.live.innerHTML === '' && drawer.frozenLen === text.length;
 }
+
+// check() replays the stream once more (never timed) purely to answer "did anything get lost or duplicated
+// on the way?", which is the question a millisecond column cannot ask. `full` at large sizes skips it: it
+// has no frozen/live split to lose anything in, and replaying it would double a cell that already takes a
+// minute. Modes with a split are verified at every size.
+async function check(run, text, { chunk }) {
+  if (run.mode === 'full' && text.length > 8 * 1024) return null;
+  const host = stage();
+  host.innerHTML = '';
+  let acc = '';
+  const drawer = makeStreamDrawer(host, () => acc, { mode: run.mode, hz: run.hz });
+  for (let i = 0; i < text.length; i += chunk) {
+    acc = text.slice(0, i + chunk);
+    drawer.mark();
+    await sleep(0);
+  }
+  drawer.finish();
+  const ok = finalDomOk(drawer, text);
+  host.innerHTML = '';
+  return ok;
+}
+
+// ---------------------------------------------------------------- the boundary property
+//
+// L2 is safe if, and only if, freezing at `lastSafeBoundary` can never contradict the finished document.
+// The property is exactly this, and it is checkable without a browser, a stream, or a clock:
+//
+//   for a finished reply `full`, and any prefix `p` of it:
+//     render(full).startsWith(render(p.slice(0, lastSafeBoundary(p))))
+//
+// i.e. whatever the drawer would have frozen at any point mid-stream is byte-for-byte the head of what the
+// complete reply renders to. If this ever fails, the frozen DOM would have been wrong — text would sit
+// there that the finished message does not have.
+function boundaryHolds(full, step = 11) {
+  for (let i = 0; i <= full.length; i += step) {
+    const prefix = full.slice(0, i);
+    const cut = md.lastSafeBoundary(prefix);
+    if (cut <= 0) continue;
+    const frozenHtml = md.render(prefix.slice(0, cut));
+    if (!md.render(full).startsWith(frozenHtml)) {
+      return { ok: false, at: i, cut, why: prefix.slice(Math.max(0, cut - 60), cut + 60) };
+    }
+  }
+  return { ok: true };
+}
+
+// `cut == 0` must also mean something: the drawer falls back to repainting everything, which is never
+// wrong. And the returned index must always be a real position in the string it was given — an index into
+// a normalised copy would silently freeze the wrong bytes for CRLF input.
+//
+// These cases check a reply against itself (every prefix of a finished reply). The other family below is
+// the one that actually broke first: a *partial* reply, frozen now, checked against a *different, longer*
+// reply that arrives later. Freezing is a promise about the future, and a promise is only testable against
+// the future it promised.
+const BOUNDARY_CASES = [
+  ['plain paragraph', 'one two\nthree\n\nsecond paragraph tail'],
+  ['blank line inside fence', '```\na\n\nb\ncode keeps going\n```\n\nafter the fence'],
+  ['fence never closed', 'para\n\n```\na\n\nb\n\nstill code'],
+  ['tilde fence', '~~~\nx\n\ny\n~~~\n\ntail'],
+  ['pipe table split', 'para\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\nnext'],
+  ['list with indented continuation', '- one\n  still one\n- two\n\n- three\n\npara after'],
+  ['code span with a pipe', '`a | b`\n\npara'],
+  ['unclosed bold across lines', 'text **unclosed\nmore bold** tail\n\nnext paragraph'],
+  ['hr right after text (not a cut)', 'text\n---\nmore'],
+  ['no blank line yet', 'a\nb\nc'],
+  ['ends without newline', 'para one\n\npara two\n\nlast line with no newline'],
+  ['quote then blank then quote', '> q1\n\n> q2'],
+  ['crlf line endings', 'first para\r\n\r\nsecond para\r\n\r\nthird'],
+  ['fence then table', '```\n| a | b |\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nend'],
+  ['heading then paragraph', '# h\n\ntext\n\n## h2\n\nmore'],
+  ['nested list', '- a\n  - b\n\n  - c\n\n- d'],
+];
+
+// GROWTH_CASES are (what has arrived, what the finished reply turns out to be). The frozen head of the
+// first must be the head of the second's HTML — otherwise the drawer would have shown a document that the
+// completed message does not have, and the user would watch text change under their cursor.
+const GROWTH_CASES = [
+  ['table row arrives after a trailing newline', 'para\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n', 'para\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\ntail'],
+  ['paragraph continues after a newline', 'first para\n\nhello world\n', 'first para\n\nhello world and more words\n\nsecond'],
+  ['fence keeps going', 'intro\n\n```\ncode\n', 'intro\n\n```\ncode\nmore code\n```\n\nafter'],
+  ['list keeps going', 'intro\n\n- one\n', 'intro\n\n- one\n- two\n\nafter'],
+  ['bold closes later', 'intro\n\ntext **bold\n', 'intro\n\ntext **bold** tail\n\nafter'],
+  ['quote keeps going', 'intro\n\n> quoted\n', 'intro\n\n> quoted\n> more quote\n\nafter'],
+];
+
+window.__boundaryTests = () => {
+  const out = [];
+  for (const [name, src] of BOUNDARY_CASES) {
+    const r = boundaryHolds(src);
+    const cut = md.lastSafeBoundary(src);
+    out.push({ name, ok: r.ok, cut, at: r.at ?? null, why: r.why || null, src: src.length });
+  }
+  // the bench samples, fed the same way a stream feeds them
+  for (const kb of [1, 8]) {
+    const r = boundaryHolds(sample(kb), 97);
+    out.push({ name: `sample ${kb} KB`, ok: r.ok, cut: md.lastSafeBoundary(sample(kb)), at: r.at ?? null, why: r.why || null, src: kb * 1024 });
+  }
+  for (const [name, partial, final] of GROWTH_CASES) {
+    const cut = md.lastSafeBoundary(partial);
+    const frozenHtml = md.render(partial.slice(0, cut));
+    const ok = cut === 0 || md.render(final).startsWith(frozenHtml);
+    out.push({ name: `growth: ${name}`, ok, cut, at: ok ? null : partial.length, why: ok ? null : JSON.stringify(partial.slice(Math.max(0, cut - 40))) });
+  }
+  // and the negative case: a boundary must not exist where there is no blank line
+  const noCut = md.lastSafeBoundary('a\nb\nc') === 0;
+  out.push({ name: 'no blank line ⇒ cut 0 (falls back to repainting all)', ok: noCut, cut: 0, src: 0 });
+  // The index must point at the first character of the next line of the *given* string — here `\r`, which
+  // `render` would have removed, is still part of the line, so the answer is 5 and not 4.
+  const crlf = md.lastSafeBoundary('a\r\n\r\nb') === 5;
+  out.push({ name: 'crlf index is into the string it was given', ok: crlf, cut: md.lastSafeBoundary('a\r\n\r\nb'), src: 7 });
+
+  const fails = out.filter((t) => !t.ok);
+  q('#tests').innerHTML = out
+    .map((t) => `<li class="${t.ok ? '' : 'fail'}">${t.ok ? '✅' : '❌'} ${t.name}${t.ok ? '' : ` — at ${t.at}, cut ${t.cut}: ${JSON.stringify(t.why)}`}</li>`)
+    .join('');
+  q('#testsSummary').textContent = `${out.length - fails.length}/${out.length} 通过${fails.length ? ' — L2 不能上線' : ''}`;
+  window.__boundaryResults = out;
+  return out;
+};
+
+// ---------------------------------------------------------------- printing
 
 function table(rows) {
   const cols = ['mode', 'kb', 'deltas', 'renders', 'parsedKB', 'renderMs', 'maxRenderMs', 'longtasks', 'maxFrameGapMs', 'wallMs', 'ok'];
@@ -249,24 +320,22 @@ function table(rows) {
 }
 
 window.__bench = null;
-window.__benchRun = async ({ sizes = [1, 8, 40], gap = 12, chunk = 4, gatehz = 20, modes = ['full', 'gate', 'plain'] } = {}) => {
+window.__benchRun = async ({ sizes = [8, 40], gap = 3, chunk = 12, gatehz = 20, runs = RUNS.map((r) => r.id) } = {}) => {
   const rows = [];
   const status = q('#status');
+  const picked = RUNS.filter((r) => runs.includes(r.id)).map((r) => ({ ...r, hz: r.hz === 1000 ? 1000 : gatehz }));
   for (const kb of sizes) {
     const text = sample(kb);
-    const opts = { gap, chunk, gatehz };
-    for (const name of modes) {
-      status.textContent = `${name} ${kb} KB…`;
+    const opts = { gap, chunk };
+    for (const run of picked) {
+      status.textContent = `${run.name} — ${kb} KB…`;
       await sleep(120); // let anything from the previous run settle before it is timed
-      // The guard exists to catch a throttle losing the tail of a reply. `full` has no throttle, so at
-      // 40 KB running it would mean rendering that reply twice — two more minutes of main thread to
-      // prove a tautology. Every mode that *can* skip a frame is verified at every size.
-      const ok = name === 'full' && kb > 8 ? null : await check(name, text, opts);
-      const row = await runOne(name, text, opts);
-      row.ok = ok;
+      const ok = await check(run, text, opts);
+      const row = await runOne(run, text, opts);
+      row.ok = ok === null ? row.ok : ok && row.ok;
       rows.push(row);
       q('#out').innerHTML = table(rows);
-      status.textContent = `${name} ${kb} KB: ${row.renderMs} ms in ${row.renders} renders`;
+      status.textContent = `${run.name} — ${kb} KB: ${row.renderMs} ms in ${row.renders} renders`;
     }
   }
   window.__bench = rows;
@@ -276,10 +345,12 @@ window.__benchRun = async ({ sizes = [1, 8, 40], gap = 12, chunk = 4, gatehz = 2
 
 q('#run').onclick = () =>
   window.__benchRun({
-    sizes: (q2.get('sizes') || '1,8,40').split(',').map(Number),
+    sizes: (q2.get('sizes') || '8,40').split(',').map(Number),
     gap: Number(q('#gap').value),
     chunk: Number(q('#chunk').value),
     gatehz: Number(q('#gatehz').value),
+    runs: (q2.get('runs') || '').split(',').filter(Boolean).length ? (q2.get('runs') || '').split(',').filter(Boolean) : undefined,
   });
+window.__boundaryTests(); // the cheap test runs on load: if it is red, nothing below it is worth measuring
 if (q2.get('auto')) q('#run').click();
 </script>
