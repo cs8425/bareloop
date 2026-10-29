@@ -94,6 +94,10 @@ export async function saveSettings() {
   // while sending a zero here would look like an answer.
   delete body.temperature;
   await api(`/api/session/${state.id}`, { method: 'PATCH', body });
+  // The save is only real for this tab once the cache agrees with it: the tools drawer PATCHes
+  // {...state.cfg, mcp}, and with a pre-save copy in there it would write the old values back. The
+  // refresh below overwrites this with the server's answer (normalised defaults and all).
+  state.cfg = body;
   note('saved (MCP servers reconnect if their list changed)');
   refresh().catch(() => {});
 }
@@ -126,7 +130,11 @@ export function wireSettings() {
     const cfg = await currentConfig().catch(() => null);
     if (!cfg) return;
     cfg.name = e.target.value;
-    await api(`/api/session/${state.id}`, { method: 'PATCH', body: cfg }).catch(fail);
+    const ok = await api(`/api/session/${state.id}`, { method: 'PATCH', body: cfg })
+      .then(() => true)
+      .catch((err) => (fail(err), false));
+    if (!ok) return;
+    state.cfg = cfg; // same mirror rule as saveSettings: this body is now what the server has
     loadSessions();
   });
 }

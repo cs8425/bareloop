@@ -7,7 +7,7 @@
 export const state = {
   sessions: [],
   id: null, // current session id
-  cfg: null, // last config read from the server (the settings dialog starts from it)
+  cfg: null, // the config of the session in `id`: filled by refresh(), written by every save, so a whole-config PATCH (settings dialog, tool switches) can never undo the last one
   entries: new Map(), // entry id -> element
   streams: new Map(), // stream id -> {node, body, reasoning, content, reasoningText, tools, args}
   tools: new Map(), // tool call id -> card api

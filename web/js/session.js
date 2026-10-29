@@ -36,6 +36,12 @@ export function writeHash(id, replace = false) {
 export async function refresh() {
   if (!state.id) return;
   const data = await get('');
+  // Both config writers (settings dialog, tools drawer) PATCH a whole config built on top of
+  // state.cfg, so a copy older than the last save silently undoes it — a price edited in the dialog
+  // bounced back by the next tool toggle. This GET already carries the session's config, which makes
+  // it the cheapest place to keep the cache a mirror. null on a missing block, so the drawer's `if
+  // (!cfg)` refetch path still fires.
+  state.cfg = data.config ?? null;
   // An empty transcript means "fresh load or session switch": that always lands on the newest
   // message, even if the viewport was left reading something older.
   const wasEmpty = !logEl().children.length;
@@ -86,6 +92,7 @@ export async function loadSessions() {
       await api(`/api/session/${s.id}`, { method: 'DELETE' }).catch((err) => note(err.message, 'error'));
       if (state.id === s.id) {
         state.id = null;
+        state.cfg = null; // the cached config described the session that has just been deleted
         writeHash(''); // a conversation that has been deleted must not stay in the address bar
         logEl().textContent = '';
       }
@@ -101,6 +108,7 @@ export async function loadSessions() {
 export async function selectSession(id) {
   writeHash(id); // the address bar follows the view, so a reload or a shared link comes back here
   state.id = id;
+  state.cfg = null; // the cached config described the session we are leaving; refresh() below fills in this one's
   // Anything that had the previous session open (the tool drawer) is told before the new one renders,
   // so a panel can never end up showing one session underneath another one's name.
   emit(EV_SESSION, id);
