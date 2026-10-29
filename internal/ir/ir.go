@@ -42,16 +42,37 @@ type ToolCall struct {
 
 // Usage is the real token accounting reported by the server for one assistant turn.
 //
-// ContextUsed() is the one number shared by the UI progress bar and the compaction
-// trigger check (spec §0 "contextUsed (real usage)").
+// There is one semantics, everywhere: PromptTokens is the whole prompt **including** the prefix the
+// server served from its KV cache, CacheTokens is the part of it that was cached (so CacheTokens <=
+// PromptTokens, never a quantity to add), and CompletionTokens is what it generated. llama.cpp answers
+// in two places at once — `usage.prompt_tokens` already counts the cached prefix, while its `timings`
+// split the same prompt into `prompt_n` (recomputed) and `cache_n` (reused) — so the two are read as
+// one number, not summed. An earlier round carried a `cacheIncludedInPrompt` switch for a dialect
+// difference that measurement says does not exist (three backends, one dialect: prompt includes
+// cached); its default silently discarded `cached_tokens`, which is the very number a cache hit rate
+// and a bill are made of, so it is gone.
+//
+// PromptMs / CompletionMs are that same reply's own prefill and decode measurements, which is what
+// makes a tok/s figure mean something: `completion / completionMs` is this server's decode rate at
+// this size, not a constant someone remembered. A request is one data point; nothing here is averaged.
+//
+// ContextUsed() is the one number shared by the UI progress bar and the compaction trigger check
+// (spec §0 "contextUsed (real usage)").
 type Usage struct {
-	// PromptTokens is the prompt size as reported by the server.
+	// PromptTokens is the whole prompt, cached tokens included.
 	PromptTokens int `json:"prompt,omitempty"`
-	// CacheTokens is only added to ContextUsed when the server does not already include
-	// cached tokens inside PromptTokens (llama.cpp /completion: excluded; OpenAI: included).
+	// CacheTokens is the part of PromptTokens the server did not have to compute again.
 	CacheTokens int `json:"cache,omitempty"`
 	// CompletionTokens is the generated size of this turn.
 	CompletionTokens int `json:"completion,omitempty"`
+
+	// PromptMs / CompletionMs are the server's own prefill and decode timings in milliseconds.
+	// DraftN / DraftAccepted come from speculative decoding (proposed / accepted). Zero means the
+	// server said nothing — the UI drops the field instead of showing a zero.
+	PromptMs      float64 `json:"promptMs,omitempty"`
+	CompletionMs  float64 `json:"completionMs,omitempty"`
+	DraftN        int     `json:"draftN,omitempty"`
+	DraftAccepted int     `json:"draftAccepted,omitempty"`
 
 	// HasPrompt / HasCompletion record "the server really told us", so that a missing
 	// count is never confused with a zero count.
@@ -59,12 +80,13 @@ type Usage struct {
 	HasCompletion bool `json:"hasCompletion,omitempty"`
 }
 
-// ContextUsed returns the real KV occupancy of the completed turn.
+// ContextUsed returns the real KV occupancy of the completed turn: the whole prompt (cached prefix
+// included) plus what was generated. Cached tokens must not be added a second time.
 func (u *Usage) ContextUsed() int {
 	if u == nil || !u.HasPrompt {
 		return 0
 	}
-	return u.PromptTokens + u.CacheTokens + u.CompletionTokens
+	return u.PromptTokens + u.CompletionTokens
 }
 
 // Entry kinds.

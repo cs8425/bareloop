@@ -50,7 +50,9 @@ func DeriveSizes(b *Built) *Sizes {
 		if !(e.Kind == ir.KindAssistant && e.Usage != nil && e.Usage.HasPrompt) {
 			continue
 		}
-		segSum := e.Usage.PromptTokens + e.Usage.CacheTokens
+		// One prompt number: under the ir.Usage semantics the cached prefix is already inside
+		// PromptTokens, so adding CacheTokens here would double it.
+		segSum := e.Usage.PromptTokens
 		var attrib int
 		if prevSum < 0 {
 			attrib = segSum

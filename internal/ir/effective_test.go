@@ -201,7 +201,12 @@ func TestUsageWithoutPromptIsNotReal(t *testing.T) {
 		t.Fatalf("HasPrompt=false must not count as a measurement: %+v", u)
 	}
 	if (&Usage{PromptTokens: 5, HasPrompt: true}).ContextUsed() != 5 {
-		t.Fatal("ContextUsed must add prompt+cache+completion")
+		t.Fatal("a prompt with no completion is just the prompt")
+	}
+	// The one-semantics invariant: the cached prefix is a *part* of PromptTokens, so it must not be
+	// counted twice. A turn that reused 900 of 1000 prompt tokens and wrote 50 occupies 1050, not 1950.
+	if got := (&Usage{PromptTokens: 1000, CacheTokens: 900, CompletionTokens: 50, HasPrompt: true}).ContextUsed(); got != 1050 {
+		t.Fatalf("cached tokens must not be added to a prompt that already includes them: got %d, want 1050", got)
 	}
 	if (&Usage{}).ContextUsed() != 0 || (*Usage)(nil).ContextUsed() != 0 {
 		t.Fatal("no prompt means no occupancy claim")

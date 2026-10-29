@@ -167,7 +167,7 @@ func (p *openai) Stream(ctx context.Context, req Request) (<-chan Event, error) 
 		if err := json.Unmarshal(raw, &cr); err != nil {
 			return nil, fmt.Errorf("llm: unexpected %s response: %.200s", ct, string(raw))
 		}
-		res := cr.toResult(p.cacheIncluded())
+		res := cr.toResult()
 		out := make(chan Event, 8)
 		if res.Content != "" || res.Reasoning != "" {
 			out <- Event{Content: res.Content, Reasoning: res.Reasoning}
@@ -208,7 +208,7 @@ func (p *openai) readStream(resp *http.Response, out chan<- Event) {
 		if len(line) > 0 {
 			trimmed := strings.TrimSpace(string(line))
 			if strings.HasPrefix(trimmed, "data:") {
-				ev, e, ok := parseChunk(trimmed, p.cacheIncluded())
+				ev, e, ok := parseChunk(trimmed)
 				if e != nil {
 					failure = e
 				} else if ok {
@@ -265,14 +265,7 @@ func (p *openai) Complete(ctx context.Context, req Request) (*Result, error) {
 	if err := json.Unmarshal(raw, &cr); err != nil {
 		return nil, fmt.Errorf("llm: bad response: %v (%.200s)", err, string(raw))
 	}
-	return cr.toResult(p.cacheIncluded()), nil
-}
-
-func (p *openai) cacheIncluded() bool {
-	if p.cfg.CacheIncludedInPrompt != nil {
-		return *p.cfg.CacheIncludedInPrompt
-	}
-	return true
+	return cr.toResult(), nil
 }
 
 // NCTX probes provider metadata endpoints for the context window. Best effort.
@@ -466,8 +459,8 @@ func (m msgPayload) reasoning() string {
 	return s
 }
 
-func (cr completionResponse) toResult(cacheIncluded bool) *Result {
-	res := &Result{Usage: parseUsage(cr.Usage, cr.Timings, cacheIncluded)}
+func (cr completionResponse) toResult() *Result {
+	res := &Result{Usage: parseUsage(cr.Usage, cr.Timings)}
 	if len(cr.Choices) == 0 {
 		res.Content = cr.Content
 		if cr.Error != nil {
@@ -485,40 +478,61 @@ func (cr completionResponse) toResult(cacheIncluded bool) *Result {
 		})
 	}
 	if res.Usage == nil && len(ch.Usage) > 0 {
-		res.Usage = parseUsage(ch.Usage, nil, cacheIncluded)
+		// cr.Timings may still be there even though the top level had no usage object, and counts from
+		// `usage` are never spoiled by adding the timings of the same reply a second time.
+		res.Usage = parseUsage(ch.Usage, cr.Timings)
 	}
 	return res
 }
 
-// parseUsage reads the usage dialects we care about: OpenAI (prompt_tokens with
-// cached_tokens inside), llama.cpp native timings (cache_n NOT included), Ollama native.
-func parseUsage(raw json.RawMessage, timings json.RawMessage, cacheIncluded bool) *ir.Usage {
-	var u map[string]json.RawMessage
+// parseUsage reads the usage dialects we care about into one semantics (see ir.Usage): PromptTokens
+// is the whole prompt, cached prefix included. OpenAI-style `usage` reports it that way directly.
+// llama.cpp reports the same reply twice — `usage.prompt_tokens` already includes the cached prefix,
+// while `timings` splits it into `prompt_n` (recomputed) and `cache_n` (reused) — so the two are read
+// as one number and never summed; `timings` assembles the counts only when `usage` did not speak
+// (native /completion). `timings` is always mined for the milliseconds, because those are what turn a
+// token count into a rate this server actually produced, and one request is one data point.
+func parseUsage(raw json.RawMessage, timings json.RawMessage) *ir.Usage {
+	var u, t map[string]json.RawMessage
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &u)
 	}
 	if len(timings) > 0 {
-		var t map[string]json.RawMessage
-		if json.Unmarshal(timings, &t) == nil {
-			got := &ir.Usage{}
+		_ = json.Unmarshal(timings, &t)
+	}
+	got := &ir.Usage{}
+	if t != nil {
+		if f, ok := getFloat(t, "prompt_ms"); ok {
+			got.PromptMs = f
+		}
+		if f, ok := getFloat(t, "predicted_ms"); ok {
+			got.CompletionMs = f
+		}
+		if n, ok := getInt(t, "draft_n"); ok {
+			got.DraftN = n
+		}
+		if n, ok := getInt(t, "draft_n_accepted"); ok {
+			got.DraftAccepted = n
+		}
+		if len(u) == 0 {
 			if n, ok := getInt(t, "prompt_n"); ok {
 				got.PromptTokens, got.HasPrompt = n, true
-			}
-			if n, ok := getInt(t, "cache_n"); ok {
-				got.CacheTokens = n
+				if c, ok := getInt(t, "cache_n"); ok {
+					got.CacheTokens, got.PromptTokens = c, n+c
+				}
 			}
 			if n, ok := getInt(t, "predicted_n"); ok {
 				got.CompletionTokens, got.HasCompletion = n, true
 			}
-			if got.HasPrompt {
-				return got // llama.cpp: prompt_n excludes cache_n
+			if !got.HasPrompt && !got.HasCompletion {
+				return nil
 			}
+			return got
 		}
 	}
 	if len(u) == 0 {
 		return nil
 	}
-	got := &ir.Usage{}
 	if n, ok := getInt(u, "prompt_eval_count"); ok {
 		got.PromptTokens, got.HasPrompt = n, true
 		if n, ok := getInt(u, "eval_count"); ok {
@@ -526,6 +540,9 @@ func parseUsage(raw json.RawMessage, timings json.RawMessage, cacheIncluded bool
 		}
 		if !got.HasCompletion {
 			return nil
+		}
+		if n, ok := getInt(u, "prompt_cache_hit_count"); ok {
+			got.CacheTokens = n
 		}
 		return got
 	}
@@ -535,12 +552,14 @@ func parseUsage(raw json.RawMessage, timings json.RawMessage, cacheIncluded bool
 	if n, ok := getInt(u, "completion_tokens"); ok {
 		got.CompletionTokens, got.HasCompletion = n, true
 	}
-	cached, have := getInt(u, "prompt_tokens_details", "cached_tokens")
-	if !have {
-		cached, have = getInt(u, "cache_tokens")
-	}
-	if have && !cacheIncluded {
-		got.CacheTokens = cached
+	// The reused prefix is a *part* of prompt_tokens: OpenAI names it prompt_tokens_details.cached_tokens,
+	// llama.cpp /v1 the same, some proxies flatten it to cache_tokens. It is stored as reported and adds
+	// nothing to ContextUsed(). An earlier round threw it away unless a config switch said the endpoint
+	// excluded it — which is how a session lost the only number a cache hit rate is made of.
+	if n, ok := getInt(u, "prompt_tokens_details", "cached_tokens"); ok {
+		got.CacheTokens = n
+	} else if n, ok := getInt(u, "cache_tokens"); ok {
+		got.CacheTokens = n
 	}
 	if !got.HasPrompt && !got.HasCompletion {
 		return nil
@@ -571,8 +590,22 @@ func getInt(m map[string]json.RawMessage, path ...string) (int, bool) {
 	return 0, false
 }
 
+// getFloat reads a number that keeps its fraction. Milliseconds are worth their decimal (a warm
+// prefill is 0.13 s, and rounding 127.5 to 127 is a lie we do not need to tell).
+func getFloat(m map[string]json.RawMessage, key string) (float64, bool) {
+	raw, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
 // parseChunk turns one SSE `data:` line into an Event.
-func parseChunk(line string, cacheIncluded bool) (Event, error, bool) {
+func parseChunk(line string) (Event, error, bool) {
 	if !strings.HasPrefix(line, "data:") {
 		return Event{}, nil, false
 	}
@@ -601,8 +634,11 @@ func parseChunk(line string, cacheIncluded bool) (Event, error, bool) {
 			ev.FinishReason = c.FinishReason
 		}
 	}
-	if len(ch.Usage) > 0 {
-		ev.Usage = parseUsage(ch.Usage, nil, cacheIncluded)
+	if len(ch.Usage) > 0 || len(ch.Timings) > 0 {
+		// llama.cpp puts both in the last chunk when stream_options.include_usage is set, which is what
+		// we ask for (see streamOptions); a usage-free chunk with timings alone still becomes a Usage so
+		// the milliseconds are not thrown away.
+		ev.Usage = parseUsage(ch.Usage, ch.Timings)
 	}
 	if ev.Content == "" && ev.Reasoning == "" && len(ev.ToolCalls) == 0 &&
 		ev.FinishReason == "" && ev.Usage == nil {
@@ -616,6 +652,10 @@ type chunk struct {
 	Object  string          `json:"object"`
 	Choices []choiceMessage `json:"choices"`
 	Usage   json.RawMessage `json:"usage"`
+	// Timings is llama.cpp's own measurement of the reply, carried by the last streamed chunk next
+	// to usage: prompt_n/cache_n/prompt_ms/predicted_ms plus draft_n/draft_n_accepted when speculative
+	// decoding is on. OpenAI servers leave it empty.
+	Timings json.RawMessage `json:"timings"`
 	Error   *apiError       `json:"error"`
 }
 

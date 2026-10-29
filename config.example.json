@@ -14,8 +14,7 @@
       "baseUrl": "http://127.0.0.1:8901/v1",
       "apiKey": "${BARELOOP_API_KEY}",
       "model": "${BARELOOP_MODEL}",
-      "nCtx": 4096,
-      "cacheIncludedInPrompt": false
+      "nCtx": 4096
     },
 
     "temperature": 0.7,

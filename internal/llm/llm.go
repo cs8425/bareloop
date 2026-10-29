@@ -95,9 +95,6 @@ type Config struct {
 	Headers map[string]string `json:"headers"`
 	// NCTX is the model context window; 0 = ask the server / unknown.
 	NCTX int `json:"nCtx"`
-	// CacheIncludedInPrompt says whether prompt_tokens already counts cached tokens.
-	// Default true (OpenAI semantics). llama.cpp native timings are handled automatically.
-	CacheIncludedInPrompt *bool `json:"cacheIncludedInPrompt"`
 	// Path overrides the endpoint path (default /chat/completions).
 	Path string `json:"path"`
 	// Timeout for a whole non-streaming request.
@@ -112,12 +109,6 @@ type Config struct {
 func (c Config) Same(o Config) bool {
 	if c.Kind != o.Kind || c.BaseURL != o.BaseURL || c.APIKey != o.APIKey || c.Model != o.Model ||
 		c.Path != o.Path || c.NCTX != o.NCTX {
-		return false
-	}
-	if (c.CacheIncludedInPrompt == nil) != (o.CacheIncludedInPrompt == nil) {
-		return false
-	}
-	if c.CacheIncludedInPrompt != nil && *c.CacheIncludedInPrompt != *o.CacheIncludedInPrompt {
 		return false
 	}
 	if len(c.Headers) != len(o.Headers) {

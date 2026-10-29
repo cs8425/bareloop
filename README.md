@@ -126,7 +126,7 @@ its own copy in `data/<id>/config.json`.
 | field | meaning |
 |---|---|
 | `addr`, `data`, `web`, `fsync`, `debug` | listen address, log directory, static UI directory, synchronous appends, request logging |
-| `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `cacheIncludedInPrompt`, `headers` |
+| `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `headers` |
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
@@ -193,8 +193,10 @@ a tool was published under stays resolvable to it, so old history never becomes 
 
 Hiding a tool is cheap in the direction you want to think about: the schema leaves the request, so the
 prompt shrinks (~118 tokens per small tool on a Gemma-class model, ~165 on Qwen-class) **and** the prefix
-cache breaks, because `tools` is serialized after the system block. Measured on a 14 000-token history:
-+14.3 s (Gemma) / +22.8 s (Qwen) per turn, paid again when you toggle back. The only cost-free moment is
+cache breaks, because `tools` is serialized after the system block — so the next request computes the
+history behind it again. No seconds are quoted here on purpose: a prefill rate belongs to one server at
+one context size, and the two single measurements that once said "+14.3 s / +22.8 s" moved 10–19 % when the
+same servers were measured again. The only cost-free moment is
 before the first request of a session. That is why `GET /api/session/{id}/tools` reports `estTokens` per
 tool, a `contextUsed` figure, and `pendingChanges`.
 
