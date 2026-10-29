@@ -34,6 +34,7 @@ import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
+import { flushStreams } from './transcript.js';
 import { loadSessions, selectSession, refresh, idFromHash, writeHash } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
@@ -177,6 +178,12 @@ function wire() {
   wireStats();
   wireNewSession();
   wireKeys();
+  // The render gate draws nothing while this tab is hidden — a background tab has no reader — so coming
+  // back needs one explicit repaint: the fragments that arrived meanwhile are in the stream buffers but
+  // not yet on screen. There is no timer in the gate to do it for us, deliberately.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) flushStreams();
+  });
   $('#btn-compact').onclick = compactNow;
   on(EV_REFRESH, () => refresh().catch(() => {}));
   on(EV_SESSIONS, () => loadSessions().catch(() => {}));

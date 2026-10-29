@@ -2,6 +2,7 @@
 // input request. Everything here renders from the events the server sends; none of it decides
 // anything. Refresh requests go out on the bus so this module does not import the session module.
 import md from './md.js';
+import { makeRenderGate } from './scheduler.js';
 import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName, tps, MIN_UNCACHED } from './util.js';
 import { state } from './state.js';
 import { call } from './api.js';
@@ -405,6 +406,11 @@ function streamStart(streamId) {
   node.appendChild(body);
   logEl().appendChild(node);
   const s = { id: streamId, node, body, reasoning, content: '', reasoningText: '', rText: null, tools: new Map(), args: new Map() };
+  // The whole point of the gate: `body` used to be rebuilt from the entire accumulated reply on every
+  // single fragment, which is why a long answer got slower the further it went. `s.content` keeps
+  // accumulating either way, so a frame that is skipped costs nothing and loses nothing — the next
+  // render draws everything up to now.
+  s.gate = makeRenderGate(() => md.renderTo(s.body, s.content));
   state.streams.set(streamId, s);
   scrollDown();
   return s;
@@ -423,7 +429,7 @@ export function streamDelta(d) {
   }
   if (d.content) {
     s.content += d.content;
-    md.renderTo(s.body, s.content);
+    s.gate.mark();
   }
   const tc = d.toolCall;
   if (tc) {
@@ -439,8 +445,22 @@ export function streamDelta(d) {
     const card = s.tools.get(key);
     if (card) card.setArgs(s.args.get(key) || '');
   }
-  if (d.done) streamFinish(s);
+  // `done` closes the window: whatever is still unpainted gets painted now, unconditionally. Without
+  // this the last few tokens of a reply could sit in `s.content` until the committed entry arrived,
+  // because the rule "render when the window has passed" needs a new delta to be evaluated, and there
+  // is no delta after the last one.
+  if (d.done) {
+    s.gate.flush();
+    streamFinish(s);
+  }
   scrollDown();
+}
+
+// flushStreams repaints every live stream, and is what a tab coming back to the foreground needs: while
+// it was hidden the gate drew nothing (a background tab has no reader), so the text on screen is behind
+// the text we have already been sent.
+export function flushStreams() {
+  for (const s of state.streams.values()) s.gate.flush();
 }
 
 function streamFinish(s) {

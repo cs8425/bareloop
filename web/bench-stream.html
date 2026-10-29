@@ -1,0 +1,285 @@
+<!doctype html>
+<!--
+  The measuring stick for T1 (stream rendering). It exists because "順不順" is not a fact anyone can argue
+  from: every number this page prints is one the real app produces too, on the machine you are typing on.
+
+  It renders through the real renderer (`js/md.js`) and the real render gate (`js/scheduler.js`) into the
+  real message markup and stylesheet — a bench that reimplements the thing it measures is a fiction.
+
+  Modes (one row each):
+    full        every fragment rebuilds the whole accumulated reply. This is what shipped until T1.
+    full+gate   the same render, allowed to run at most `?gatehz=` times a second (L0).
+    plain       no markdown while it streams: append a text node per fragment, render once at `done`.
+    tail+gate   reserved for L2 (render only the unclosed tail); it appears here once it exists.
+
+  What each column is for:
+    render ms      main thread spent drawing. Everything else on the page waits for this.
+    max render ms  the longest single task a click could land behind — the reason "stop" feels dead.
+    max frame gap  the worst gap a rAF loop saw while feeding: how long the page was audibly frozen.
+    parsed KB      total characters handed to the markdown parser. O(n²) shows up here first: the old path
+                   re-parses the whole reply for every fragment, so this grows with size squared.
+    DOM ok         the final DOM must equal one clean render of the whole text — a throttle that drops
+                   the last few tokens is a bug, not a optimisation. This column is the guard.
+
+  Drive it from the console (that is how the numbers in state/render-throttle-plan.md were taken):
+    await window.__benchRun({ sizes: [1, 8, 40], gap: 12, chunk: 4 })
+  and read window.__bench. CPU throttling is applied from outside with CDP
+  Emulation.setCPUThrottlingRate, so one page can be measured at 1x / 4x / 6x.
+-->
+<meta charset="utf-8" />
+<title>bench · stream rendering</title>
+<link rel="stylesheet" href="/app.css" />
+<style>
+  body { padding: 18px 20px 40px; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  p.lede { color: var(--muted); font-size: 12px; margin: 0 0 14px; max-width: 78ch; }
+  table { border-collapse: collapse; font-size: 11.5px; }
+  th, td { padding: 3px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  td.num { font-family: var(--mono); }
+  td.bad { color: var(--err); }
+  #stage { position: fixed; left: 0; top: 0; width: 720px; visibility: hidden; pointer-events: none; }
+  #controls { margin: 0 0 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; }
+  #controls input { width: 62px; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; }
+</style>
+
+<h1>bench · stream rendering</h1>
+<p class="lede">
+  Same script, four ways of drawing it. Feed rate mimics a real provider (~80–100 fragments/s) rather than
+  a synchronous loop, because the thing being destroyed is the main thread's ability to answer a click.
+</p>
+<div id="controls">
+  <label>gap <input id="gap" value="12" /> ms</label>
+  <label>chunk <input id="chunk" value="4" /> chars</label>
+  <label>gate <input id="gatehz" value="20" /> Hz</label>
+  <button id="run" type="button">run 1 / 8 / 40 KB</button>
+  <span id="status" class="dim"></span>
+</div>
+<div id="out"></div>
+
+<!-- the transcript's real markup, so CSS and layout cost match the app -->
+<div id="stage"><div class="msg assistant"><div class="body md"></div></div></div>
+
+<script type="module">
+import md from './js/md.js';
+import { makeRenderGate } from './js/scheduler.js';
+
+const q = (s) => document.querySelector(s);
+const body = q('#stage .body');
+const q2 = new URLSearchParams(location.search);
+
+// A sample has to contain the shapes the real renderer is worst at, or the bench measures the easy path:
+// an unclosed fence and an unclosed bold are exactly what makes a naive re-render jump around, and a pipe
+// table is the block most likely to break if a future tail-only renderer cuts in the wrong place.
+function sample(kb) {
+  const para = 'the quick brown fox jumps over the lazy dog while bareloop checks whether this request fits the window at all. ';
+  const paraLine = (n) => `X.${n} ${para}`;
+  const table = ['| entry | prompt | cached | out | tok/s | cost |', '| --- | --- | --- | --- | --- | --- |'];
+  for (let i = 0; i < 12; i++) table.push(`| 00000${i}0 | 3.2k | 3.2k | 21 | 1494 / 61 | 0.00015 |`);
+  const out = [];
+  for (let n = 0; out.join('\n\n').length < kb * 1024; n++) {
+    const k = n % 7;
+    if (k === 0) out.push(paraLine(n));
+    else if (k === 1) out.push(`## heading ${n}\n\n${paraLine(n)}`);
+    else if (k === 2) out.push('```go\nfunc main() {\n\tfmt.Println("hello")\n}\n```');
+    else if (k === 3) out.push(table.join('\n'));
+    else if (k === 4) out.push(`- item **unclosed bold ${n}\n  continued on the next line** — tail\n- second item`);
+    else if (k === 5) out.push(`inline \`code ${n}\` and a long unbreakable token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`);
+    else out.push(`> quote ${n} ${paraLine(n)}`);
+  }
+  return out.join('\n\n');
+}
+
+function longtasks() {
+  let n = 0;
+  try {
+    const po = new PerformanceObserver((list) => {
+      n += list.getEntries().length;
+    });
+    po.observe({ type: 'longtask', buffered: false });
+    return { count: () => n, stop: () => po.disconnect() };
+  } catch {
+    return { count: () => -1, stop: () => {} };
+  }
+}
+
+// A rAF loop is not the thing being measured — it is the thermometer: whatever gap it sees is a gap during
+// which the page could not paint, which is exactly what a user feels as a freeze.
+function frames() {
+  let last = 0, max = 0, alive = true;
+  const tick = (t) => {
+    if (last) max = Math.max(max, t - last);
+    last = t;
+    if (alive) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  return { stop: () => ((alive = false), max), reset: () => (last = 0) };
+}
+
+// One mode's drawer: what it does per fragment, and what it does when the stream says it is finished.
+const MODES = {
+  full: () => {
+    let renders = 0, ms = 0, parsed = 0, max = 0;
+    return {
+      name: 'full (every fragment)',
+      onChunk(text, el) {
+        const t0 = performance.now();
+        el.innerHTML = md.render(text);
+        const dt = performance.now() - t0;
+        renders++; ms += dt; parsed += text.length; max = Math.max(max, dt);
+      },
+      onDone(text, el) {
+        if (renders) return { renders, ms, parsed, max };
+        const t0 = performance.now();
+        el.innerHTML = md.render(text);
+        const dt = performance.now() - t0;
+        return { renders: 1, ms: dt, parsed: text.length, max: dt };
+      },
+    };
+  },
+  gate: (hz) => {
+    const drawn = { renders: 0, ms: 0, parsed: 0, max: 0 };
+    let gate = null;
+    return {
+      name: `full + gate ${hz}Hz`,
+      start(el) {
+        gate = makeRenderGate(() => {
+          const t0 = performance.now();
+          el.innerHTML = md.render(gate.text);
+          const dt = performance.now() - t0;
+          drawn.renders++; drawn.ms += dt; drawn.parsed += gate.text.length; drawn.max = Math.max(drawn.max, dt);
+        }, hz);
+      },
+      onChunk(text, el) {
+        gate.text = text;
+        gate.mark();
+        return gate.stats;
+      },
+      onDone(text, el) {
+        gate.text = text;
+        gate.flush();
+        return { ...drawn, stats: { ...gate.stats } };
+      },
+    };
+  },
+  plain: () => {
+    let drawn = { renders: 0, ms: 0, parsed: 0, max: 0 };
+    return {
+      name: 'plain text, render at done',
+      onChunk(text, el) {
+        el.textContent = text; // append-only in effect: one text node, no parse, no subtree rebuild
+        return {};
+      },
+      onDone(text, el) {
+        const t0 = performance.now();
+        el.innerHTML = md.render(text);
+        const dt = performance.now() - t0;
+        drawn = { renders: 1, ms: dt, parsed: text.length, max: dt };
+        return drawn;
+      },
+    };
+  },
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function runOne(modeName, text, { gap, chunk, gatehz }) {
+  body.innerHTML = '';
+  const mode = MODES[modeName](gatehz);
+  if (mode.start) mode.start(body);
+  const lt = longtasks();
+  const fr = frames();
+  const t0 = performance.now();
+  let deltas = 0;
+  for (let i = 0; i < text.length; i += chunk) {
+    mode.onChunk(text.slice(0, i + chunk), body);
+    deltas++;
+    await sleep(gap);
+  }
+  const drawn = mode.onDone(text, body);
+  const wall = performance.now() - t0;
+  fr.reset();
+  await sleep(60); // let one more frame land so the thermometer sees the tail of the stream
+  const maxFrameGap = fr.stop();
+  lt.stop();
+  body.innerHTML = '';
+  return {
+    mode: mode.name,
+    kb: Math.round(text.length / 1024),
+    deltas,
+    renders: drawn.renders,
+    parsedKB: +(drawn.parsed / 1024).toFixed(1),
+    renderMs: +drawn.ms.toFixed(1),
+    maxRenderMs: +drawn.max.toFixed(1),
+    longtasks: lt.count(),
+    maxFrameGapMs: +maxFrameGap.toFixed(1),
+    wallMs: +wall.toFixed(0),
+    stats: drawn.stats || null,
+  };
+}
+
+// The guard every timing row depends on: the stream must end at exactly the DOM a single clean render
+// would have produced. A gate that swallows the last fragment shows up here, not in a millisecond column.
+// The comparison is DOM-to-DOM (`innerHTML` read back after a parse), never string-to-DOM: a parser
+// rewrites markup as it goes (`<br>` becomes `<br>`… sometimes not), and a comparison that lies about
+// correctness is worse than no guard at all.
+async function check(modeName, text, opts) {
+  body.innerHTML = '';
+  const mode = MODES[modeName](opts.gatehz);
+  if (mode.start) mode.start(body);
+  for (let i = 0; i < text.length; i += opts.chunk) {
+    mode.onChunk(text.slice(0, i + opts.chunk), body);
+    await sleep(0);
+  }
+  mode.onDone(text, body);
+  const got = body.innerHTML;
+  const reference = document.createElement('div');
+  reference.innerHTML = md.render(text);
+  body.innerHTML = '';
+  return got === reference.innerHTML;
+}
+
+function table(rows) {
+  const cols = ['mode', 'kb', 'deltas', 'renders', 'parsedKB', 'renderMs', 'maxRenderMs', 'longtasks', 'maxFrameGapMs', 'wallMs', 'ok'];
+  const head = cols.map((c) => `<th>${c}</th>`).join('');
+  const tr = rows
+    .map((r) => `<tr>${cols.map((c) => `<td class="${c === 'mode' ? '' : 'num'}${c === 'ok' && r.ok === false ? ' bad' : ''}">${r[c] === null || r[c] === undefined ? '—' : r[c]}</td>`).join('')}</tr>`)
+    .join('');
+  return `<table><tr>${head}</tr>${tr}</table>`;
+}
+
+window.__bench = null;
+window.__benchRun = async ({ sizes = [1, 8, 40], gap = 12, chunk = 4, gatehz = 20, modes = ['full', 'gate', 'plain'] } = {}) => {
+  const rows = [];
+  const status = q('#status');
+  for (const kb of sizes) {
+    const text = sample(kb);
+    const opts = { gap, chunk, gatehz };
+    for (const name of modes) {
+      status.textContent = `${name} ${kb} KB…`;
+      await sleep(120); // let anything from the previous run settle before it is timed
+      // The guard exists to catch a throttle losing the tail of a reply. `full` has no throttle, so at
+      // 40 KB running it would mean rendering that reply twice — two more minutes of main thread to
+      // prove a tautology. Every mode that *can* skip a frame is verified at every size.
+      const ok = name === 'full' && kb > 8 ? null : await check(name, text, opts);
+      const row = await runOne(name, text, opts);
+      row.ok = ok;
+      rows.push(row);
+      q('#out').innerHTML = table(rows);
+      status.textContent = `${name} ${kb} KB: ${row.renderMs} ms in ${row.renders} renders`;
+    }
+  }
+  window.__bench = rows;
+  status.textContent = 'done';
+  return rows;
+};
+
+q('#run').onclick = () =>
+  window.__benchRun({
+    sizes: (q2.get('sizes') || '1,8,40').split(',').map(Number),
+    gap: Number(q('#gap').value),
+    chunk: Number(q('#chunk').value),
+    gatehz: Number(q('#gatehz').value),
+  });
+if (q2.get('auto')) q('#run').click();
+</script>
