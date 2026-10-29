@@ -585,6 +585,14 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.LLM.NCTX == 0 {
 		patch.LLM.NCTX = old.LLM.NCTX
 	}
+	// Same rule as everything else in a patch: no pricing block means no change. Unlike the fields
+	// above, this one can be turned back off — send {"pricing":{"input":0,"cachedInput":0,"output":0}}
+	// and the session really means "free", which the UI then renders as 0 rather than hiding money.
+	if patch.LLM.Pricing == nil {
+		patch.LLM.Pricing = old.LLM.Pricing
+	} else if err := patch.LLM.Pricing.Validate(); err != nil {
+		return err
+	}
 	if patch.Name == "" {
 		patch.Name = old.Name
 	}

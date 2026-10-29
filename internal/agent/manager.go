@@ -78,6 +78,12 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 	if cfg.LLM.NCTX == 0 {
 		cfg.LLM.NCTX = m.defaults.LLM.NCTX
 	}
+	// A price tag belongs to the endpoint, so a session that says nothing about money inherits the
+	// daemon's. A session that says {"input":0,...} is saying "this one is free", which is an answer
+	// and is kept — hence the pointer rather than a zero check.
+	if cfg.LLM.Pricing == nil {
+		cfg.LLM.Pricing = m.defaults.LLM.Pricing
+	}
 	if cfg.Temperature == nil {
 		cfg.Temperature = m.defaults.Temperature
 	}
@@ -201,6 +207,9 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	cfg = m.MergeDefaults(cfg)
+	if err := cfg.LLM.Pricing.Validate(); err != nil {
+		return nil, err
+	}
 	// The directory is the identity, so an existing directory means the id is taken - even when no log
 	// has been written yet (a session interrupted before its first entry, or a directory someone made
 	// by hand, used to be overwritten without a word because only log.jsonl was checked).

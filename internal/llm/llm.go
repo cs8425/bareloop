@@ -85,6 +85,39 @@ type Provider interface {
 	NCTX(ctx context.Context) int
 }
 
+// Pricing is billing metadata for one endpoint: what each kind of token costs, **all three in the same
+// unit — per 1,000,000 tokens** — because that is how providers publish prices and how they are read
+// off a bill. It lives with baseUrl/model/apiKey because it is a property of the endpoint: the same
+// endpoint costs the same whatever the conversation does, and a second session on the same model
+// should not need its own price tag (it inherits, and may override).
+//
+// There is deliberately no currency field. bareloop does not know which one you are billed in, and a
+// symbol it invented would be a guess; enter the numbers in whatever unit your provider quotes and
+// read the total as that.
+//
+// The three kinds match what a reply actually reports, so a price is only ever multiplied by a
+// measured number (ir.Usage): Input is the prompt the server had to compute (prompt minus cached),
+// CachedInput the prompt it served from cache, Output what it generated.
+type Pricing struct {
+	// No omitempty on purpose: a config file that says "pricing" should show all three numbers, the
+	// zeroes included, because "I did not write that one" and "that one is free" must not look alike.
+	Input       float64 `json:"input"`
+	CachedInput float64 `json:"cachedInput"`
+	Output      float64 `json:"output"`
+}
+
+// Validate rejects prices that could not be paid. A nil Pricing is not a problem: it means the
+// session says nothing about money, and the UI then shows tokens and no cost at all.
+func (p *Pricing) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.Input < 0 || p.CachedInput < 0 || p.Output < 0 {
+		return errors.New("llm: pricing must not be negative")
+	}
+	return nil
+}
+
 // Config configures a provider.
 type Config struct {
 	Kind    string `json:"kind"` // "openai" (default)
@@ -97,6 +130,10 @@ type Config struct {
 	NCTX int `json:"nCtx"`
 	// Path overrides the endpoint path (default /chat/completions).
 	Path string `json:"path"`
+	// Pricing is what a token costs on this endpoint (per 1,000,000). It changes no request, which is
+	// why it is a pointer to a struct of plain numbers: absent means "no idea, show no cost", and an
+	// explicit {"input":0,"cachedInput":0,"output":0} is a real answer meaning "free".
+	Pricing *Pricing `json:"pricing,omitempty"`
 	// Timeout for a whole non-streaming request.
 	Timeout time.Duration `json:"-"`
 	HTTP    *http.Client  `json:"-"`
@@ -106,6 +143,10 @@ type Config struct {
 // *http.Client, so == cannot be used on it; the fields that matter when deciding whether a new
 // provider must be built are compared here (the http client and the timeout are not part of an
 // endpoint identity).
+//
+// Pricing is deliberately not compared, and adding it here would be a bug: a price tag changes no
+// request, so it must never be a reason to rebuild a provider, reconnect, or warn that saving a
+// setting costs the KV cache.
 func (c Config) Same(o Config) bool {
 	if c.Kind != o.Kind || c.BaseURL != o.BaseURL || c.APIKey != o.APIKey || c.Model != o.Model ||
 		c.Path != o.Path || c.NCTX != o.NCTX {
