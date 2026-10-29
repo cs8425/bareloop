@@ -131,9 +131,9 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   border-color: var(--accent); box-shadow: 0 3px 12px rgba(0, 0, 0, .55); background: var(--bg3);
 }
 .msg { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; background: var(--bg2); }
-.msg > header { display: flex; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+.msg > header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); } /* wrap, not overflow: two groups of numbers plus a long MCP tool name do not fit in 485px, and a header that pushes the transcript sideways is worse than a second line */
 .msg > header .who { color: var(--fg); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-.msg > header .eid { font-family: var(--mono); }
+.msg > header .eid { font-family: var(--mono); white-space: nowrap; } /* a number broken across two lines reads as two numbers */
 .msg > .body { padding: 9px 12px; white-space: pre-wrap; word-break: break-word; }
 .msg > .body.md { white-space: normal; }
 .msg.user { border-left: 3px solid #35639f; }
@@ -169,6 +169,14 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .note { color: var(--muted); font-size: 12px; text-align: center; margin: 6px 0; }
 .compact-banner { border: 1px solid #4a3866; background: #1d1826; border-radius: 8px; padding: 7px 11px; margin-bottom: 10px; font-size: 12.5px; }
 .compact-banner b { color: #c8aef0; }
+/* A `<pre>` breaks only at newlines, and both kinds of pre-formatted text a message can hold — a tool's
+   output and a compaction summary — are full of lines far wider than a phone (measured: 2 250 px of
+   summary in a 464 px column, which scrolled the whole transcript sideways). The bytes are untouched;
+   this only gives the browser permission to break a line where it has to. */
+.msg pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 #pending { border-top: 1px solid var(--border); padding: 5px 12px; font-size: 12px; color: var(--muted); background: #14181f; flex: 0 0 auto; }
 #pending ul { margin: 3px 0 0; padding-left: 18px; }
@@ -473,18 +481,25 @@ button,
 /* ------------------------------------------------------------------ tool catalogue
    The badge in the top bar is the door to the catalogue, so it has to look pressable: the numbers on
    it were already worth reading, and now they are worth clicking. */
-#tools {
+#tools,
+.ctxbar {
+  /* Two doors in the chrome: the badge opens the tool catalogue, the token bar opens the cost panel.
+     Both already carry numbers people read, so both have to look pressable. */
   cursor: pointer;
   user-select: none;
 }
 #tools:hover,
-#tools:focus-visible {
+#tools:focus-visible,
+.ctxbar:hover,
+.ctxbar:focus-visible {
   border-color: var(--accent);
   color: var(--fg);
 }
 
-/* A parameter table needs room for its third column, so the panel is wider in this mode. */
-#app.with-panel.tools {
+/* A parameter table and a cost table both need room for their third column, so the panel is wider in
+   these two modes. */
+#app.with-panel.tools,
+#app.with-panel.stats {
   grid-template-columns: 210px 1fr minmax(430px, 44vw);
 }
 
@@ -741,7 +756,8 @@ button,
 
 @media (max-width: 860px) {
   /* the panel is a bottom sheet there: the wider grid belongs to the desktop only */
-  #app.with-panel.tools {
+  #app.with-panel.tools,
+  #app.with-panel.stats {
     grid-template-columns: 1fr;
   }
   #panel-body .tok {

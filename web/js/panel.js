@@ -13,7 +13,8 @@ export function wirePanel() {
   $('#panel-close').onclick = hidePanel;
 }
 
-// The panel has two modes: `inspect` (what would be sent) and `tools` (the tool catalogue).
+// The panel has three modes: `inspect` (what would be sent), `tools` (the tool catalogue) and `stats`
+// (tokens and cost of this conversation).
 // One variable owns which one is on screen, so a module can ask “am I open?” without watching the DOM,
 // and opening one closes the other by construction rather than by remembering to.
 let mode = '';
@@ -26,8 +27,10 @@ export function openPanel(next, title) {
   const app = $('#app');
   $('#panel').classList.remove('hidden');
   app.classList.add('with-panel');
-  // The tool catalogue needs more width than a table of message ids, so the grid follows the mode.
+  // The tool catalogue and the cost table need more width than a table of message ids, so the grid
+  // follows the mode.
   app.classList.toggle('tools', next === 'tools');
+  app.classList.toggle('stats', next === 'stats');
   $('#panel-title').textContent = title;
   const body = $('#panel-body');
   body.textContent = '';
@@ -40,6 +43,7 @@ export function hidePanel() {
   const app = $('#app');
   app.classList.remove('with-panel');
   app.classList.remove('tools');
+  app.classList.remove('stats');
 }
 
 async function showInspect() {

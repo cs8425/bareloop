@@ -45,6 +45,12 @@ export async function openSettings() {
   // "not false" rather than from "true".
   fld(f, 'sendReasoning').checked = cfg.asm?.sendReasoning !== false;
   fld(f, 'sendImages').checked = cfg.asm?.sendImages !== false;
+  // Prices are three numbers or nothing, and the difference between "0" and "no price at all" has to
+  // survive a round trip through a form: an empty field stays empty, a stored zero shows a zero.
+  const price = cfg.llm?.pricing;
+  fld(f, 'priceInput').value = price ? price.input ?? 0 : '';
+  fld(f, 'priceCached').value = price ? price.cachedInput ?? 0 : '';
+  fld(f, 'priceOutput').value = price ? price.output ?? 0 : '';
   fld(f, 'systemPrompt').value = cfg.systemPrompt || '';
   fld(f, 'mcp').value = JSON.stringify(cfg.mcp || [], null, 2);
   $('#dlg-settings').showModal();
@@ -93,6 +99,21 @@ export async function saveSettings() {
   // Fields this dialog does not have are dropped rather than guessed at: absent means "unchanged",
   // while sending a zero here would look like an answer.
   delete body.temperature;
+  // Prices: all three or none. Half a price would mis-bill every request quietly, and this API has no
+  // way back from "priced" to "unpriced" — an absent block means "unchanged", and an explicit null
+  // decodes to the same absent — so clearing three fields that held numbers is refused with the reason
+  // rather than guessed at. "Free" is a real answer: three zeros, which the panel then bills as 0.
+  const priceFields = ['priceInput', 'priceCached', 'priceOutput'];
+  const empty = priceFields.filter((n) => fld(f, n).value === '');
+  if (empty.length === priceFields.length) {
+    if (cfg.llm?.pricing) throw new Error('clearing the price fields does not un-price a session: put 0 in all three to say it is free');
+  } else if (empty.length) {
+    throw new Error('prices are three numbers or none — fill in input, cached input and output, or leave all three empty');
+  } else {
+    const nums = priceFields.map((n) => Number(fld(f, n).value));
+    if (nums.some((v) => !Number.isFinite(v) || v < 0)) throw new Error('prices have to be numbers, 0 or above');
+    body.llm.pricing = { input: nums[0], cachedInput: nums[1], output: nums[2] };
+  }
   await api(`/api/session/${state.id}`, { method: 'PATCH', body });
   // The save is only real for this tab once the cache agrees with it: the tools drawer PATCHes
   // {...state.cfg, mcp}, and with a pre-save copy in there it would write the old values back. The

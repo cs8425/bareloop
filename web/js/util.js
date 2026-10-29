@@ -19,6 +19,17 @@ export const fmtN = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) +
 
 export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+// MIN_UNCACHED: below this many *new* tokens in one request, its prefill speed is not a measurement.
+// A warm request re-sends a handful of tokens and still pays the fixed cost of the call: 18 uncached
+// tokens in 537 ms reads as 33 tok/s, which describes neither the server nor the cache. Measured on
+// llama.cpp: 3 198 new tokens in 2 141 ms = 1 494 tok/s, the same request warm = 33.
+export const MIN_UNCACHED = 64;
+
+// tps turns one request's counters into tokens per second, or hands back null when the honest answer is
+// "there is no number here": a missing timing is missing, and a numerator below `min` is noise.
+// Callers render null as an em dash rather than a plausible-looking figure.
+export const tps = (tokens, ms, min = 1) => (tokens >= min && ms > 0 ? Math.round(tokens / (ms / 1000)) : null);
+
 // pretty formats JSON for display, and passes through anything that is not JSON — a tool may well
 // return text, and failing to parse it is not an error worth showing.
 export const pretty = (text) => {

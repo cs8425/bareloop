@@ -2,7 +2,7 @@
 // input request. Everything here renders from the events the server sends; none of it decides
 // anything. Refresh requests go out on the bus so this module does not import the session module.
 import md from './md.js';
-import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName } from './util.js';
+import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName, tps, MIN_UNCACHED } from './util.js';
 import { state } from './state.js';
 import { call } from './api.js';
 import { confirmBox, note } from './ui.js';
@@ -82,17 +82,20 @@ export function entryNode(e) {
   if (e.isError) head.appendChild(el('span', 'state-error', 'error'));
   if (bad && !e.isError) head.appendChild(el('span', 'state-error', 'failed'));
   if (e.interrupted) head.appendChild(el('span', 'state-running', 'interrupted'));
-  if (e.usage) {
-    const u = e.usage;
-    const parts = [];
-    if (u.prompt) parts.push(`prompt ${fmtN(u.prompt)}`);
-    if (u.cache) parts.push(`cached ${fmtN(u.cache)}`);
-    if (u.completion) parts.push(`out ${fmtN(u.completion)}`);
-    head.appendChild(el('span', 'eid', parts.join(' · ')));
-  }
-  if (e.ms) head.appendChild(el('span', 'eid', `${e.ms} ms`));
+  // Two groups of two numbers, and that is all this line gets: on a phone the same header used to wrap
+  // into three lines. The first group says what the request moved (prompt, which includes the cached
+  // part, over what it generated), the second how fast each half was. Everything else about the request
+  // is one hover away, and the session-wide view is the cost panel behind the token bar.
+  for (const chip of usageChips(e)) head.appendChild(chip);
   if (e.finishReason) head.appendChild(el('span', 'eid', e.finishReason));
-  if (e.ts) head.appendChild(el('span', 'eid', new Date(e.ts).toLocaleTimeString()));
+  if (e.ts) {
+    // A clock time down to the second was the widest and least used thing on the line. HH:MM is a fifth
+    // of the width (always 24-hour, so it never depends on whose locale loaded the page), and the full
+    // timestamp — with the zone, which is what you actually want next to a log entry — is in the title.
+    const when = el('span', 'eid', new Date(e.ts).toTimeString().slice(0, 5));
+    when.title = new Date(e.ts).toLocaleString();
+    head.appendChild(when);
+  }
   const tools = el('span', 'eid');
   tools.style.marginLeft = 'auto';
   tools.appendChild(actions(e, node));
@@ -108,6 +111,48 @@ export function entryNode(e) {
   state.entries.set(e.id, node);
   logEl().appendChild(node);
   return node;
+}
+
+// ---------------------------------------------------------------- one request's numbers
+
+// usageChips renders one request as `3.2k / 21 tokens` and `1494 / 55 tok/s`. An entry that carried no
+// usage at all (your message, a tool result) keeps only its wall-clock duration, as before.
+//
+// A dash means "there is no honest number here", and the title says which of the two reasons applies:
+// nothing was measured (an entry written before the server reported timings), or too little was —
+// dividing a warm request's handful of uncached tokens by the fixed cost of a call reads as 33 tok/s
+// and describes the server no better than a stopwatch on the network would.
+function usageChips(e) {
+  const u = e.usage;
+  if (!u || (!u.prompt && !u.completion)) return e.ms ? [el('span', 'eid', `${e.ms} ms`)] : [];
+
+  const cached = u.cache || 0;
+  const fresh = Math.max((u.prompt || 0) - cached, 0);
+  const inTps = tps(fresh, u.promptMs, MIN_UNCACHED);
+  const outTps = tps(u.completion || 0, u.completionMs, 4);
+
+  const details = [];
+  details.push(u.prompt ? `prompt ${u.prompt}${cached ? ` — ${cached} cached, ${fresh} new` : ''}` : 'prompt not reported');
+  details.push(u.completion ? `generated ${u.completion}` : 'nothing generated');
+  details.push(`prefill ${u.promptMs ? Math.round(u.promptMs) + ' ms' : 'not reported'} · decode ${u.completionMs ? Math.round(u.completionMs) + ' ms' : 'not reported'}`);
+  if (u.draftN) details.push(`speculative decoding: ${u.draftAccepted}/${u.draftN} draft tokens accepted`);
+  if (e.ms) details.push(`${e.ms} ms end to end`);
+  details.push('the token bar in the status bar adds these up for the whole conversation');
+  const tokens = el('span', 'eid', `${fmtN(u.prompt || 0)}/${fmtN(u.completion || 0)} tokens`);
+  tokens.title = details.join('\n');
+
+  const chips = [tokens];
+  // No timings at all means no rate chip either: an entry from an older server would spend twelve
+  // characters on a permanent dash.
+  if (u.promptMs || u.completionMs) {
+    const why = [];
+    if (inTps === null) why.push(fresh < MIN_UNCACHED ? `no prefill speed: ${fresh} new tokens were computed, below the ${MIN_UNCACHED} a measurement needs` : 'no prefill speed: the server reported no prompt time');
+    if (outTps === null) why.push((u.completion || 0) < 4 ? `no decode speed: ${u.completion || 0} tokens is too few for the number to mean anything` : 'no decode speed: the server reported no generation time');
+    const rate = el('span', 'eid', `${inTps ?? '—'}/${outTps ?? '—'} tok/s`);
+    rate.title = `prefill / decode, for this request alone${why.length ? `:\n${why.join('\n')}.` : '.'}`;
+    chips.push(rate);
+  }
+  return chips;
 }
 
 // ---------------------------------------------------------------- one message's actions

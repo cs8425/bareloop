@@ -37,7 +37,10 @@
         <div id="statusbar">
           <span id="phase" class="badge">idle</span>
           <span id="turn"></span>
-          <span class="ctxbar"><span id="ctx-fill"></span><span id="ctx-text"></span></span>
+          <!-- The token bar is the door to the tokens-and-cost panel: it is the one thing in this row
+               that is about tokens, and "how full is the window" wants a "what did it cost" behind it.
+               It is a span, so it is given the role, the name and the keys a button ships with. -->
+          <span class="ctxbar" role="button" tabindex="0" aria-label="tokens and cost of this conversation" title="tokens and cost of this conversation&#10;click for the totals: prompt, cache hits, time in the model, and the bill if this endpoint has prices"><span id="ctx-fill"></span><span id="ctx-text"></span></span>
           <button id="btn-compact" type="button" class="warn" title="compact now: fold the oldest turns into a summary"><span data-icon="compact"></span> compact</button>
         </div>
 
@@ -135,6 +138,23 @@
           <label>API key <input name="apiKey" type="password" spellcheck="false" placeholder="unchanged when empty" /></label>
           <label>n_ctx <input name="nCtx" type="number" min="0" placeholder="0 = probe the server" /></label>
           <label>max turns <input name="maxTurns" type="number" min="0" placeholder="0 = unlimited" /></label>
+          <!-- Prices live with the endpoint they price, which is why they are here and not per model.
+               Three numbers or none: a half-entered price would quietly mis-bill every request. -->
+          <label>
+            price: input
+            <input name="priceInput" type="number" min="0" step="any" placeholder="per 1M tokens"
+              title="what one million uncached prompt tokens cost, in whatever unit you keep your receipts in — the number is never compared with a currency. Leave all three empty and nothing is billed here." />
+          </label>
+          <label>
+            price: cached input
+            <input name="priceCached" type="number" min="0" step="any" placeholder="per 1M tokens"
+              title="what one million cached prompt tokens cost — the part of the prompt the server already had in its KV cache." />
+          </label>
+          <label>
+            price: output
+            <input name="priceOutput" type="number" min="0" step="any" placeholder="per 1M tokens"
+              title="what one million generated tokens cost." />
+          </label>
           <label>trigger % <input name="threshold" type="number" min="1" max="100" /></label>
           <label>keep target % <input name="keepTarget" type="number" min="1" max="99" /></label>
           <label>summary max % <input name="summaryMax" type="number" min="1" max="99" /></label>
@@ -155,6 +175,13 @@
           refused; MCP servers reconnect only when their list actually changed. Turning image
           attachments off sends the model one line about the image instead of its bytes, which is
           what a text-only server wants.
+        </p>
+        <p class="hint">
+          Prices are per 1 000 000 tokens and carry no currency: they are yours. All three or none — a
+          half-entered price would mis-bill every request quietly. Leave them empty on a session that has
+          no prices yet and nothing is billed; put 0 in all three to say a session is free. Changing a
+          price changes the totals of everything already in the log, because what is billed is the usage
+          each request already recorded, and it never reconnects anything.
         </p>
         <menu>
           <!-- Same rule as the new-session dialog: neither button submits. Enter in a field is handled

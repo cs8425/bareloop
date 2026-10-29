@@ -33,6 +33,7 @@ import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
+import { wireStats } from './stats.js';
 import { loadSessions, selectSession, refresh, idFromHash, writeHash } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
@@ -173,6 +174,7 @@ function wire() {
   wireSettings();
   wirePanel();
   wireTools();
+  wireStats();
   wireNewSession();
   wireKeys();
   $('#btn-compact').onclick = compactNow;
