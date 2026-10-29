@@ -16,7 +16,8 @@
 //   events.js    agent events → DOM
 //   composer.js  the textarea, attachments, send / interrupt / stop
 //   settings.js  the settings dialog and the config PATCHes
-//   panel.js     the inspect panel and the payload dump
+//   tools.js     the tool catalogue: what each tool is for, what it costs, its parameters, its switch
+//   panel.js     the side panel the inspect view and the catalogue are drawn into
 //   transport.js websocket, SSE and polling fallbacks
 //   md.js        the markdown subset
 //
@@ -31,6 +32,7 @@ import { api } from './api.js';
 import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
+import { wireTools } from './tools.js';
 import { loadSessions, selectSession, refresh, idFromHash, writeHash } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
@@ -151,6 +153,12 @@ function wireKeys() {
       closeNav();
       return;
     }
+    // The side panel is a drawer, and drawers answer to Escape: closing it comes before "stop reading
+    // history, take me to the newest message".
+    if (!$('#panel').classList.contains('hidden')) {
+      hidePanel();
+      return;
+    }
     if (!isPinned()) scrollDown(true);
   });
 }
@@ -164,6 +172,7 @@ function wire() {
   wireComposer();
   wireSettings();
   wirePanel();
+  wireTools();
   wireNewSession();
   wireKeys();
   $('#btn-compact').onclick = compactNow;

@@ -26,6 +26,7 @@ export function emit(event, payload) {
   }
 }
 
-// The two events the app actually uses, named here so a typo is a missing constant, not a silent no-op.
+// The three events the app actually uses, named here so a typo is a missing constant, not a silent no-op.
 export const EV_REFRESH = 'refresh'; // re-read the session from the server
 export const EV_SESSIONS = 'sessions'; // re-read the session list
+export const EV_SESSION = 'session'; // the session on screen changed: a panel showing the old one must go

@@ -105,6 +105,12 @@ Per session you can:
 - **answer a tool's input request** in a dialog, for MCP servers that ask mid-call;
 - **change settings** - model, `n_ctx`, system prompt, sampling, MCP servers, compaction thresholds -
   while the session is idle;
+- **open the tool catalogue** by clicking the `N tools` badge: every tool this session publishes, per server,
+  with what it is for, the parameters the model is being asked to fill in, what the definition costs every
+  request, and how often this transcript used it. The switches live there too - `disabledTools` per tool, a
+  `toolPrefix` per server, the whole server on or off - next to what a change costs (the tool block is sent in
+  front of the history, so replacing it costs one re-prefill, which the drawer prices) and, while a run is
+  going, the fact that the change waits for the run to end, with a button to end the run and apply it;
 - **inspect** what would be sent: per-message tokens, the compaction plan, the tool list, and the exact
   request body.
 
@@ -258,9 +264,14 @@ because images travel as base64 inside one message.
 Commands a browser may send: `ping`, `subscribe` (`{session: "a,b"}`, empty means all), `snapshot`, `send`,
 `interrupt`, `stop`, `resume`, `compact`, `gate`, `elicit`, `inspect`, `status`, `pending`, `entryPatch`,
 `entryDelete`, `tip`, `name`, `tools`, `toolsSet`. Every action also exists as REST, which is what the
-bundled UI uses - so a
-button never waits on the event transport, and if the websocket drops the UI falls back to SSE and then to
-a 1.5 s poll.
+bundled UI uses - so a button never waits on the event transport.
+
+If the websocket drops the UI does not give up on it: it retries with a 0.6 s to 15 s backoff forever and,
+after a few failures, subscribes to SSE (or a 1.5 s poll) as a second channel, saying which of the two it is
+living on and when the next socket attempt is due - a socket that comes back closes the fallback again. The
+status line is the transport's own report, never a guess. Two tabs on one session stay in sync from these
+events, and a tab re-reads the path when the tip moves to an entry it has never seen: another tab moved the
+path or appended to it while this one was in the background.
 
 Event types: `hello`, `entry`, `delta`, `tool_call`, `tool_result`, `state`, `pending`, `compaction`,
 `request`, `request_done`, `log`, `info`, `error`, `removed`, `tools` (the tool set was rebuilt; the body is

@@ -4,6 +4,7 @@
 import { $, el, fmtN, logEl, clamp, pathOf, sortByNum } from './util.js';
 import { state } from './state.js';
 import { api, get } from './api.js';
+import { EV_SESSION, emit } from './bus.js';
 import { confirmBox, note } from './ui.js';
 import { resetScroll, scrollDown } from './scroll.js';
 import { closeNav } from './nav.js';
@@ -100,6 +101,9 @@ export async function loadSessions() {
 export async function selectSession(id) {
   writeHash(id); // the address bar follows the view, so a reload or a shared link comes back here
   state.id = id;
+  // Anything that had the previous session open (the tool drawer) is told before the new one renders,
+  // so a panel can never end up showing one session underneath another one's name.
+  emit(EV_SESSION, id);
   closeNav(); // on a phone the drawer covered the transcript only to pick this
   logEl().textContent = '';
   resetScroll();
@@ -124,11 +128,20 @@ export function renderStatus(st) {
   const servers = st.servers || [];
   const failed = servers.filter((s) => s.error || !s.connected);
   const tools = servers.reduce((n, s) => n + (s.tools || 0), 0);
+  // The badge is the door to the tool catalogue, so it says three things: how many tools a request
+  // would carry, how many the policy still wants once any run in flight ends (that is what ⏳ means),
+  // and how many servers are down. `toolsEnabled`/`toolsTotal` are absent on an older server.
   const toolsEl = $('#tools');
-  toolsEl.textContent = `${st.tools ?? tools} tools${failed.length ? ` · ${failed.length} down` : ''}`;
+  const hidden = st.toolsTotal && st.toolsEnabled !== undefined && st.toolsEnabled !== st.toolsTotal;
+  toolsEl.textContent =
+    `${st.tools ?? tools} tools` +
+    (hidden ? ` · ${st.toolsEnabled}/${st.toolsTotal} on` : '') +
+    (st.toolsPending ? ' ⏳' : '') +
+    (failed.length ? ` · ${failed.length} down` : '');
   toolsEl.title =
-    servers.map((s) => `${s.name}: ${s.connected ? s.protocolVersion || s.era || 'connected' : 'down'}${s.error ? ' — ' + s.error : ''} (${s.tools} tools)`).join('\n') ||
-    'no MCP servers';
+    (servers.map((s) => `${s.name}: ${s.connected ? s.protocolVersion || s.era || 'connected' : s.disabled ? 'off (disabled)' : 'down'}${s.error ? ' — ' + s.error : ''} (${s.enabled ?? s.tools}/${s.tools} tools on)`).join('\n') ||
+      'no MCP servers') +
+    '\n\nclick for the tool catalogue: descriptions, parameters, cost, and the switches';
   $('#turn').textContent = st.turn ? `turn ${st.turn}` : '';
   const used = st.contextUsed || 0;
   const nctx = st.nCtx || 0;

@@ -13,9 +13,33 @@ export function wirePanel() {
   $('#panel-close').onclick = hidePanel;
 }
 
+// The panel has two modes: `inspect` (what would be sent) and `tools` (the tool catalogue).
+// One variable owns which one is on screen, so a module can ask “am I open?” without watching the DOM,
+// and opening one closes the other by construction rather than by remembering to.
+let mode = '';
+
+export const panelMode = () => mode;
+
+// openPanel shows the panel in one of its modes and hands back the body to fill.
+export function openPanel(next, title) {
+  mode = next;
+  const app = $('#app');
+  $('#panel').classList.remove('hidden');
+  app.classList.add('with-panel');
+  // The tool catalogue needs more width than a table of message ids, so the grid follows the mode.
+  app.classList.toggle('tools', next === 'tools');
+  $('#panel-title').textContent = title;
+  const body = $('#panel-body');
+  body.textContent = '';
+  return body;
+}
+
 export function hidePanel() {
+  mode = '';
   $('#panel').classList.add('hidden');
-  $('#app').classList.remove('with-panel');
+  const app = $('#app');
+  app.classList.remove('with-panel');
+  app.classList.remove('tools');
 }
 
 async function showInspect() {
@@ -25,12 +49,8 @@ async function showInspect() {
   }
   const data = await get('/inspect').catch(() => null);
   if (!data) return;
-  $('#panel').classList.remove('hidden');
-  $('#app').classList.add('with-panel');
   const rows = data.messages || [];
-  $('#panel-title').textContent = `inspect · ${rows.length} messages`;
-  const body = $('#panel-body');
-  body.textContent = '';
+  const body = openPanel('inspect', `inspect · ${rows.length} messages`);
 
   const head = el('div');
   head.appendChild(

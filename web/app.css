@@ -469,3 +469,282 @@ button,
   color: var(--muted);
   font: 11px var(--mono);
 }
+
+/* ------------------------------------------------------------------ tool catalogue
+   The badge in the top bar is the door to the catalogue, so it has to look pressable: the numbers on
+   it were already worth reading, and now they are worth clicking. */
+#tools {
+  cursor: pointer;
+  user-select: none;
+}
+#tools:hover,
+#tools:focus-visible {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+/* A parameter table needs room for its third column, so the panel is wider in this mode. */
+#app.with-panel.tools {
+  grid-template-columns: 210px 1fr minmax(430px, 44vw);
+}
+
+#panel-body .tsum {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+#panel-body .cost {
+  color: var(--muted);
+  font-size: 11px;
+}
+#panel-body .pendbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 7px 0;
+  padding: 6px 8px;
+  border: 1px solid #6d5626;
+  border-radius: 6px;
+  background: #1d1a12;
+  color: #f0d6a0;
+  font-size: 11.5px;
+}
+#panel-body .tbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 7px 0;
+}
+#panel-body .tsearch {
+  flex: 1 1 150px;
+  min-width: 120px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 5px;
+  padding: 4px 7px;
+  font-size: 11.5px;
+}
+#panel-body .tcount {
+  margin-left: auto;
+  white-space: nowrap;
+}
+#panel-body .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+#panel-body .srv {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+#panel-body .srv-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 5px 7px;
+  background: var(--bg3);
+}
+#panel-body .srv-name {
+  flex: 1 1 130px;
+  min-width: 0;
+}
+#panel-body .srv-name > div {
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+#panel-body .srv-note {
+  padding: 4px 8px;
+  color: #f0d6a0;
+  font-size: 10.5px;
+  border-bottom: 1px solid var(--border);
+}
+#panel-body .srv.folded .srv-tools {
+  display: none;
+}
+#panel-body .fold {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+  min-height: 0;
+}
+#panel-body .fold:hover {
+  color: var(--fg);
+}
+#panel-body .mini {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 1px 5px;
+  min-height: 0;
+  cursor: pointer;
+}
+#panel-body .mini:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+#panel-body .pfx {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+}
+#panel-body .pfx input {
+  width: 72px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font: 11px var(--mono);
+}
+#panel-body .srv-off {
+  margin-left: auto;
+}
+
+#panel-body .tool {
+  display: flex;
+  /* Without this the checkbox is stretched to the height of a four-line row and the UA paints its
+     glyph in the middle of that box, which reads as a control belonging to nothing. */
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+#panel-body .tool > input[type='checkbox'] {
+  margin-top: 2px;
+}
+#panel-body .tool.off {
+  opacity: 0.5;
+}
+/* A row you have your mouse on is a row you are about to switch, so it stops being dimmed: the point
+   of the grey is to scan the list, not to make the one tool you are looking at hard to read. */
+#panel-body .tool:hover {
+  background: var(--bg3);
+  opacity: 1;
+}
+#panel-body .tool-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#panel-body .tname {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+#panel-body .tname code {
+  font: 12px var(--mono);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+#panel-body .ttitle {
+  font-size: 11.5px;
+}
+#panel-body .tdesc {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Long descriptions cost a scroll each: three lines and a click instead. */
+#panel-body .tdesc.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  cursor: pointer;
+}
+#panel-body .tdesc.clamp.open {
+  display: block;
+  overflow: visible;
+  cursor: auto;
+}
+#panel-body .tok {
+  margin-left: auto;
+  font: 10.5px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+#panel-body .tag {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  color: var(--muted);
+  max-width: 100%;
+}
+#panel-body .tag.ok {
+  color: #9fd6a4;
+  border-color: #2e5b36;
+}
+#panel-body .tag.warn {
+  color: #f0d6a0;
+  border-color: #6d5626;
+}
+#panel-body .tag.none {
+  opacity: 0.55;
+}
+#panel-body .params {
+  margin-top: 4px;
+}
+#panel-body .params table {
+  font-size: 11px;
+}
+#panel-body .tcode {
+  font: 11px var(--mono);
+  white-space: nowrap;
+}
+#panel-body .link {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  min-height: 0;
+  font-size: 10.5px;
+  align-self: flex-start;
+}
+#panel-body .tfine {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+/* `.dim` is monospace in the inspect panel, where it prints entry ids. The catalogue uses it for
+   prose, so inside its own blocks it goes back to the panel's face. */
+#panel-body .srv .dim,
+#panel-body .params .dim,
+#panel-body .tfine {
+  font-family: inherit;
+}
+
+@media (max-width: 860px) {
+  /* the panel is a bottom sheet there: the wider grid belongs to the desktop only */
+  #app.with-panel.tools {
+    grid-template-columns: 1fr;
+  }
+  #panel-body .tok {
+    margin-left: 0;
+  }
+}

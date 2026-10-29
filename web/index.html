@@ -26,7 +26,9 @@
         <header id="topbar">
           <button id="menu" type="button" class="ghost icon-btn" title="sessions" aria-label="open the session list"><span data-icon="menu"></span></button>
           <input id="session-name" class="ghost-input" spellcheck="false" title="rename this session" />
-          <span id="tools" class="badge" title="MCP tools"></span>
+          <!-- Not decoration: clicking it opens the tool catalogue (descriptions, parameters, cost,
+               switches), so it carries a role and a tabindex rather than being mouse-only. -->
+          <span id="tools" class="badge" role="button" tabindex="0" aria-label="open the tool catalogue" title="MCP tools"></span>
           <span class="spacer"></span>
           <button id="btn-inspect" type="button" class="icon-btn" title="what would be sent next" aria-label="inspect what would be sent"><span data-icon="inspect"></span></button>
           <button id="btn-settings" type="button" class="icon-btn" title="model, MCP servers, compaction" aria-label="session settings"><span data-icon="settings"></span></button>

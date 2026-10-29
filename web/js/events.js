@@ -1,10 +1,11 @@
 // Turning agent events into DOM. The transport hands every event here, whether it arrived over the
 // websocket, SSE or a poll — there is exactly one rendering path either way.
-import { el, fmtN, logEl } from './util.js';
+import { el, fmtN, logEl, numId } from './util.js';
 import { state } from './state.js';
 import { note } from './ui.js';
 import { scrollDown } from './scroll.js';
 import { entryNode, requestCard, streamDelta, toolCard } from './transcript.js';
+import { renderTools, syncToolsPanel } from './tools.js';
 import { loadSessions, refresh, renderPending, renderStatus } from './session.js';
 
 export function handleEvent(ev) {
@@ -27,10 +28,24 @@ export function handleEvent(ev) {
       state.entries.get(ev.info)?.remove();
       state.entries.delete(ev.info);
       break;
-    case 'state':
+    case 'state': {
+      const prevTip = state.status?.tip;
       state.status = ev.state;
       renderStatus(ev.state);
       loadSessions();
+      // A tip that moved backwards is a time travel or a deleted entry: what is on screen is no longer
+      // the path, and no single event can fix that. A tip that moved forwards to an entry nobody is
+      // holding means the path changed somewhere this tab did not watch — another tab sent a message.
+      // A forward move to an entry already on screen is this session's own work, already drawn.
+      const tip = ev.state?.tip;
+      if (tip && prevTip && tip !== prevTip && (numId(tip) < numId(prevTip) || !state.entries.has(tip))) refresh().catch(() => {});
+      syncToolsPanel();
+      break;
+    }
+    case 'tools':
+      // The catalogue is pushed whole whenever the published set changes, which is how a second tab
+      // learns about a switch flipped in the first one.
+      renderTools(ev.data);
       break;
     case 'pending':
       state.pending = ev.pending || [];
