@@ -20,12 +20,12 @@ import { confirmBox, fail, note } from './ui.js';
 import { EV_REFRESH, EV_SESSION, emit, on } from './bus.js';
 import { hidePanel, openPanel, panelMode } from './panel.js';
 
-// Cold-prefill throughput measured on the two local llama.cpp backends: 979 tok/s on :8080
-// (Gemma4-12B-QAT) and 615 tok/s on :8083 (Qwen3.8-27B). Saying "this breaks the cache" is correct
-// and useless; what a decision needs is seconds. Status does not carry the session's base URL, so the
-// estimate is printed as the range those two measurements give rather than guessing which backend is
-// in use — and it stays labelled as an estimate.
-const PREFILL = [979, 615];
+// There is deliberately no prefill-rate constant here. The two numbers an earlier round measured
+// (979 tok/s at 687 tokens, 615 tok/s at 1127) moved 10–19 % when the same two servers were measured
+// again, and a rate taken at a few hundred tokens is not the rate at 20k: prefill carries a fixed cost
+// per request and a rate that keeps rising with the context. So the drawer quotes tokens, which are
+// measured, and leaves seconds out until this session's own requests report timings — then the number
+// comes from this server at this size, with a sample count beside it.
 
 let view = null; // the last ToolsView: the drawer renders from this and never fetches twice
 let filter = '';
@@ -124,7 +124,9 @@ function summary() {
         : 'nothing is published to this session right now — a request carries no tool block at all',
     ),
   );
-  box.appendChild(el('div', 'cost', costText(toolTokens)));
+  const cost = el('div', 'cost', costText(toolTokens));
+  cost.title = NO_SECONDS;
+  box.appendChild(cost);
   return box;
 }
 
@@ -137,20 +139,19 @@ const rePrefill = () => Math.max(0, (state.status?.contextUsed || view?.contextU
 const publishedTokens = () =>
   (view?.servers || []).flatMap((s) => s.tools.filter((t) => t.enabled)).reduce((n, t) => n + t.estTokens, 0);
 
-const seconds = (tokens) => {
-  const [fast, slow] = PREFILL;
-  const f = tokens / fast;
-  const s = tokens / slow;
-  const shown = (x) => (x >= 10 ? x.toFixed(0) : x.toFixed(1));
-  return `${shown(f)}–${shown(s)} s`;
-};
-
+// costText quotes tokens only. The one-off cost of a flip is real and it is measurable in tokens —
+// turning it into seconds needs this server's prefill rate at this context size, which is what the
+// per-message timings will supply; an invented rate would only be wrong by an unknown factor.
 function costText(toolTokens) {
   const again = rePrefill();
   if (!toolTokens) return 'with nothing published there is no tool block to send, so there is nothing to save';
-  if (!again) return `the tool block costs ${fmtN(toolTokens)} tokens per request; nothing is cached yet, so changing it costs nothing extra`;
-  return `changing it costs one re-prefill of ~${fmtN(again)} tokens ≈ ${seconds(again)} on this machine, in exchange for ${fmtN(toolTokens)} tokens per request from now on`;
+  if (!again) return `every request carries these ${fmtN(toolTokens)} tokens; nothing is cached yet, so changing it costs nothing extra`;
+  return `every request carries these ${fmtN(toolTokens)} tokens; changing a switch costs one re-prefill of ~${fmtN(again)} cached tokens`;
 }
+
+// Why the cost line has no seconds, said once where a curious person will look for it.
+const NO_SECONDS =
+  'No time estimate on purpose. Prefill is a fixed cost per request plus a rate that rises with context, so a number measured at 700 tokens is not this server’s rate at 20k — the two figures an earlier round measured here moved 10–19 % on a re-run. Tokens are counted, not guessed; seconds come back when this session’s own requests report timings.';
 
 // pendingBar says out loud what the server will not do until the run ends, and offers the only way to
 // make it end early.
@@ -495,7 +496,7 @@ async function worthWarning(turningOn) {
   const again = rePrefill();
   if (again < 4000) return true;
   return confirmBox(
-    `Re-prefilling about ${fmtN(again)} tokens ≈ ${seconds(again)} on this machine, because the tool list moves in front of the history.${turningOn ? ' This tool adds tokens to every request from now on.' : ''}`,
+    `Re-prefilling about ${fmtN(again)} tokens, because the tool list moves in front of the history. How long that takes belongs to this server at this size — but it is work that was already done.${turningOn ? ' This tool also adds tokens to every request from now on.' : ''}`,
     {
       title: 'the KV cache goes with it',
       detail:
