@@ -46,6 +46,17 @@
   td.num { font-family: var(--mono); }
   td.bad, .fail { color: var(--err); }
   #stage { position: fixed; left: 0; top: 0; width: 720px; visibility: hidden; pointer-events: none; }
+  /* Fidelity, measured rather than assumed: the stage above is invisible and never scrolled, so it charges
+     parse + DOM + layout but no paint and no follow — true of every number taken before L3. `?live=1` makes
+     it a real scroller (`#log`'s own box properties) and `?scroll=` decides how it follows the bottom. */
+  #stage.live {
+    visibility: visible;
+    height: 100vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 12px;
+    background: var(--bg);
+  }
   #controls { margin: 0 0 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; flex-wrap: wrap; }
   #controls input { width: 62px; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; }
   #tests li { font-family: var(--mono); font-size: 11px; }
@@ -77,8 +88,46 @@ import md from './js/md.js';
 import { makeStreamDrawer } from './js/transcript.js';
 
 const q = (s) => document.querySelector(s);
-const stage = () => q('#stage .body');
 const q2 = new URLSearchParams(location.search);
+
+// How much of a real page the stage mimics. `hidden` (the default, and every number in the plan doc up to
+// L3) measures parse + DOM + layout with nothing painted and nothing scrolled; `live` pays for paint and,
+// with `?scroll=`, for following the bottom the way the app does.
+const FIDELITY = { live: q2.get('live') === '1', scroll: q2.get('scroll') || 'none' };
+const stage = () => {
+  const host = q('#stage .body');
+  q('#stage').classList.toggle('live', FIDELITY.live);
+  return host;
+};
+
+// The stage decides at load whether it paints, but a 2×3 grid of (visible?, follow?) should not need six
+// page loads — and comparing numbers across reloads invites the machine to drift between them. This lets
+// one page run the whole grid back to back, which is the only way to attribute a cost to "paints" versus
+// "follows the bottom" instead of guessing from two runs taken minutes apart.
+window.__setFidelity = ({ live = FIDELITY.live, scroll = FIDELITY.scroll } = {}) => {
+  FIDELITY.live = live;
+  FIDELITY.scroll = scroll;
+  q('#stage').classList.toggle('live', live);
+  return { ...FIDELITY };
+};
+
+// __gridRun measures the same reply under every fidelity combination asked for. Rows carry `env`/`scroll`,
+// so a hidden-stage number can never be mistaken for a live one.
+window.__gridRun = async ({ sizes = [8], gap = 3, chunk = 12, gatehz = 20, combos = [
+  { live: false, scroll: 'none' },
+  { live: true, scroll: 'none' },
+  { live: true, scroll: 'scrolltop' },
+  { live: true, scroll: 'scrollto' },
+], runs = ['tail20'] } = {}) => {
+  const out = [];
+  for (const combo of combos) {
+    window.__setFidelity(combo);
+    const rows = await window.__benchRun({ sizes, gap, chunk, gatehz, runs });
+    out.push(...rows.map((r) => ({ ...r })));
+    window.__grid = out;
+  }
+  return out;
+};
 
 // A sample has to contain the shapes the real renderer is worst at, or the bench measures the easy path:
 // an unclosed fence and an unclosed bold are exactly what makes a naive re-render jump around, and a pipe
@@ -139,6 +188,27 @@ const RUNS = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Following the bottom, three ways, on one ruler. "Reading scrollHeight forces layout, so don't do it" is a
+// hypothesis about a browser, not a fact about code — and the browser has to know the scroll height to
+// clamp any scroll write anyway. `scrolltop` is what scroll.js does today, `scrollto` never reads geometry
+// from JS, `none` is the upper bound of what any of this could ever save.
+function follower(box, how, renders) {
+  if (how === 'none') return { stop: () => 0 };
+  let n = 0, seen = -1, alive = true;
+  const tick = () => {
+    const r = renders();
+    if (r !== seen) {
+      seen = r;
+      n++;
+      if (how === 'scrolltop') box.scrollTop = box.scrollHeight;
+      else if (how === 'scrollto') box.scrollTo({ top: 1e7, behavior: 'instant' });
+    }
+    if (alive) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  return { stop: () => ((alive = false), n) };
+}
+
 // One run: feed the reply in fragments at a realistic rate, and time the drawing the drawer does.
 async function runOne(run, text, { gap, chunk }) {
   const host = stage();
@@ -147,6 +217,7 @@ async function runOne(run, text, { gap, chunk }) {
   const drawer = makeStreamDrawer(host, () => acc, { mode: run.mode, hz: run.hz });
   const lt = longtasks();
   const fr = frames();
+  const fol = follower(q('#stage'), FIDELITY.scroll, () => drawer.gate.stats.renders);
   const t0 = performance.now();
   let deltas = 0;
   for (let i = 0; i < text.length; i += chunk) {
@@ -160,6 +231,7 @@ async function runOne(run, text, { gap, chunk }) {
   fr.reset();
   await sleep(60); // let one more frame land so the thermometer sees the tail of the stream
   const maxFrameGap = fr.stop();
+  const scrolls = fol.stop();
   lt.stop();
   const ok = finalDomOk(drawer, text);
   host.innerHTML = '';
@@ -174,6 +246,10 @@ async function runOne(run, text, { gap, chunk }) {
     longtasks: lt.count(),
     maxFrameGapMs: +maxFrameGap.toFixed(1),
     wallMs: +wall.toFixed(0),
+    // stamped on every row so a hidden-stage number can never be quietly compared with a live one
+    env: FIDELITY.live ? 'live' : 'hidden',
+    scroll: FIDELITY.scroll,
+    scrolls,
     ok,
     stats: { marks: drawer.gate.stats.marks, frozenKB: +(drawer.frozenLen / 1024).toFixed(1) },
   };
@@ -311,7 +387,7 @@ window.__boundaryTests = () => {
 // ---------------------------------------------------------------- printing
 
 function table(rows) {
-  const cols = ['mode', 'kb', 'deltas', 'renders', 'parsedKB', 'renderMs', 'maxRenderMs', 'longtasks', 'maxFrameGapMs', 'wallMs', 'ok'];
+  const cols = ['mode', 'kb', 'deltas', 'renders', 'parsedKB', 'renderMs', 'maxRenderMs', 'longtasks', 'maxFrameGapMs', 'wallMs', 'env', 'scroll', 'scrolls', 'ok'];
   const head = cols.map((c) => `<th>${c}</th>`).join('');
   const tr = rows
     .map((r) => `<tr>${cols.map((c) => `<td class="${c === 'mode' ? '' : 'num'}${c === 'ok' && r.ok === false ? ' bad' : ''}">${r[c] === null || r[c] === undefined ? '—' : r[c]}</td>`).join('')}</tr>`)
