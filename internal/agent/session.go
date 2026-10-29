@@ -562,6 +562,16 @@ func (s *Session) PendingIDs() []string { return s.pendingIDs() }
 // changing the tool set or the model in the middle of a run would produce a payload whose
 // prefix no longer matches what was sent.
 func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
+	// Check everything that can be checked from the body alone before taking the lock. Below this
+	// point the merge runs with s.mu held and releases it only once, further down, so an error return
+	// in that window has to unlock by hand — and a forgotten unlock does not fail one request, it
+	// leaves the mutex held forever: every later reader of this session, and GET /api/sessions (which
+	// walks them all), hangs for the lifetime of the process.
+	if patch.LLM.Pricing != nil {
+		if err := patch.LLM.Pricing.Validate(); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	if s.phase != phaseIdle {
 		s.mu.Unlock()
@@ -588,10 +598,9 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	// Same rule as everything else in a patch: no pricing block means no change. Unlike the fields
 	// above, this one can be turned back off — send {"pricing":{"input":0,"cachedInput":0,"output":0}}
 	// and the session really means "free", which the UI then renders as 0 rather than hiding money.
+	// The values themselves were validated before the lock, which is what keeps this a plain assignment.
 	if patch.LLM.Pricing == nil {
 		patch.LLM.Pricing = old.LLM.Pricing
-	} else if err := patch.LLM.Pricing.Validate(); err != nil {
-		return err
 	}
 	if patch.Name == "" {
 		patch.Name = old.Name
