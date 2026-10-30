@@ -238,7 +238,7 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
    about overflow. */
 .tool-card > summary { padding: 5px 9px; cursor: pointer; font: var(--t-1) var(--mono); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .tool-card .lbl { color: var(--muted); }
-.tool-card pre { margin: 0; padding: 8px 10px; overflow-x: auto; font: var(--t-1)/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--border); max-height: 340px; overflow-y: auto; }
+.tool-card pre { margin: 0; padding: 8px 10px; overflow-x: auto; font: var(--t-1)/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--border); }
 .tool-card .args { color: #9dc7ff; }
 /* The result is not printed here any more: it is its own entry, with an id, a duration and an error flag this
    card does not have (see toolCard in web/js/transcript.js). What is left is a pointer, and all a pointer has
@@ -277,6 +277,34 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* One ceiling for both ends of the same problem. A tool card's arguments and a tool's result are the same
+   unbounded bytes — the tool decides how many — yet only one of them ever had a limit: 340px was written for
+   the card, and a result was printed at whatever height it came back (measured: 359 characters of `ls` output
+   already stand 336px, and reading a vendored file is two orders of magnitude past that). One grouped rule
+   instead of two copies, because the 340px and the 860px override had already started living separate lives.
+   The 60dvh is what a tall window is for; the 340px floor is seventeen lines, which is the same line the JS
+   calls "more than a screen" (FOLD_LINES in js/transcript.js). */
+.tool-card pre,
+.tool-fold > pre {
+  max-height: max(60dvh, 340px);
+  overflow-y: auto;
+}
+/* The fold: what a long tool result keeps. A real <details>, not content-visibility — a closed <details> takes
+   part in no layout at all, while content-visibility estimates the height it hides and the scrollbar jumps when
+   the estimate is wrong (D34). It is called .tool-fold and not .fold because the tools panel already uses
+   .fold for a button. No border and no background either: the entry has a border, an id and a tool name
+   already, and this is a disclosure, not another card. */
+.tool-fold > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font: var(--t-1) var(--mono);
+  /* 5px of padding is the same 24px row a tool card's summary measures (and the same 6px-is-padding argument
+     .to-result makes above): the bare line is 14px, and this row is now the only way to read what the tool
+     sent back, which makes it a control rather than a caption. No horizontal padding — .msg > .body already
+     indents it, and adding to that indent would misalign the output under its own entry text. */
+  padding: 5px 0;
+}
+.tool-fold[open] > summary { margin-bottom: 6px; }
 
 #pending { border-top: 1px solid var(--border); padding: 5px 12px; font-size: var(--t-1); color: var(--muted); background: #14181f; flex: 0 0 auto; }
 #pending ul { margin: 3px 0 0; padding-left: 18px; }
@@ -504,8 +532,12 @@ button,
     margin-left: 8px;
     margin-right: 8px;
   }
-  .tool-card pre {
-    max-height: 38dvh;
+  .tool-card pre,
+  .tool-fold > pre {
+    /* 38dvh of a short window is not a reading area, so it keeps the same kind of floor as the desktop rule at
+       a fifth of the height: 200px is ten lines of the mono body and still leaves half a phone screen of
+       transcript above and below it. */
+    max-height: max(38dvh, 200px);
   }
   #pending {
     padding: 5px 8px;

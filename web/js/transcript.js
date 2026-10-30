@@ -374,12 +374,41 @@ function fillBody(node, body, e) {
       body.appendChild(card.el);
     }
   } else if (e.kind === 'tool') {
-    const pre = el('pre');
-    pre.textContent = collapseDataUrls(e.content).text;
-    body.appendChild(pre);
+    body.appendChild(toolOutput(collapseDataUrls(e.content).text));
   } else {
     body.appendChild(document.createTextNode(collapseDataUrls(e.content).text));
   }
+}
+
+// FOLD_LINES / FOLD_CHARS: where a tool result stops being something you read and starts being something
+// you scroll. Nothing else decides this one — the cap the open fold gets is max(60dvh, 340px) (web/app.css),
+// and 340px is seventeen lines of a tool entry's own `pre` (measured: 17 lines of `ls` output stood 336px),
+// so anything past sixteen lines cannot be seen whole on any device. 2 000 characters is the same height in
+// the 1 076px column this transcript measured at, and it is the only test that catches a result that is one
+// long line: wrapping adds no newlines, so counting lines alone would print a 200KB blob across two screens.
+// Both are read off the string, never off layout — a layout read per entry in the mount path is 9.6ms a time
+// (see the 2026-10-28 note in state/todo-and-decisions.md).
+const FOLD_LINES = 16;
+const FOLD_CHARS = 2000;
+
+// toolOutput draws what a tool sent back. A tool decides its own length — an `ls` comes back in seventeen
+// lines, a read of a vendored bundle in two hundred kilobytes — and until now the entry printed every byte
+// of it with no max-height at all, which let one lazy call choose how far the transcript scrolled and how
+// much a re-layout had to repaint. So: too long to fit the cap, it arrives folded. The row that stays says
+// how big it is, the browser's own disclosure triangle is the affordance, and both ways out — the row, or
+// the entry's raw-text button (uncapped on purpose) — cost one tap. A short result keeps exactly the markup
+// it always had, because a summary row above three lines of output is a cost and not a feature.
+function toolOutput(text) {
+  const pre = el('pre');
+  pre.textContent = text;
+  const lines = text.split('\n');
+  if (lines.length <= FOLD_LINES && text.length <= FOLD_CHARS) return pre;
+  const fold = el('details', 'tool-fold');
+  const summary = el('summary', '', `output (${fmtN(text.length)} chars)`);
+  summary.title = `${lines.length} lines · ${text.length} characters`;
+  fold.appendChild(summary);
+  fold.appendChild(pre);
+  return fold;
 }
 
 function reasoningBlock(text) {
@@ -711,6 +740,11 @@ function jumpToEntry(id) {
     note(`${id} is not on the path being drawn`);
     return;
   }
+  // A pointer that lands on a fold you cannot see never arrived. The card's `→ id` says the output is here,
+  // and a long output now sits behind a closed <details>; opening it before scrolling is what keeps r38's
+  // bargain — one click from the call to the result — from quietly becoming two clicks and a hunt.
+  const fold = node.querySelector('.tool-fold:not([open])');
+  if (fold) fold.open = true;
   node.scrollIntoView({
     block: 'center',
     behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
