@@ -10,6 +10,7 @@ import { api, get } from './api.js';
 import { fail, note, toast } from './ui.js';
 import { refresh, loadSessions } from './session.js';
 import { resolveHz, describeHz } from './scheduler.js';
+import { resolveEnterMode, describeEnterMode, syncComposer } from './composer.js';
 
 // fld reads a control by name: form.elements has properties like "action" and "name" that a plain
 // property access would resolve to the wrong thing.
@@ -44,6 +45,9 @@ export async function openSettings() {
   // because it is a knob people only reach for once and then forget. Show what is actually in force
   // (URL wins over storage), so the row never lies about the current tab.
   fld(f, 'renderHz').value = String(resolveHz());
+  // Same trick as the redraw rate: show what is in force (a ?enter= in the address bar wins), and name
+  // the mode the user is reading, not just the word "auto".
+  fld(f, 'enterSends').value = resolveEnterMode();
   fld(f, 'auto').checked = cfg.compact?.auto === true; // off unless explicitly on
   fld(f, 'inLoop').checked = cfg.compact?.inLoop !== false; // on unless explicitly off
   // Both assembler switches are on unless the config says otherwise, so the checkboxes start from
@@ -146,6 +150,28 @@ function applyRenderHz(f) {
   toast(`redrawing at ${describeHz(hz)}${new URLSearchParams(location.search).has('hz') ? ' — the ?hz= in the address bar still wins until reload' : ''}`);
 }
 
+// applyEnterSends stores how this browser treats the Enter key. Like the redraw rate it is kept out of
+// the PATCH body — the way a person types is not a property of the session, and carrying it there would
+// make one phone change the behaviour of a session for every device that opens it. The composer reads
+// this on the next keystroke, so there is nothing else to push into the page; the toast says what the
+// setting resolved to rather than echoing the picker, because `auto` is a description of the device and
+// the user is entitled to know which answer the device gave.
+function applyEnterSends(f) {
+  const raw = fld(f, 'enterSends').value;
+  try {
+    localStorage.setItem('bareloop.enterSends', raw);
+  } catch {
+    // A profile that refuses localStorage still gets the choice until the next load.
+  }
+  const wins = new URLSearchParams(location.search).has('enter');
+  // Ask the composer to re-label itself rather than trusting that saveSettings() happened to refresh the
+  // transcript: the keystroke and the words above it must change together, and that cannot depend on a
+  // side effect of another function. Behaviour was never at risk (the handler re-reads this on every
+  // Enter) — only the promise the box makes while it waits for the first keystroke.
+  syncComposer();
+  toast(`${describeEnterMode(resolveEnterMode())}${wins ? ' — the ?enter= in the address bar still wins until reload' : ''}`);
+}
+
 export function wireSettings() {
   const dlg = $('#dlg-settings');
   // One save path for both ways of leaving the dialog: the save button, and Enter inside a field.
@@ -155,6 +181,7 @@ export function wireSettings() {
     try {
       await saveSettings();
       applyRenderHz($('#settings-form'));
+      applyEnterSends($('#settings-form'));
       dlg.close();
     } catch (err) {
       // Bad MCP JSON is the user's own text: it is already on screen, and the dialog stays open so

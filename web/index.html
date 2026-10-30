@@ -189,6 +189,22 @@
           in the address bar wins over this row until the next load, and the streaming message prints the
           rate it is actually managing in its own header.
         </p>
+        <label>
+          what the Enter key does
+          <select name="enterSends">
+            <option value="auto">auto — keyboard: Enter sends · touch: Enter adds a line (default)</option>
+            <option value="on">always send</option>
+            <option value="off">never send — Enter adds a line, use the send button</option>
+          </select>
+        </label>
+        <p class="hint">
+          Also <em>this browser</em>, not the session. On a touch screen there is no Shift+Enter a thumb can
+          reach, so the default gives Enter back to the text: multi-line prompts and pasted code can be typed
+          after all, and the round button beside the box sends. On a keyboard nothing changes: Enter sends,
+          Enter during a live run interrupts that run and sends this instead, Shift+Enter is a newline. The
+          on-screen return key and the box's hint text follow whichever answer you pick.
+          <code>?enter=on|off|auto</code> wins over this row until the next load.
+        </p>
         <p class="hint">
           An empty API key keeps the stored one. Each session keeps its own log, MCP servers,
           system prompt, context window and compaction parameters. Saving while a run is active is
