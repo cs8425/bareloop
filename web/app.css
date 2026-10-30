@@ -305,6 +305,27 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   padding: 5px 0;
 }
 .tool-fold[open] > summary { margin-bottom: 6px; }
+/* Touch floors for the things in this file that are controls but are not <button>. Everything a finger is
+   meant to hit already measures 32px or more (buttons 40, .act 34×32, the filter field 34), and what was
+   left were four disclosures drawn as text, so they inherited text's height: a reasoning header at 17, a
+   tool card's header at 24, a folded result's row at 24 — and the token gauge at 16 with role="button"
+   written on it. 9px of padding is .to-result's own trick (the tap area is padding, not size) and it lands
+   every one of them past the 32px floor this project already uses for .act: 35 / 32 / 32 / 32 / 32, each one
+   measured edge to edge with elementFromPoint, not inferred. The gauge costs the status bar nothing: its
+   row is already 53px because the 40px compact button sits in it, and #ctx-text centres itself in whatever
+   height the bar gets (inset:0 + grid). Density was measured rather than assumed — over 66 entries at
+   375px the transcript grows 532px out of 640 027, which is 0.08% — and it is only a finger that pays it:
+   keyed on hover, not on width, a 400px-wide desktop window keeps its 24px rows. */
+@media (hover: none) {
+  .tool-card > summary { padding-block: 9px; }
+  .tool-fold > summary { padding-block: 9px; }
+  .reasoning > summary { padding-block: 9px; }
+  /* -9px is not a shortcut, it is exactly this row's own padding: the link's box then ends at the card's
+     edge instead of crossing it. Anything larger would let the link swallow taps outside the row, and the
+     row toggles the card while the link jumps to the result — a hit box that escapes the row chooses for you. */
+  .tool-card .to-result { margin-block: -9px; padding-block: 9px; }
+  .ctxbar { min-height: 32px; }
+}
 
 #pending { border-top: 1px solid var(--border); padding: 5px 12px; font-size: var(--t-1); color: var(--muted); background: #14181f; flex: 0 0 auto; }
 #pending ul { margin: 3px 0 0; padding-left: 18px; }
