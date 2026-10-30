@@ -400,7 +400,7 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .md hr { border: none; border-top: 1px solid var(--border); margin: .8em 0; }
 
 /* dialogs */
-dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; max-width: 640px; width: 92%; }
+dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; width: min(92%, 640px); max-height: 88dvh; overflow: auto; } /* min(%,px) is one way of writing "92% until 640px"; max-height is keyed on the viewport here and not under a width breakpoint because what it protects against is a form (1282px) taller than the screen. Chrome's own sheet already caps a dialog at calc(100% - 34px) and makes it scroll (measured as the computed max-height and overflow of the rule this one replaces) - which is how a too-tall dialog is scrollable at all, and why writing it down is only making cross-browser what Chrome gives, while 88dvh is the number the phone branch already used. */
 dialog::backdrop { background: rgba(0,0,0,.55); }
 dialog form { display: flex; flex-direction: column; gap: 8px; }
 /* A settings form was the last thing in the UI set in `--t-1`, the rung whose job is secondary text: an
@@ -412,11 +412,35 @@ dialog form { display: flex; flex-direction: column; gap: 8px; }
 dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-2); color: var(--muted); }
 dialog input, dialog select, dialog textarea { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; }
 dialog textarea[name=mcp] { font: var(--t-2) var(--mono); } /* same rung as its own label; mono because JSON */
-dialog .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+/* minmax(0,1fr), not 1fr. An `fr` track may not shrink below the smallest size of what it holds, and the
+   smallest size of an <input> is its `size="20"` width - text, so it grows with the browser's text size
+   while this box is capped at 640px and does not. Measured at that 640px dialog, whose content box is 595:
+   three columns want 193px each at the default text size (595, i.e. it fits with nothing to spare), 242 at
+   a 20px text size (137px too wide) and 278 at 24px (248px too wide). That is how the third column of the
+   settings form leaves the dialog and the dialog grows a horizontal scrollbar - and because the fit at
+   default text is exact rather than comfortable, the same file can scroll in one browser and not in
+   another over a few pixels of scrollbar or form-control metric. A track floor of 0 says a field may get
+   narrower instead of the box getting wider. */
+dialog .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+/* min-width: 0 is the same argument one level down: as a flex or grid item a label refuses to go below its
+   own min-content, which is the widest thing inside it, so the labels and the controls have to be told they
+   may shrink too. Over 21 combinations of text size (16/20/24) x viewport (320x667 through 1353x1316) these
+   two rules take the dialog's sideways overflow to 0 in every one - the fields land between 188 and 315px
+   wide - with nothing else spilling out of the box. */
+dialog form > *, dialog .grid > *, dialog input, dialog select, dialog textarea { min-width: 0; }
 dialog .grid .check { grid-column: span 3; flex-direction: row; align-items: center; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
 dialog .hint { color: var(--muted); font-size: var(--t-1); margin: 0; }
 dialog p { margin: 0 0 4px; }
+/* Why the dialog is allowed to scroll: this row is the only way out of it, and it used to be a phone rule,
+   which is how a 1353x1316 window got the bug. The settings form is 1282 tall, so at the default text size
+   the row sat 19px below the bottom of the screen - 835px below at a 24px text size - reachable only by
+   scrolling the dialog itself all the way to the bottom. `bottom` cancels the dialog's 14px padding so the
+   row sits on the edge instead of floating a padding above it, and the background stops the form from
+   scrolling visibly through the gap. What `overflow: auto` costs is clipping, at the padding box: 14px of
+   padding around a 2px + 1px focus ring is 11px of clearance, which is the room the status bar's gauge did
+   not have when the same argument came up there. */
+dialog menu { position: sticky; bottom: -1em; background: var(--bg2); padding-top: 8px; }
 /* confirm/prompt dialogs are small: they should not inherit the settings dialog's width. */
 dialog.modal { max-width: 420px; }
 
@@ -635,25 +659,22 @@ button,
   #panel-body .head {
     max-width: 38vw;
   }
+  /* Only the width is different on a small screen. The height cap and the scrolling are on the dialog rule
+     itself now: what makes them necessary is a form taller than the screen, and a window can be short at
+     any width. */
   dialog {
     width: 96vw;
-    max-width: 96vw;
-    max-height: 88dvh;
-    overflow: auto;
   }
   dialog .grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr); /* the same floor as the three-column rule above: one column of
+                                              `1fr` still refuses to go under the 20 characters of an
+                                              <input>, which measured 75px of sideways overflow in a
+                                              320px viewport at a 24px text size. */
   }
   dialog .grid .check {
     grid-column: auto;
   }
-  /* the dialog can be taller than the screen: keep save/cancel reachable */
-  dialog menu {
-    position: sticky;
-    bottom: -1em;
-    background: var(--bg2);
-    padding-top: 8px;
-  }
+  /* (the sticky save/cancel row left this breakpoint with the height cap it exists for) */
 }
 
 /* inspect panel extras: the system prompt and the raw payload have to be readable, not counted */
