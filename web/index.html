@@ -169,6 +169,26 @@
           MCP servers (JSON array)
           <textarea name="mcp" rows="8" spellcheck="false"></textarea>
         </label>
+        <label>
+          redraw rate while a reply streams
+          <select name="renderHz">
+            <option value="20">20 Hz — a frame every 50 ms (default)</option>
+            <option value="10">10 Hz — every 100 ms</option>
+            <option value="5">5 Hz — every 200 ms</option>
+            <option value="1">1 Hz — once a second</option>
+            <option value="0">0 — not until the reply is over</option>
+          </select>
+        </label>
+        <p class="hint">
+          This one belongs to <em>this browser</em>: it says how much of your machine a growing reply may
+          spend redrawing, so it is stored locally and never sent to the server. Text is never lost by
+          redrawing less — the characters keep arriving and the next frame draws everything up to now. At 0
+          the bubble shows its cursor and the whole reply appears when the stream ends, which is cheaper
+          than 1 Hz on a machine that cannot afford a parse a second; <code>?mode=plain</code> is the
+          readable version of that bargain (text as it arrives, markdown at the end). A <code>?hz=</code>
+          in the address bar wins over this row until the next load, and the streaming message prints the
+          rate it is actually managing in its own header.
+        </p>
         <p class="hint">
           An empty API key keeps the stored one. Each session keeps its own log, MCP servers,
           system prompt, context window and compaction parameters. Saving while a run is active is

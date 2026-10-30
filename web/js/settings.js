@@ -7,8 +7,9 @@
 import { $ } from './util.js';
 import { state } from './state.js';
 import { api, get } from './api.js';
-import { fail, note } from './ui.js';
+import { fail, note, toast } from './ui.js';
 import { refresh, loadSessions } from './session.js';
+import { resolveHz, describeHz } from './scheduler.js';
 
 // fld reads a control by name: form.elements has properties like "action" and "name" that a plain
 // property access would resolve to the wrong thing.
@@ -39,6 +40,10 @@ export async function openSettings() {
   fld(f, 'summaryMax').value = cfg.compact?.summaryMax ?? 70;
   fld(f, 'maxAttempts').value = cfg.compact?.maxAttempts ?? 3;
   fld(f, 'maxTurns').value = cfg.maxTurns || '';
+  // The redraw rate is not config — it is this browser's preference — but it lives in this dialog
+  // because it is a knob people only reach for once and then forget. Show what is actually in force
+  // (URL wins over storage), so the row never lies about the current tab.
+  fld(f, 'renderHz').value = String(resolveHz());
   fld(f, 'auto').checked = cfg.compact?.auto === true; // off unless explicitly on
   fld(f, 'inLoop').checked = cfg.compact?.inLoop !== false; // on unless explicitly off
   // Both assembler switches are on unless the config says otherwise, so the checkboxes start from
@@ -123,6 +128,24 @@ export async function saveSettings() {
   refresh().catch(() => {});
 }
 
+// applyRenderHz stores the redraw rate and pushes it into any stream already on screen. It deliberately
+// does not go into the PATCH body: how fast this laptop can redraw markdown is not a property of the
+// session, and writing it there would make one slow machine the session's problem.
+function applyRenderHz(f) {
+  const raw = fld(f, 'renderHz').value;
+  try {
+    localStorage.setItem('bareloop.renderHz', raw);
+  } catch {
+    // A profile that refuses localStorage still gets the choice for this tab via setHz below.
+  }
+  const hz = Number(raw);
+  for (const s of state.streams.values()) s.drawer?.gate.setHz(hz);
+  // A toast, not a note: `note` appends into #log, and the refresh() that saveSettings just ran rebuilds
+  // that log — a confirmation eaten by its own save is no confirmation. This one also has to be readable
+  // after the dialog closes with the transcript scrolled somewhere else.
+  toast(`redrawing at ${describeHz(hz)}${new URLSearchParams(location.search).has('hz') ? ' — the ?hz= in the address bar still wins until reload' : ''}`);
+}
+
 export function wireSettings() {
   const dlg = $('#dlg-settings');
   // One save path for both ways of leaving the dialog: the save button, and Enter inside a field.
@@ -131,6 +154,7 @@ export function wireSettings() {
   const save = async () => {
     try {
       await saveSettings();
+      applyRenderHz($('#settings-form'));
       dlg.close();
     } catch (err) {
       // Bad MCP JSON is the user's own text: it is already on screen, and the dialog stays open so

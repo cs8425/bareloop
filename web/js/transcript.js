@@ -410,7 +410,7 @@ function markStreamFinished(id) {
 //   full   n       — the path that shipped before the render gate; n² over a reply
 //   tail   n − frozen — usually a few hundred characters; n over a reply
 //   plain  0       — one parse when the stream is over
-export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz } = {}) {
+export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz, onPaint } = {}) {
   const frozen = el('div', 'md frozen');
   const live = el('div', 'md live');
   host.append(frozen, live);
@@ -441,7 +441,12 @@ export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz
     d.parsed += tail.length;
     md.renderTo(d.live, tail);
   };
-  d.gate = makeRenderGate(d.paint, hz);
+  // onPaint is handed the gate after every frame it allowed. The one place a reader can see what a
+  // ceiling is really buying is the message that is being drawn, so the gate tells the header directly.
+  d.gate = makeRenderGate(() => {
+    d.paint();
+    if (onPaint) onPaint(d.gate);
+  }, hz);
   d.mark = () => d.gate.mark();
   // finish is `done`. It flushes the gate so nothing stays pending, then draws the whole reply once and
   // empties the live part — so the DOM at the end of a stream is *by construction* what one clean render
@@ -467,7 +472,8 @@ function streamStart(streamId) {
   const node = el('div', 'msg assistant stream');
   const head = el('header');
   head.appendChild(el('span', 'who', 'assistant'));
-  head.appendChild(el('span', 'eid', 'streaming'));
+  const tag = el('span', 'eid', 'streaming');
+  head.appendChild(tag);
   node.appendChild(head);
   const reasoning = el('details', 'reasoning');
   reasoning.appendChild(el('summary', '', 'reasoning'));
@@ -475,10 +481,18 @@ function streamStart(streamId) {
   const body = el('div', 'body md');
   node.appendChild(body);
   logEl().appendChild(node);
-  const s = { id: streamId, node, body, reasoning, content: '', reasoningText: '', rText: null, tools: new Map(), args: new Map() };
+  const s = { id: streamId, node, body, reasoning, tag, content: '', reasoningText: '', rText: null, tools: new Map(), args: new Map() };
   // The drawer decides what to redraw; the gate inside it decides how often. `s.content` keeps accumulating
   // either way, so a skipped frame loses no characters and a frozen block costs nothing to repaint.
-  s.drawer = makeStreamDrawer(body, () => s.content);
+  s.drawer = makeStreamDrawer(body, () => s.content, {
+    onPaint: (gate) => {
+      const hz = gate.measuredHz;
+      tag.textContent = hz ? `streaming · ${hz} Hz` : 'streaming';
+    },
+  });
+  // At 0 on the ladder nothing is drawn until the reply is over, and a bubble that shows nothing needs
+  // its reason on screen rather than in a manual: say so before the first frame that never comes.
+  if (!s.drawer.gate.hz) tag.textContent = 'streaming · drawn when it ends';
   state.streams.set(streamId, s);
   scrollDown();
   return s;
@@ -533,6 +547,10 @@ export function flushStreams() {
 
 function streamFinish(s) {
   s.node.classList.remove('stream');
+  // The header chip says "streaming", and the moment this runs that is no longer true. It goes rather
+  // than being reworded: the committed entry brings its own chips (id, model, usage) when it lands, and a
+  // finished message keeping a rate it is no longer drawing at would be a small, permanent lie.
+  s.tag?.remove();
   markStreamFinished(s.id);
   if (!s.content && !s.tools.size) s.node.remove();
 }
