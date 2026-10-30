@@ -204,10 +204,27 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #attachments img { max-height: 54px; display: block; border-radius: 4px; }
 #attachments .x { position: absolute; top: -6px; right: -6px; background: var(--err); color: #fff; border-radius: 50%; width: 17px; height: 17px; line-height: 16px; text-align: center; font-size: 11px; cursor: pointer; }
 
-/* side panel */
-#panel { background: var(--bg2); border-left: 1px solid var(--border); overflow-y: auto; }
+/* side panel.
+   The panel is a column and its *body* is the scroller, and that split is the whole fix for "I have to
+   scroll back to the top before I can close it": the inspect table is routinely 30+ rows, and a phone has
+   no Escape (the Escape-to-close in app.js needs a keyboard), so a ✕ that scrolls away leaves no way out
+   at all. A control that closes a surface may not live inside the region it closes. */
+#panel {
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#panel > .side-head { flex: 0 0 auto; }
 #panel.hidden, #pending.hidden, .hidden { display: none; }
-#panel-body { padding: 8px 10px; font-size: 12px; }
+#panel-body {
+  padding: 8px 10px;
+  font-size: 12px;
+  flex: 1 1 auto; /* fills the panel and owns the scrolling, while the header with the ✕ stays put */
+  min-height: 0;
+  overflow-y: auto;
+}
 #panel-body table { width: 100%; border-collapse: collapse; }
 #panel-body td, #panel-body th { border-bottom: 1px solid var(--border); padding: 3px 5px; text-align: left; vertical-align: top; }
 #panel-body .num { text-align: right; font-family: var(--mono); }
