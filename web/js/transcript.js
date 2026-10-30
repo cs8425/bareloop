@@ -410,7 +410,7 @@ function markStreamFinished(id) {
 //   full   n       — the path that shipped before the render gate; n² over a reply
 //   tail   n − frozen — usually a few hundred characters; n over a reply
 //   plain  0       — one parse when the stream is over
-export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz, onPaint } = {}) {
+export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz, onPaint, frame } = {}) {
   const frozen = el('div', 'md frozen');
   const live = el('div', 'md live');
   host.append(frozen, live);
@@ -443,8 +443,13 @@ export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz
   };
   // onPaint is handed the gate after every frame it allowed. The one place a reader can see what a
   // ceiling is really buying is the message that is being drawn, so the gate tells the header directly.
+  //
+  // `frame` is other drawing that wants this frame's budget instead of its own. The reasoning panel and
+  // the tool cards used to write on every delta, which put the provider's chunk rate back in charge of the
+  // page and cost a separate forced layout each; here they share one gate, so a frame flushes once.
   d.gate = makeRenderGate(() => {
     d.paint();
+    if (frame) frame();
     if (onPaint) onPaint(d.gate);
   }, hz);
   d.mark = () => d.gate.mark();
@@ -481,10 +486,62 @@ function streamStart(streamId) {
   const body = el('div', 'body md');
   node.appendChild(body);
   logEl().appendChild(node);
-  const s = { id: streamId, node, body, reasoning, tag, content: '', reasoningText: '', rText: null, tools: new Map(), args: new Map() };
+  const s = { id: streamId, node, body, reasoning, tag, content: '', reasoningText: '', rText: null, rShownLen: 0, tools: new Map(), args: new Map(), argsShown: new Map() };
+  // Two channels arrive per delta besides the reply: the reasoning text and a tool call's arguments. Both
+  // used to be written straight into the DOM as they landed — an O(n) text replacement plus a forced layout
+  // per token. Measured over 13 KB of reasoning in 216 deltas: panel open 21.9 s of wall with a long task
+  // on almost every delta, panel closed 2.7 s. So they draw on the reply's frame budget, and only while they
+  // are visible: a closed <details> is read by nobody, and the committed entry renders both from the log
+  // regardless of what the live node did. (What this does not fix: with the panel open on a 62-entry
+  // transcript a single frame costs ~90 ms, so no ceiling can hold it — that is a transcript-size problem.)
+  const drawThinking = () => {
+    if (!reasoning.open) return;
+    if (s.rShownLen === s.reasoningText.length) return;
+    if (!s.rText) {
+      s.rText = document.createTextNode('');
+      reasoning.appendChild(s.rText);
+      s.rShownLen = 0; // a fresh node starts empty; opening the panel later draws all of it below
+    }
+    // Append what arrived since the last frame instead of replacing the whole string. Honest numbers: at
+    // 100 KB over 60 frames this is 0.14 ms/frame against 0.34 ms/frame for rewriting the whole string —
+    // real, but small next to the transcript term below, and it did not move the wall clock here. It stays
+    // because it is strictly less work (proportional to what arrived, not to what is already on screen) and
+    // because a thinking model can stream 100 KB the way an ordinary reply streams 1 KB.
+    s.rText.appendData(s.reasoningText.slice(s.rShownLen));
+    s.rShownLen = s.reasoningText.length;
+  };
+  const drawToolArgs = () => {
+    for (const [key, card] of s.tools) {
+      const text = s.args.get(key) || '';
+      if (card.el.open && s.argsShown.get(key) !== text) {
+        s.argsShown.set(key, text);
+        card.setArgs(text); // setArgs pretty-prints: a JSON round-trip, worth not doing 80 times a second
+      }
+    }
+  };
+  s.drawThinking = drawThinking;
+  s.drawToolArgs = drawToolArgs;
+  // A frame is only worth asking for when something on screen could change. This sounds like the same
+  // sentence as "ask for a frame", and the difference is the whole cost: a change nobody can see still
+  // dirties the tree, and the tree being dirty is what the follow-scroll then pays for. My first draft of
+  // this function marked unconditionally and measured 20.7 s over 216 reasoning deltas on a 62-entry
+  // session — redrawing nothing, eight times slower than not asking for the frame at all (2.7 s).
+  const worthDrawing = () => reasoning.open || [...s.tools.values()].some((card) => card.el.open);
+  s.markNews = () => {
+    if (worthDrawing()) s.drawer.mark();
+  };
+  // Opening the panel is a click, not a delta: it draws immediately rather than waiting for a frame, and
+  // that is what keeps `?hz=0` usable — the thinking that already arrived is there the moment you ask.
+  reasoning.addEventListener('toggle', () => {
+    if (reasoning.open) drawThinking();
+  });
   // The drawer decides what to redraw; the gate inside it decides how often. `s.content` keeps accumulating
   // either way, so a skipped frame loses no characters and a frozen block costs nothing to repaint.
   s.drawer = makeStreamDrawer(body, () => s.content, {
+    frame: () => {
+      drawThinking();
+      drawToolArgs();
+    },
     onPaint: (gate) => {
       const hz = gate.measuredHz;
       tag.textContent = hz ? `streaming · ${hz} Hz` : 'streaming';
@@ -502,12 +559,10 @@ export function streamDelta(d) {
   const s = streamStart(d.streamId);
   if (!s) return;
   if (d.reasoning) {
+    // Accumulate, and ask for a frame only if the panel or a tool card is actually open (see markNews).
+    // Whether anything is drawn stays the frame painter's call, and the rate stays the gate's.
     s.reasoningText += d.reasoning;
-    if (!s.rText) {
-      s.rText = document.createTextNode('');
-      s.reasoning.appendChild(s.rText);
-    }
-    s.rText.textContent = s.reasoningText;
+    s.markNews();
   }
   if (d.content) {
     s.content += d.content;
@@ -521,11 +576,15 @@ export function streamDelta(d) {
       const card = toolCard(tc.id || `#${key}`, tc.name || 'tool', 'running');
       s.tools.set(key, card);
       s.node.insertBefore(card.el, s.body);
+      // Opening a card mid-stream asks for its arguments now, same rule as the reasoning panel.
+      card.el.addEventListener('toggle', s.drawToolArgs);
     } else {
       s.args.set(key, (s.args.get(key) || '') + (tc.args || ''));
     }
-    const card = s.tools.get(key);
-    if (card) card.setArgs(s.args.get(key) || '');
+    // Which tool is running is drawn immediately (above), but its arguments accumulate and follow the
+    // frame: an args delta used to mean a pretty-print plus a DOM write per token. And as with the
+    // reasoning panel, a collapsed card is not a reader — no frame is requested for it.
+    s.markNews();
   }
   // `done` closes the window: whatever is still unpainted gets painted now, and the split disappears into
   // one clean render. Without this the last few tokens of a reply could sit in `s.content` until the
