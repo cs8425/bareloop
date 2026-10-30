@@ -8,7 +8,7 @@ import { EV_SESSION, emit } from './bus.js';
 import { confirmBox, note } from './ui.js';
 import { resetScroll, scrollDown } from './scroll.js';
 import { closeNav } from './nav.js';
-import { entryNode } from './transcript.js';
+import { entryNode, linkToolResults } from './transcript.js';
 import { syncComposer } from './composer.js';
 
 // The URL names the session you are looking at: `#/s/<id>`. It is written here and read on boot, which is what
@@ -48,6 +48,7 @@ export async function refresh() {
   logEl().textContent = '';
   state.entries.clear();
   state.tools.clear();
+  state.toolResults.clear();
   const entries = sortByNum(data.entries || []);
   // The path is what gets sent, and it is the only thing the transcript shows. An entry that is not on it
   // belongs to another branch: with no tree view there is no way back to that branch, so drawing it would
@@ -57,6 +58,9 @@ export async function refresh() {
   for (const e of entries) {
     if (onPath.has(e.id)) entryNode(e);
   }
+  // Every card this pass created is now old enough to be told how its call ended, because the tool entries
+  // that answer them were drawn after the messages that asked.
+  linkToolResults();
   for (const [, s] of state.streams) logEl().appendChild(s.node);
   state.status = data.status;
   renderStatus(data.status);
@@ -117,6 +121,7 @@ export async function selectSession(id) {
   resetScroll();
   state.entries.clear();
   state.tools.clear();
+  state.toolResults.clear();
   state.streams.clear();
   for (const [, card] of state.requests) card.remove();
   state.requests.clear();

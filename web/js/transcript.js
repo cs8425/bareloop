@@ -71,6 +71,15 @@ function resumeFrom(e) {
 export function entryNode(e) {
   let node = state.entries.get(e.id);
   if (node) return node;
+  // A tool call's outcome belongs to the entry the tool wrote, not to the assistant message that asked for
+  // it: only that entry has the milliseconds, the error flag and an id worth linking to. Indexing it here
+  // is what lets a card that already exists be told how it ended, and lets one created later find out from
+  // the index (session.js sweeps those up with linkToolResults after a rebuild).
+  if (e.kind === 'tool' && e.toolCallId) {
+    state.toolResults.set(e.toolCallId, e);
+    const card = state.tools.get(e.toolCallId);
+    if (card) card.finished(e);
+  }
   // A committed failure (provider error, stream that died halfway) is drawn as a failure: an
   // assistant message that says "[generation failed: …]" in normal colours looks like an answer.
   const bad = e.finishReason === 'error' || (e.label || '').includes('error');
@@ -616,6 +625,12 @@ function streamFinish(s) {
 
 // ------------------------------------------------------------------ tool cards
 
+// A card is the assistant's side of one tool call: which tool, what arguments, how it ended. The output is
+// a different entry — it has its own id, its own error flag, its own milliseconds, and image parts this
+// card could not render if it tried — so the card names that entry instead of keeping a copy of it.
+// It used to keep one: `pre.result` was the only text in the UI backed by no field of the entry it was
+// drawn from (an assistant entry stores arguments, never a result), so a live event filled it and a reload
+// could not replay it — measured after a reload: 7 cards, 7 empty boxes, each still drawing a border-top.
 export function toolCard(callId, label, cls) {
   let node = state.tools.get(callId);
   if (node) return node;
@@ -625,8 +640,10 @@ export function toolCard(callId, label, cls) {
   const badge = el('span', cls || '', '·');
   summary.append(el('span', 'lbl', 'tool'), lbl, badge);
   const args = el('pre', 'args');
-  const result = el('pre', 'result');
-  card.append(summary, args, result);
+  card.append(summary, args);
+  // `done` is not a loading flag. It is the card admitting it has been told how the call ended, after which
+  // a straggling progress event must not repaint the verdict it is standing on.
+  let done = false;
   const api = {
     el: card,
     attached: false,
@@ -634,22 +651,72 @@ export function toolCard(callId, label, cls) {
       args.textContent = pretty(collapseDataUrls(text).text);
       args.style.display = 'block';
     },
-    setResult(text, isError) {
-      // Base64 is never read in a <pre>: an image arrives as an attachment (rendered above the
-      // tool message) and anything else binary is not worth 250 KB of scrolling.
-      result.textContent = collapseDataUrls(text || '(empty)').text;
-      result.className = 'result' + (isError ? ' err' : '');
-    },
     setLabel(text) {
       lbl.textContent = text;
     },
     setBadge(text, cls2) {
+      if (done) return;
       badge.textContent = text;
       badge.className = cls2 || '';
+    },
+    // finished binds a card to the entry that answered the call. The badge becomes that entry's outcome
+    // (ms and isError, neither of which the assistant entry has) and the link becomes the way to read the
+    // output. Both are replayable, which is the whole point: the card now says the same thing before a
+    // reload and after one, instead of going blank and dot.
+    finished(e) {
+      if (done) return;
+      done = true;
+      badge.textContent = e.isError ? 'error' : e.ms ? `${e.ms} ms` : 'done';
+      badge.className = e.isError ? 'state-error' : 'state-ok';
+      badge.title = `answered by entry ${e.id}${e.isError ? ' — the tool reported an error' : ''}${e.ms ? ` · ${e.ms} ms` : ''}`;
+      // It used to read "result → 0000007". At 375px those extra words cost the row a whole second line on
+      // the three cards whose tool name carries a server prefix (measured: 24px rows became 46px, and before
+      // the link existed all seven were 24px). The id is the entire message and the arrow says which way it
+      // points, so the words moved into the accessible name — where a screen reader and a hover still get
+      // them — and the visible label stayed short enough to be a pointer instead of a paragraph. The visible
+      // id is also in the accessible name, which is what WCAG 2.5.3 asks for when a control has one.
+      const link = el('button', 'to-result', `\u2192 ${e.id}`);
+      link.setAttribute('aria-label', `read the result of this call, entry ${e.id}`);
+      link.title = 'the output of this call is its own entry: the card keeps the call, the entry keeps the result';
+      // Inside a <summary> a click would otherwise fold the card the reader was trying to leave open.
+      link.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        jumpToEntry(e.id);
+      };
+      summary.appendChild(link);
     },
   };
   state.tools.set(callId, api);
   return api;
+}
+
+// linkToolResults is the rebuild half of the pairing. The transcript draws an assistant entry before the
+// tool entry that answers it, so after a pass over the log every card was created first and told later;
+// this is the "later", and it means the order the two maps fill in never has to be reasoned about.
+export function linkToolResults() {
+  for (const [callId, card] of state.tools) {
+    const e = state.toolResults.get(callId);
+    if (e) card.finished(e);
+  }
+}
+
+// jumpToEntry is why the link is worth a pixel: the output is one scroll away, and the entry that holds it
+// is the thing that gets the ring. Scrolling there unpins the follow — the scroll handler seeing a scroll
+// it did not ask for is doing its job, since asking to read something older is exactly the opt-out — and
+// the floating "latest" button is how you get back.
+function jumpToEntry(id) {
+  const node = state.entries.get(id);
+  if (!node) {
+    note(`${id} is not on the path being drawn`);
+    return;
+  }
+  node.scrollIntoView({
+    block: 'center',
+    behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+  });
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1400);
 }
 
 // ------------------------------------------------------------------ input requests

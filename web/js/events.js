@@ -115,13 +115,14 @@ function onToolProgress(d, isResult) {
   const card = toolCard(d.callId, `${d.server ? d.server + '/' : ''}${d.tool}`, d.status === 'error' ? 'state-error' : 'state-running');
   if (d.arguments) card.setArgs(d.arguments);
   if (d.status === 'running') card.setBadge('running', 'state-running');
-  if (!isResult) {
-    attach(card, d.entryId);
-    return;
+  // The output is not drawn from this event any more: the tool entry owns it, renders it in full (images
+  // included) and can be replayed, which this frame never could. What the frame still knows first is that
+  // the call ended, so the badge comes from here; the entry's own event binds the card to it and wins,
+  // because it carries the milliseconds the tool itself measured.
+  if (isResult) {
+    if (d.status === 'error') card.setBadge('error', 'state-error');
+    else if (d.ms) card.setBadge(`${d.ms} ms`, 'state-ok');
   }
-  const images = d.images ? ` \u00b7 ${d.images} image(s) in the tool message` : '';
-  card.setResult((d.error || d.result || '') + images, d.status === 'error');
-  if (d.ms) card.setBadge(`${d.ms} ms`, d.status === 'error' ? 'state-error' : 'state-ok');
   attach(card, d.entryId);
 }
 

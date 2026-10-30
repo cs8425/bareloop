@@ -11,6 +11,7 @@ export const state = {
   entries: new Map(), // entry id -> element
   streams: new Map(), // stream id -> {node, body, reasoning, content, reasoningText, tools, args}
   tools: new Map(), // tool call id -> card api
+  toolResults: new Map(), // tool call id -> the tool entry that answered it: the only place its ms, its error flag and its id live
   requests: new Map(), // pending input-request id -> element
   attachments: [], // {name, mimeType, data}
   pending: [],

@@ -203,6 +203,15 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .msg.error { border-left-color: var(--err); }
 .msg.stream .body::after { content: "▋"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0 } }
+/* jumpToEntry rings the entry a tool card's result link jumped to, so the reader knows where the link landed
+   instead of scanning for it. The ring *is* the class and the JS removes it after 1.4s, which is also the
+   no-motion answer: appear, sit, leave — only the fade is conditioned on the preference.
+   outline, not box-shadow: .msg rows stack on each other's margins, and a shadow is painted under the next
+   row while an outline is drawn over everything its row sits in. */
+.msg.flash { outline: 2px solid transparent; }
+@keyframes flash { from { outline-color: var(--accent); } to { outline-color: transparent; } }
+@media (prefers-reduced-motion: no-preference) { .msg.flash { animation: flash 1.4s ease-out 1; } }
+@media (prefers-reduced-motion: reduce) { .msg.flash { outline-color: var(--accent); } }
 .msg img.attach { max-width: 220px; max-height: 160px; border-radius: 6px; margin: 4px 6px 0 0; border: 1px solid var(--border); }
 /* An attachment with no bytes is a reference — a path or URI. Worth printing: "the tool wrote
    /tmp/shot.png" is information, a broken image icon is not. */
@@ -215,12 +224,39 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .reasoning > summary { color: #9a8fc7; cursor: pointer; font-size: var(--t-0); text-transform: uppercase; letter-spacing: .05em; }
 
 .tool-card { margin: 0 12px 10px; border: 1px solid var(--border); border-radius: 6px; background: #1a1f27; }
-.tool-card > summary { padding: 5px 9px; cursor: pointer; font: var(--t-1) var(--mono); display: flex; gap: 8px; align-items: center; }
+/* flex-wrap: a card header is four labels in a row, and a tool name is not a bounded string. Nothing wraps
+   today at 375px (measured: seven rows, all of them 24px), but a 40-character server__tool name does, and
+   which way it breaks is the whole difference. With wrap the name takes a line and the badge and the link
+   follow it down together: 60px. Without, the name is squeezed to 138px over three lines while the badge and
+   the link hang beside it at different heights: 66px. Neither one scrolls the transcript sideways — a flex
+   item's text folds inside its own box long before that — so this rule is about not scattering a row, not
+   about overflow. */
+.tool-card > summary { padding: 5px 9px; cursor: pointer; font: var(--t-1) var(--mono); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .tool-card .lbl { color: var(--muted); }
 .tool-card pre { margin: 0; padding: 8px 10px; overflow-x: auto; font: var(--t-1)/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--border); max-height: 340px; overflow-y: auto; }
 .tool-card .args { color: #9dc7ff; }
-.tool-card .result { color: #c8d3bf; }
-.tool-card .err { color: #f0a79f; }
+/* The result is not printed here any more: it is its own entry, with an id, a duration and an error flag this
+   card does not have (see toolCard in web/js/transcript.js). What is left is a pointer, and all a pointer has
+   to say is which entry — so it is a text link, not a button. An outlined box around nine characters would
+   outrank the tool name it is subordinate to.
+   margin-left:auto is the row's own layout language; nowrap + flex:0 0 auto is what makes the pointer behave.
+   Left free to shrink, it is the item that gives way, and what it gives up is its own id split across two
+   lines — the one string here that has to arrive whole to be recognised at the other end of the jump. What
+   that costs, measured at 375px wide: reading "result → 0000043" the link was 116px and three of seven rows
+   stood 38px; with the words in the aria-label it is 65px and every row is back to the 24px it measured
+   before a link existed here at all.
+   The tap area is padding, not size: 6px above and below a 14px line is a 26px box — over the 24px WCAG 2.5.8
+   floor, under the 32px A2 is still deciding on — and the same 6px comes straight back as a negative margin,
+   so it costs the row nothing. min-height:0 refuses the `button { min-height: 40px }` below 860px for the same
+   reason .msg .act does: a dense row of labels is not the primary control. */
+.tool-card .to-result {
+  min-height: 0; flex: 0 0 auto; white-space: nowrap;
+  margin: -6px 0 -6px auto; padding: 6px 0;
+  background: none; border: 0; border-radius: 0; color: var(--accent);
+  cursor: pointer; font: var(--t-1) var(--mono); text-decoration: none;
+}
+.tool-card .to-result:hover,
+.tool-card .to-result:focus-visible { text-decoration: underline; }
 .state-running { color: var(--warn); }
 .state-ok { color: var(--ok); }
 .state-error { color: var(--err); }
