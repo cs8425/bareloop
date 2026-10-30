@@ -100,6 +100,11 @@ select { font: inherit; }
 .ico { width: 15px; height: 15px; flex: 0 0 auto; }
 button.icon-btn,
 label.icon-btn { display: inline-grid; place-items: center; width: 30px; height: 28px; padding: 0; }
+/* #topbar is a flex row and a button is allowed to shrink. At 375px the session name - which is allowed to
+   grow - took the room, and #btn-inspect/#btn-settings were painted 19px wide out of the 30 they ask for,
+   with a 15px glyph inside and 2px of padding left on each side. #menu already says `flex: 0 0 auto` for
+   exactly this reason; this is the rest of the row. */
+#topbar > .icon-btn { flex: 0 0 auto; }
 button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #btn-compact { display: inline-flex; align-items: center; gap: 6px; }
 #jump { display: inline-flex; align-items: center; gap: 6px; }
@@ -349,9 +354,15 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; max-width: 640px; width: 92%; }
 dialog::backdrop { background: rgba(0,0,0,.55); }
 dialog form { display: flex; flex-direction: column; gap: 8px; }
-dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-1); color: var(--muted); }
+/* A settings form was the last thing in the UI set in `--t-1`, the rung whose job is secondary text: an
+   entry id and a field you are meant to type into were the same size. `--t-2` is "controls and their
+   labels", which is literally this. The fields below still say `font: inherit`, so this one line moves the
+   label and every control in the dialog together (D39). Measured cost - desktop dialog (640px) form
+   1264 -> 1303px, and on a phone +1.2% on top of the 16px floor, with zero wrapped labels and zero clipped
+   values, still zero at `:root` 20px: `state/r39-tap-targets-draft.md`. */
+dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-2); color: var(--muted); }
 dialog input, dialog select, dialog textarea { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; }
-dialog textarea[name=mcp] { font: var(--t-1) var(--mono); }
+dialog textarea[name=mcp] { font: var(--t-2) var(--mono); } /* same rung as its own label; mono because JSON */
 dialog .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 dialog .grid .check { grid-column: span 3; flex-direction: row; align-items: center; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
@@ -532,11 +543,37 @@ button,
   #input,
   .ghost-input,
   .file-btn,
-  textarea[name='mcp'] {
+  textarea[name='mcp'],
+  /* The same specificity wound a second time. `dialog input` at the top of the dialog block is (0,0,2) and
+     this list was (0,0,1), so every one of the 19 settings fields computed 12px on a phone - measured with
+     a live config loaded: 13 inputs, 2 textareas, 2 selects. The rule whose entire job is to stop iOS
+     zooming the page was being outvoted in the one place with the most fields. Specificity is answered with
+     specificity, and this block sits later in the sheet, so the tie goes to it. */
+  dialog input,
+  dialog select,
+  dialog textarea,
+  dialog textarea[name='mcp'] {
     font-size: var(--t-4);
   }
   textarea[name='mcp'] {
     font-family: var(--mono);
+  }
+  /* Nothing else in this block reaches a checkbox: `button { min-height: 40px }` is about buttons, and a
+     settings form is labels and boxes. The UA box is 13x13 and nothing makes it bigger - measured 13x13 at
+     font-size 12px, 16px and 30px with width/height auto - so this is not a side effect of some rung that
+     could be fixed elsewhere: 18px is chosen here, and `width`/`height` are honoured (22px asked, 22px
+     painted). It is the row that misses the floor: `dialog .grid .check` measured 19px tall at 375px and
+     only reached 24.4px at a 25% text scale - a floor has to be written, it does not scale into place. */
+  input[type='checkbox'] {
+    width: 18px;
+    height: 18px;
+    /* why: a checkbox is a flex item like any other and it shrinks - asked for 18px, painted 13x18 in
+       `#panel-body .tool`, because the text column beside it has a huge max-content and gave up only most
+       of the difference. A control keeps its own size; the text is what wraps. */
+    flex: 0 0 auto;
+  }
+  dialog .grid .check {
+    min-height: 32px;
   }
   button,
   .file-btn {
