@@ -99,7 +99,9 @@ async function showStats() {
   // Not the `.num` class: that right-aligns, which is what a column of figures wants and not what a
   // sentence of totals wants.
   const line = el('div');
-  line.style.fontSize = '13px';
+  // `var(--t-2)`, not `13px`: an inline px size is the one thing app.css's scale cannot reach, and this is
+  // the headline sentence of the panel - with a literal it stayed 13px at every text size the user picks.
+  line.style.fontSize = 'var(--t-2)';
   line.textContent = `${fmtN(t.prompt)} prompt · ${fmtN(t.cache)} cached (${t.prompt ? `${Math.round((100 * t.cache) / t.prompt)}%` : '—'}) · ${fmtN(uncached)} new · ${fmtN(t.completion)} out`;
   line.title =
     'prompt tokens include the cached ones — that is how the provider reports them, and adding the two would count them twice.\n' +

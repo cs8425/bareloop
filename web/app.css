@@ -1,4 +1,24 @@
 :root {
+  /* 100%, never a number. This one line is the difference between "the UI respects your browser's text
+     size" and "the UI ignores it": every size below is in rem, and a px root would freeze the whole
+     interface at one person's eyesight. (`font-size: 16px` here would look the same and do the opposite.) */
+  font-size: 100%;
+
+  /* Text scale: six rungs, one per job. The UI shipped with eleven sizes between 10px and 19px, six of
+     them within 1px of a neighbour - which nobody can see, but everybody pays for, because a size nobody
+     can name is a size nobody can fix on purpose.
+     Two rules hold:
+       - collapsing onto the scale never made a word smaller. The 10px and 10.5px labels moved *up* to 11;
+         nothing moved down. Growth costs overflow, which is checkable; shrink costs legibility, which is not.
+       - a rung is a job, not a preference. `--t-3` is the size you read at; everything else is measured
+         against it, so "make the panel text bigger" is a one-line change with a name. */
+  --t-0: 0.6875rem; /* 11px - micro: entry ids, badges, table chrome. Never a paragraph. */
+  --t-1: 0.75rem; /* 12px - secondary text: side panel, status bar, hints, tool cards */
+  --t-2: 0.8125rem; /* 13px - controls and their labels: buttons, cards, raw/monospace dumps */
+  --t-3: 0.875rem; /* 14px - the reading size: body and transcript. Everything else is smaller or is chrome. */
+  --t-4: 1rem; /* 16px - composer and session name; iOS refuses to focus a field below this */
+  --t-5: 1.1875rem; /* 19px - the attach glyph: a symbol, not a word */
+
   --bg: #12151a;
   --bg2: #171b22;
   --bg3: #1e232c;
@@ -16,7 +36,7 @@ html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans CJK TC", sans-serif;
+  font: var(--t-3)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans CJK TC", sans-serif;
   overflow: hidden; /* only #log scrolls: the composer and its stop/interrupt buttons stay on screen */
 }
 #app { display: grid; grid-template-columns: 210px 1fr; height: 100vh; overflow: hidden; }
@@ -29,8 +49,8 @@ body {
 #session-list li { padding: 7px 9px; border-radius: 6px; cursor: pointer; display: flex; gap: 6px; align-items: baseline; }
 #session-list li:hover { background: var(--bg3); }
 #session-list li.active { background: #223049; }
-#session-list li .sid { color: var(--muted); font: 11px var(--mono); }
-.side-foot { display: flex; align-items: center; gap: 7px; padding: 9px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+#session-list li .sid { color: var(--muted); font: var(--t-0) var(--mono); }
+.side-foot { display: flex; align-items: center; gap: 7px; padding: 9px; border-top: 1px solid var(--border); color: var(--muted); font-size: var(--t-1); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--err); }
@@ -39,12 +59,12 @@ body {
 #main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 #topbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg2); flex: 0 0 auto; }
 #topbar .spacer { flex: 1; }
-.ghost-input { background: transparent; border: 1px solid transparent; color: var(--fg); font-size: 15px; font-weight: 600; padding: 4px 6px; border-radius: 5px; min-width: 220px; }
+.ghost-input { background: transparent; border: 1px solid transparent; color: var(--fg); font-size: var(--t-4); font-weight: 600; padding: 4px 6px; border-radius: 5px; min-width: 220px; }
 .ghost-input:hover, .ghost-input:focus { border-color: var(--border); outline: none; }
 
 button {
   background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 11px; cursor: pointer; font-size: 13px;
+  padding: 5px 11px; cursor: pointer; font-size: var(--t-2);
 }
 button:hover { border-color: var(--accent); }
 button.primary { background: #234876; border-color: #35639f; }
@@ -58,6 +78,19 @@ label.file-btn:focus-visible { outline: 2px solid var(--accent); outline-offset:
   button,
   .file-btn { transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease; }
 }
+
+/* Form controls were the last place the UA still had a vote. An `input` arrives at `small` = 13.3333px:
+   not on the scale, blind to the browser's text size, and on iOS under the 16px floor that decides whether
+   focusing a field zooms the page (measured: every field outside a dialog - the tool filter, the tool
+   argument boxes, the request card's inputs - computed 13.3333px while the label next to it read 13px).
+   `#input` and `dialog input` each said `font: inherit` for themselves; this says it once for all of them.
+   Why the shorthand instead of `font-size`: inheriting only the size keeps the UA's own face and weight,
+   which is how one word ends up set in two fonts on one screen. Checkboxes and radios are unaffected -
+   their box comes from `appearance`, not from a glyph. Fields are still below 16px on a phone, which is
+   the next job (`state/todo-and-decisions.md`, A2): the composer got that floor last round, the rest did not. */
+input,
+textarea,
+select { font: inherit; }
 
 /* ------------------------------------------------------------------ icons
    One glyph language for the whole UI (web/js/icons.js, Lucide geometry on a 24x24 box). Two rules are
@@ -106,20 +139,43 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .msg .act:hover { color: var(--fg); background: var(--bg3); border-color: var(--border); }
 .msg .act[aria-label^='delete']:hover { color: var(--err); border-color: #7a3630; }
 .msg.raw > .body { border-left: 2px solid var(--accent); }
-.msg.raw pre.raw-text { margin: 0; font: 12.5px/1.55 var(--mono); color: #cbd5e3; white-space: pre-wrap; word-break: break-word; }
+.msg.raw pre.raw-text { margin: 0; font: var(--t-2)/1.55 var(--mono); color: #cbd5e3; white-space: pre-wrap; word-break: break-word; }
 /* A touchscreen has no hover to un-stick the row with, so hiding it there would hide the only way to
    copy, view raw or delete anything. */
 @media (hover: none) {
   .msg .act { opacity: 1; width: 34px; height: 32px; }
 }
 
-#statusbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 12px; flex: 0 0 auto; }
+#statusbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: var(--t-1); flex: 0 0 auto; }
 .badge { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; color: var(--muted); }
 .badge.running { color: #cfe3ff; border-color: #35639f; }
 .badge.compacting { color: #f0d6a0; border-color: #6d5626; }
-.ctxbar { position: relative; flex: 1; max-width: 340px; height: 16px; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+/* The bar is a text container with a number drawn in it, so its height is written in the text's own
+   units: `height: 16px` with `font-size: 11px` inside is a box that cannot grow with the number, and the
+   number is the reason the bar exists. 1.35em of the status bar's 12px is the 16px it always was. */
+.ctxbar { position: relative; flex: 1; max-width: 340px; height: 1.35em; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 #ctx-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2f6f4f, #a8853c 70%, #a34238 92%); transition: width .25s; }
-.ctxbar span { position: absolute; inset: 0; text-align: center; font-size: 11px; line-height: 15px; color: var(--fg); }
+/* Centred rather than pushed down by a fixed line-height, for the same reason the bar has an em height:
+   `line-height: 15px` is only centring while the text is 11px in a 16px box. line-height is then pinned to
+   1 because the inherited 1.5 would make the *line box* (16.5px) taller than the bar that shows it - which
+   is invisible today and a clipped number at a large text size. #ctx-fill shares this rule and has no text.
+   nowrap is not cosmetic: this bar is a one-line gauge, and on a 375px screen its text is 220px in a 179px
+   window ("5.3k / 41k (13%, trigger 70%) · summary"). It used to wrap and have the second line amputated by
+   overflow:hidden; with the centring above, wrapping would have sliced *both* lines. Ellipsis says "there is
+   more" in the browser's own hand instead of cutting a word in half and calling it a day. */
+.ctxbar span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  font-size: var(--t-0);
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
 
 /* The transcript is the only thing that grows: #log-wrap takes the remaining height and #log
    scrolls inside it. Without min-height: 0 a flex item refuses to shrink below its content, the
@@ -131,7 +187,7 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   border-color: var(--accent); box-shadow: 0 3px 12px rgba(0, 0, 0, .55); background: var(--bg3);
 }
 .msg { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; background: var(--bg2); }
-.msg > header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); } /* wrap, not overflow: two groups of numbers plus a long MCP tool name do not fit in 485px, and a header that pushes the transcript sideways is worse than a second line */
+.msg > header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: var(--t-0); color: var(--muted); } /* wrap, not overflow: two groups of numbers plus a long MCP tool name do not fit in 485px, and a header that pushes the transcript sideways is worse than a second line */
 .msg > header .who { color: var(--fg); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
 .msg > header .eid { font-family: var(--mono); white-space: nowrap; } /* a number broken across two lines reads as two numbers */
 .msg > .body { padding: 9px 12px; white-space: pre-wrap; word-break: break-word; }
@@ -150,18 +206,18 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .msg img.attach { max-width: 220px; max-height: 160px; border-radius: 6px; margin: 4px 6px 0 0; border: 1px solid var(--border); }
 /* An attachment with no bytes is a reference — a path or URI. Worth printing: "the tool wrote
    /tmp/shot.png" is information, a broken image icon is not. */
-.msg .attach-path { display: block; margin: 6px 0 0; padding: 4px 7px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font: 11.5px var(--mono); word-break: break-all; }
+.msg .attach-path { display: block; margin: 6px 0 0; padding: 4px 7px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font: var(--t-1) var(--mono); word-break: break-all; }
 .msg .part-text { white-space: pre-wrap; word-break: break-word; margin-top: 6px; }
 /* A failed generation is a failure, not an answer. */
 .msg.error > .body { border-left: 2px solid var(--err); padding-left: 8px; }
 .msg.error > header .who { color: var(--err); }
-.reasoning { margin: 0 12px 9px; border: 1px dashed var(--border); border-radius: 6px; padding: 6px 9px; color: var(--muted); white-space: pre-wrap; font-size: 12.5px; }
-.reasoning > summary { color: #9a8fc7; cursor: pointer; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.reasoning { margin: 0 12px 9px; border: 1px dashed var(--border); border-radius: 6px; padding: 6px 9px; color: var(--muted); white-space: pre-wrap; font-size: var(--t-2); }
+.reasoning > summary { color: #9a8fc7; cursor: pointer; font-size: var(--t-0); text-transform: uppercase; letter-spacing: .05em; }
 
 .tool-card { margin: 0 12px 10px; border: 1px solid var(--border); border-radius: 6px; background: #1a1f27; }
-.tool-card > summary { padding: 5px 9px; cursor: pointer; font: 12px var(--mono); display: flex; gap: 8px; align-items: center; }
+.tool-card > summary { padding: 5px 9px; cursor: pointer; font: var(--t-1) var(--mono); display: flex; gap: 8px; align-items: center; }
 .tool-card .lbl { color: var(--muted); }
-.tool-card pre { margin: 0; padding: 8px 10px; overflow-x: auto; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--border); max-height: 340px; overflow-y: auto; }
+.tool-card pre { margin: 0; padding: 8px 10px; overflow-x: auto; font: var(--t-1)/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; border-top: 1px solid var(--border); max-height: 340px; overflow-y: auto; }
 .tool-card .args { color: #9dc7ff; }
 .tool-card .result { color: #c8d3bf; }
 .tool-card .err { color: #f0a79f; }
@@ -169,8 +225,8 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .state-ok { color: var(--ok); }
 .state-error { color: var(--err); }
 
-.note { color: var(--muted); font-size: 12px; text-align: center; margin: 6px 0; }
-.compact-banner { border: 1px solid #4a3866; background: #1d1826; border-radius: 8px; padding: 7px 11px; margin-bottom: 10px; font-size: 12.5px; }
+.note { color: var(--muted); font-size: var(--t-1); text-align: center; margin: 6px 0; }
+.compact-banner { border: 1px solid #4a3866; background: #1d1826; border-radius: 8px; padding: 7px 11px; margin-bottom: 10px; font-size: var(--t-2); }
 .compact-banner b { color: #c8aef0; }
 /* A `<pre>` breaks only at newlines, and both kinds of pre-formatted text a message can hold — a tool's
    output and a compaction summary — are full of lines far wider than a phone (measured: 2 250 px of
@@ -181,13 +237,13 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   overflow-wrap: anywhere;
 }
 
-#pending { border-top: 1px solid var(--border); padding: 5px 12px; font-size: 12px; color: var(--muted); background: #14181f; flex: 0 0 auto; }
+#pending { border-top: 1px solid var(--border); padding: 5px 12px; font-size: var(--t-1); color: var(--muted); background: #14181f; flex: 0 0 auto; }
 #pending ul { margin: 3px 0 0; padding-left: 18px; }
 
 #requests { flex: 0 0 auto; max-height: 34vh; overflow-y: auto; }
 #requests:empty { display: none; }
 .card { border: 1px solid #6d5626; background: #1f1a10; border-radius: 8px; margin: 8px 12px; padding: 9px 11px; }
-.card h4 { margin: 0 0 5px; font-size: 13px; }
+.card h4 { margin: 0 0 5px; font-size: var(--t-2); }
 .card .row { display: flex; gap: 8px; align-items: center; margin-top: 7px; flex-wrap: wrap; }
 .card input[type=text], .card input[type=number] { background: var(--bg3); border: 1px solid var(--border); color: var(--fg); border-radius: 5px; padding: 4px 7px; }
 
@@ -196,13 +252,16 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #input { flex: 1; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; resize: vertical; font: inherit; }
 #input:focus { outline: none; border-color: var(--accent); }
 .composer-buttons { display: flex; flex-direction: column; gap: 5px; }
-.file-btn { cursor: pointer; color: var(--muted); font-size: 19px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 7px; }
+.file-btn { cursor: pointer; color: var(--muted); font-size: var(--t-5); padding: 4px 6px; border: 1px solid var(--border); border-radius: 7px; }
 .file-btn:hover { color: var(--fg); border-color: var(--accent); }
 #attachments { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 #attachments:empty { display: none; }
 #attachments .att { position: relative; border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
 #attachments img { max-height: 54px; display: block; border-radius: 4px; }
-#attachments .x { position: absolute; top: -6px; right: -6px; background: var(--err); color: #fff; border-radius: 50%; width: 17px; height: 17px; line-height: 16px; text-align: center; font-size: 11px; cursor: pointer; }
+/* The × is centred, not pushed down by `line-height: 16px` in an 17px circle: that only centres while the
+   glyph is 11px, and it is the one thing that has to stay findable when the text around it grows. The
+   circle stays 17px because it hangs off a thumbnail, not off a line of text. */
+#attachments .x { position: absolute; top: -6px; right: -6px; background: var(--err); color: #fff; border-radius: 50%; width: 17px; height: 17px; display: grid; place-items: center; text-align: center; font-size: var(--t-0); cursor: pointer; }
 
 /* side panel.
    The panel is a column and its *body* is the scroller, and that split is the whole fix for "I have to
@@ -220,7 +279,7 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #panel.hidden, #pending.hidden, .hidden { display: none; }
 #panel-body {
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: var(--t-1);
   flex: 1 1 auto; /* fills the panel and owns the scrolling, while the header with the ✕ stays put */
   min-height: 0;
   overflow-y: auto;
@@ -229,10 +288,15 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #panel-body td, #panel-body th { border-bottom: 1px solid var(--border); padding: 3px 5px; text-align: left; vertical-align: top; }
 #panel-body .num { text-align: right; font-family: var(--mono); }
 #panel-body .head { color: var(--muted); max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#panel-body pre { white-space: pre-wrap; word-break: break-word; font: 11.5px var(--mono); }
+#panel-body pre { white-space: pre-wrap; word-break: break-word; font: var(--t-1) var(--mono); }
 
 /* markdown */
 .md h1, .md h2, .md h3 { line-height: 1.3; margin: .7em 0 .35em; }
+/* The one deliberate exception to the scale, and it is the markdown island: headings and inline code are a
+   *ratio* to the prose they sit in, not a rung. `.md` renders at 14px in the transcript and 12px inside a
+   tooltip, and an h3 that is 1.08em is readable in both while a flat 16px would shout in the tooltip. The
+   sizes that fall out (12.88 / 15.12 / 16.38 / 16.8) are therefore between rungs on purpose - do not "fix"
+   them onto the ladder without checking the 12px case, which is where they are smallest. */
 .md h1 { font-size: 1.35em } .md h2 { font-size: 1.2em } .md h3 { font-size: 1.08em }
 .md p { margin: .45em 0; }
 .md code { background: #0e1116; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font: .92em var(--mono); }
@@ -249,13 +313,13 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; max-width: 640px; width: 92%; }
 dialog::backdrop { background: rgba(0,0,0,.55); }
 dialog form { display: flex; flex-direction: column; gap: 8px; }
-dialog label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-1); color: var(--muted); }
 dialog input, dialog select, dialog textarea { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; }
-dialog textarea[name=mcp] { font: 12px var(--mono); }
+dialog textarea[name=mcp] { font: var(--t-1) var(--mono); }
 dialog .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 dialog .grid .check { grid-column: span 3; flex-direction: row; align-items: center; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
-dialog .hint { color: var(--muted); font-size: 11.5px; margin: 0; }
+dialog .hint { color: var(--muted); font-size: var(--t-1); margin: 0; }
 dialog p { margin: 0 0 4px; }
 /* confirm/prompt dialogs are small: they should not inherit the settings dialog's width. */
 dialog.modal { max-width: 420px; }
@@ -281,7 +345,7 @@ dialog.modal { max-width: 420px; }
   border-left: 3px solid var(--muted);
   border-radius: 8px;
   padding: 7px 11px;
-  font-size: 12.5px;
+  font-size: var(--t-2);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
   animation: toast-in 0.16s ease-out;
 }
@@ -366,11 +430,7 @@ button,
   #session-name {
     flex: 1 1 auto;
     min-width: 0;
-    font-size: 14px;
-  }
-  #status {
-    font-size: 11px;
-    flex: 0 0 auto;
+    font-size: var(--t-4);
   }
   #statusbar {
     flex-wrap: wrap;
@@ -425,20 +485,21 @@ button,
     height: 34px;
     opacity: 1;
   }
-  /* 16px or iOS Safari zooms the whole page into the field and the layout breaks. */
+  /* 16px or iOS Safari zooms the whole page into the field and the layout breaks.
+     `#input` is spelled out because it was not covered: `#input { font: inherit }` higher up is an id
+     selector and outranks the `textarea` type selector below it, so the rule whose entire job is to stop
+     the zoom was losing to it at the one field people actually type in - measured 14px at 375px wide.
+     `.mono` and `#new-cfg` were dropped from this list: no element in index.html has ever matched them. */
   input,
   select,
   textarea,
+  #input,
   .ghost-input,
-  .mono,
   .file-btn,
-  #new-cfg,
   textarea[name='mcp'] {
-    font-size: 16px;
+    font-size: var(--t-4);
   }
-  .mono,
-  textarea[name='mcp'],
-  #new-cfg {
+  textarea[name='mcp'] {
     font-family: var(--mono);
   }
   button,
@@ -473,7 +534,7 @@ button,
 #panel-body .lbl {
   margin: 8px 0 2px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--t-0);
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -495,7 +556,7 @@ button,
 
 #panel-body .dim {
   color: var(--muted);
-  font: 11px var(--mono);
+  font: var(--t-0) var(--mono);
 }
 
 /* ------------------------------------------------------------------ tool catalogue
@@ -532,7 +593,7 @@ button,
 }
 #panel-body .cost {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-0);
 }
 #panel-body .pendbar {
   display: flex;
@@ -545,7 +606,7 @@ button,
   border-radius: 6px;
   background: #1d1a12;
   color: #f0d6a0;
-  font-size: 11.5px;
+  font-size: var(--t-1);
 }
 #panel-body .tbar {
   display: flex;
@@ -562,7 +623,7 @@ button,
   color: var(--fg);
   border-radius: 5px;
   padding: 4px 7px;
-  font-size: 11.5px;
+  font-size: var(--t-1);
 }
 #panel-body .tcount {
   margin-left: auto;
@@ -573,7 +634,7 @@ button,
   align-items: center;
   gap: 4px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--t-0);
   white-space: nowrap;
 }
 
@@ -596,13 +657,13 @@ button,
   min-width: 0;
 }
 #panel-body .srv-name > div {
-  font-size: 10.5px;
+  font-size: var(--t-0);
   overflow-wrap: anywhere;
 }
 #panel-body .srv-note {
   padding: 4px 8px;
   color: #f0d6a0;
-  font-size: 10.5px;
+  font-size: var(--t-0);
   border-bottom: 1px solid var(--border);
 }
 #panel-body .srv.folded .srv-tools {
@@ -624,7 +685,7 @@ button,
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--t-0);
   padding: 1px 5px;
   min-height: 0;
   cursor: pointer;
@@ -637,7 +698,7 @@ button,
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
+  font-size: var(--t-0);
 }
 #panel-body .pfx input {
   width: 72px;
@@ -646,7 +707,7 @@ button,
   color: var(--fg);
   border-radius: 4px;
   padding: 2px 4px;
-  font: 11px var(--mono);
+  font: var(--t-0) var(--mono);
 }
 #panel-body .srv-off {
   margin-left: auto;
@@ -687,15 +748,15 @@ button,
   flex-wrap: wrap;
 }
 #panel-body .tname code {
-  font: 12px var(--mono);
+  font: var(--t-1) var(--mono);
   color: var(--fg);
   overflow-wrap: anywhere;
 }
 #panel-body .ttitle {
-  font-size: 11.5px;
+  font-size: var(--t-1);
 }
 #panel-body .tdesc {
-  font-size: 11px;
+  font-size: var(--t-0);
   color: var(--muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -715,7 +776,7 @@ button,
 }
 #panel-body .tok {
   margin-left: auto;
-  font: 10.5px var(--mono);
+  font: var(--t-0) var(--mono);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -723,7 +784,7 @@ button,
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: var(--t-0);
   color: var(--muted);
   max-width: 100%;
 }
@@ -742,10 +803,10 @@ button,
   margin-top: 4px;
 }
 #panel-body .params table {
-  font-size: 11px;
+  font-size: var(--t-0);
 }
 #panel-body .tcode {
-  font: 11px var(--mono);
+  font: var(--t-0) var(--mono);
   white-space: nowrap;
 }
 #panel-body .link {
@@ -755,7 +816,7 @@ button,
   cursor: pointer;
   padding: 0;
   min-height: 0;
-  font-size: 10.5px;
+  font-size: var(--t-0);
   align-self: flex-start;
 }
 #panel-body .tfine {
@@ -763,7 +824,7 @@ button,
   flex-direction: column;
   gap: 3px;
   margin-top: 8px;
-  font-size: 10.5px;
+  font-size: var(--t-0);
   line-height: 1.45;
 }
 /* `.dim` is monospace in the inspect panel, where it prints entry ids. The catalogue uses it for
