@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { api, get } from './api.js';
 import { fail, note, toast } from './ui.js';
 import { refresh, loadSessions } from './session.js';
-import { resolveHz, describeHz } from './scheduler.js';
+import { resolveHz, describeHz, AUTO, AUTO_INITIAL_HZ } from './scheduler.js';
 import { resolveEnterMode, describeEnterMode, syncComposer } from './composer.js';
 
 // fld reads a control by name: form.elements has properties like "action" and "name" that a plain
@@ -44,7 +44,14 @@ export async function openSettings() {
   // The redraw rate is not config — it is this browser's preference — but it lives in this dialog
   // because it is a knob people only reach for once and then forget. Show what is actually in force
   // (URL wins over storage), so the row never lies about the current tab.
-  fld(f, 'renderHz').value = String(resolveHz());
+  const hzNow = resolveHz();
+  const autoNow = hzNow === AUTO;
+  fld(f, 'renderHzAuto').checked = autoNow;
+  // In auto the number box is a reading, not an input: it shows the rung the gate is on right now, and only
+  // a live stream can answer that. Nothing streaming means no frame has been timed yet, which is exactly
+  // what AUTO_INITIAL_HZ means out loud.
+  fld(f, 'renderHz').value = String(autoNow ? liveAutoHz() : hzNow);
+  fld(f, 'renderHz').disabled = autoNow;
   // Same trick as the redraw rate: show what is in force (a ?enter= in the address bar wins), and name
   // the mode the user is reading, not just the word "auto".
   fld(f, 'enterSends').value = resolveEnterMode();
@@ -139,17 +146,38 @@ export async function saveSettings() {
   refresh().catch(() => {});
 }
 
+// liveAutoHz reports the rung auto has settled on. It asks a stream rather than a setting because the rung
+// is a property of the machine right now, not of anything stored: with no stream drawing there is nothing
+// to read, and the honest answer is the rung auto starts from.
+function liveAutoHz() {
+  for (const s of state.streams.values()) {
+    const a = s.drawer?.gate.auto;
+    if (a) return a.target;
+  }
+  return AUTO_INITIAL_HZ;
+}
+
 // applyRenderHz stores the redraw rate and pushes it into any stream already on screen. It deliberately
 // does not go into the PATCH body: how fast this laptop can redraw markdown is not a property of the
 // session, and writing it there would make one slow machine the session's problem.
 function applyRenderHz(f) {
-  const raw = fld(f, 'renderHz').value;
+  const auto = fld(f, 'renderHzAuto').checked;
+  const raw = auto ? AUTO : fld(f, 'renderHz').value.trim();
+  const hz = auto ? AUTO : Number(raw);
+  // Why refuse instead of clamp: a box holding `12o` or `-5` means something was typed that this setting
+  // cannot mean, and an empty box would become `0` by `Number('')` — a rate of "draw nothing until the
+  // reply is over", which is the opposite of what an empty field suggests. Storing a corrected number
+  // silently would leave the setting disagreeing with the digits on screen, and the next person to open
+  // this dialog would read that lie back as their own choice.
+  if (!auto && (raw === '' || !Number.isFinite(hz) || hz < 0)) {
+    toast('redraw rate: a number of Hz (0 or more), or tick auto');
+    return;
+  }
   try {
-    localStorage.setItem('bareloop.renderHz', raw);
+    localStorage.setItem('bareloop.renderHz', String(raw));
   } catch {
     // A profile that refuses localStorage still gets the choice for this tab via setHz below.
   }
-  const hz = Number(raw);
   for (const s of state.streams.values()) s.drawer?.gate.setHz(hz);
   // A toast, not a note: `note` appends into #log, and the refresh() that saveSettings just ran rebuilds
   // that log — a confirmation eaten by its own save is no confirmation. This one also has to be readable
@@ -198,6 +226,16 @@ export function wireSettings() {
   };
   $('#btn-settings').onclick = openSettings;
   $('#settings-save').onclick = save;
+  // Ticking auto changes the row it belongs to: the number box stops being an input and becomes a reading
+  // of what auto is on. Wiring only the open path would leave someone who just ticked it unable to read the
+  // rung, and unable to type a rate again without closing and reopening the dialog.
+  fld($('#settings-form'), 'renderHzAuto').onchange = (e) => {
+    const box = fld($('#settings-form'), 'renderHz');
+    box.disabled = e.target.checked;
+    // Why the reading goes in on the way into auto and not on the way out: leaving the last number there
+    // when auto is unticked hands the person back the rate the machine was actually paying.
+    if (e.target.checked) box.value = String(liveAutoHz());
+  };
   $('#settings-form').addEventListener('submit', (e) => {
     e.preventDefault();
     save();

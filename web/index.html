@@ -194,15 +194,10 @@
           <textarea name="mcp" rows="8" spellcheck="false"></textarea>
         </label>
         <label>
-          redraw rate while a reply streams
-          <select name="renderHz">
-            <option value="20">20 Hz — a frame every 50 ms (default)</option>
-            <option value="10">10 Hz — every 100 ms</option>
-            <option value="5">5 Hz — every 200 ms</option>
-            <option value="1">1 Hz — once a second</option>
-            <option value="0">0 — not until the reply is over</option>
-          </select>
+          redraw rate while a reply streams (Hz)
+          <input name="renderHz" type="number" min="0" max="120" step="1" />
         </label>
+        <label class="check"><input name="renderHzAuto" type="checkbox" /> let it step down by itself (auto)</label>
         <p class="hint">
           This one belongs to <em>this browser</em>: it says how much of your machine a growing reply may
           spend redrawing, so it is stored locally and never sent to the server. Text is never lost by
@@ -211,7 +206,13 @@
           than 1 Hz on a machine that cannot afford a parse a second; <code>?mode=plain</code> is the
           readable version of that bargain (text as it arrives, markdown at the end). A <code>?hz=</code>
           in the address bar wins over this row until the next load, and the streaming message prints the
-          rate it is actually managing in its own header.
+          rate it is actually managing in its own header. <em>auto</em> starts at 20 Hz and steps one rung at
+          a time — 10, 5, 1, then not at all — after three frames in a row cost more than 60% of what the
+          current rate promises, and back up after twenty cheap ones. It is judged on the whole delta,
+          follow-scroll included, which is the only way to catch the cost that lands after the markdown is
+          drawn. What stepping down cannot do is make one frame cheaper: on a long transcript the money goes
+          to re-laying-out the document, so <em>auto</em> keeps the page from falling over rather than making
+          it fast.
         </p>
         <label>
           what the Enter key does

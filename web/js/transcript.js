@@ -392,7 +392,7 @@ function fillBody(node, body, e) {
 // the 1 076px column this transcript measured at, and it is the only test that catches a result that is one
 // long line: wrapping adds no newlines, so counting lines alone would print a 200KB blob across two screens.
 // Both are read off the string, never off layout — a layout read per entry in the mount path is 9.6ms a time
-// (see the 2026-10-28 note in state/todo-and-decisions.md).
+// (see the 2026-10-28 note in _state/todo-and-decisions.md).
 const FOLD_LINES = 16;
 const FOLD_CHARS = 2000;
 
@@ -429,7 +429,7 @@ function structuredBlock(raw) {
   fold.appendChild(pre);
   // Nothing about the bytes is computed until the first open. The transcript is mounted entry by entry,
   // and a server that answers every call with a 100 KB JSON would otherwise pay for a pretty-print
-  // nobody clicked — the mount path is the one place this project has measured (state/render-throttle-plan.md).
+  // nobody clicked — the mount path is the one place this project has measured (_state/render-throttle-plan.md).
   // `toggle` fires on close too, hence the open test and the `textContent` guard.
   fold.addEventListener('toggle', () => {
     if (!fold.open || pre.textContent) return;
@@ -624,7 +624,13 @@ function streamStart(streamId) {
     },
     onPaint: (gate) => {
       const hz = gate.measuredHz;
-      tag.textContent = hz ? `streaming · ${hz} Hz` : 'streaming';
+      const a = gate.auto;
+      // Why the extra words only appear after a step: a stream that never had to give anything up should
+      // read exactly like a stream with a pinned rate. The words are for the person whose page is visibly
+      // choosing, and they name what it chose.
+      tag.textContent = hz
+        ? `streaming · ${hz} Hz${a && a.target !== a.initial ? ` · auto ${a.target} Hz` : ''}`
+        : 'streaming';
     },
   });
   // At 0 on the ladder nothing is drawn until the reply is over, and a bubble that shows nothing needs
@@ -675,6 +681,11 @@ export function streamDelta(d) {
     streamFinish(s);
   }
   scrollDown();
+  // The adaptive ceiling wants the cost of this delta, and the only honest place to read it is after the
+  // follow-scroll above: `render()` returns while the tree is still dirty, and the first layout read after
+  // it is the expensive one (measured 57.2 ms for a drawn delta on a 66-entry transcript, against the
+  // 0.26-0.38 ms the render closure reports — `_state/render-throttle-plan.md` §U3).
+  s.drawer.gate.settled();
 }
 
 // flushStreams repaints every live stream, and is what a tab coming back to the foreground needs: while
