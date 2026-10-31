@@ -181,6 +181,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 		s.reg.connect(cctx, s.Config().MCP)
 		s.emitState()
 	}()
+	s.logStructuredMode(cfg)
 	return s, nil
 }
 
@@ -273,10 +274,57 @@ func (s *Session) visibleTools() []llm.Tool {
 	return s.reg.Tools()
 }
 
+// cfgOptions is the assembler input: the asm block, plus the structuredContent modes — which live
+// with the servers and the session, not in the asm block (see asm.Options.Structured).
 func (s *Session) cfgOptions() asm.Options {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cfg.ASM
+	o := s.cfg.ASM
+	t := structuredTargets(s.cfg)
+	o.Structured = &t
+	return o
+}
+
+// structuredTargets resolves how every server's structuredContent is sent: the server's own value
+// wins, then the session default, then asm.StructuredAuto.
+//
+// A value that cannot be parsed is treated as unset rather than as an error, because this runs on
+// every payload: a hand-edited data/<id>/config.json must not be able to stop a session from
+// answering. The live path cannot store one — Create and UpdateConfig both reject it.
+func structuredTargets(cfg Config) asm.StructuredTargets {
+	t := asm.StructuredTargets{Default: asm.StructuredAuto}
+	if m, err := asm.ParseStructuredMode(cfg.StructuredContent); err == nil {
+		t.Default = m
+	}
+	for _, mc := range cfg.MCP {
+		if mc.StructuredContent == "" {
+			continue // no override: this server follows the session
+		}
+		if m, err := asm.ParseStructuredMode(mc.StructuredContent); err == nil {
+			if t.ByServer == nil {
+				t.ByServer = map[string]asm.StructuredMode{}
+			}
+			t.ByServer[mc.Name] = m
+		}
+	}
+	return t
+}
+
+// logStructuredMode says the one thing the setting itself cannot show: the word is applied while
+// assembling, so it rewrites the tool results a session already has. A session with history whose
+// turns ran under a different word loses its KV prefix on the next request — worth one line at the
+// two moments anyone learns about it, which are boot and the patch that changed it.
+func (s *Session) logStructuredMode(cfg Config) {
+	def := structuredTargets(cfg).Default
+	if def != asm.StructuredAuto {
+		s.logf("structuredContent = %s: every tool result in the history is folded with it, so a session whose turns ran under another word re-prefills on the next request", def)
+	}
+	for _, mc := range cfg.MCP {
+		mode, err := asm.ParseStructuredMode(mc.StructuredContent)
+		if err == nil && mode != def {
+			s.logf(`structuredContent for MCP server %q = %s, overriding %q: its results are refolded the same way`, mc.Name, mode, def)
+		}
+	}
 }
 
 // pendingIDs lists user messages that are on the path but were not part of a payload we
@@ -572,6 +620,17 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 			return err
 		}
 	}
+	// Every structuredContent mode in the body is checked here. asm.ParseStructuredMode is lenient
+	// once a session is running (see structuredTargets), which is exactly why an unknown word has to
+	// be refused now: a typo that is stored becomes an option that quietly does nothing.
+	if _, err := asm.ParseStructuredMode(patch.StructuredContent); err != nil {
+		return err
+	}
+	for _, mc := range patch.MCP {
+		if _, err := asm.ParseStructuredMode(mc.StructuredContent); err != nil {
+			return fmt.Errorf("mcp server %q: %w", mc.Name, err)
+		}
+	}
 	s.mu.Lock()
 	if s.phase != phaseIdle {
 		s.mu.Unlock()
@@ -632,6 +691,11 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if !patch.NotifyTools {
 		patch.NotifyTools = old.NotifyTools
 	}
+	// Same rule as the fields above: an absent mode is not a change. It cannot be turned back to
+	// "unset" over the API either — send "auto", which is what unset means.
+	if patch.StructuredContent == "" {
+		patch.StructuredContent = old.StructuredContent
+	}
 	if patch.MCP == nil {
 		// An empty list is a change ("remove every server"); an absent key is not.
 		patch.MCP = old.MCP
@@ -688,6 +752,9 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		return err
 	}
 	s.emitState()
+	if patch.StructuredContent != "" || len(patch.MCP) > 0 {
+		s.logStructuredMode(patch)
+	}
 	return nil
 }
 

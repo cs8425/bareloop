@@ -574,7 +574,7 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 		res, ref, err := s.reg.call(ctx, tc.Name, orEmpty(tc.Args), onEvent)
 
 		ms := time.Since(start).Milliseconds()
-		text, parts := toolOutput(res)
+		text, parts, structured := toolOutput(res)
 		isErr := res != nil && res.IsError
 		if err != nil {
 			isErr = true
@@ -600,11 +600,12 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 			Tool:       tc.Name,
 			// A failed call never reports which server it was going to call, so fall back to what the
 			// registry had assigned: a dead stdio server still owns its own error.
-			Server:  refOr(ref.Server, run.Server),
-			Content: text,
-			Parts:   parts,
-			IsError: isErr,
-			Ms:      ms,
+			Server:     refOr(ref.Server, run.Server),
+			Content:    text,
+			Parts:      parts,
+			Structured: structured,
+			IsError:    isErr,
+			Ms:         ms,
 		})
 		if aerr != nil {
 			s.emit(Event{Type: EvtError, Info: "commit tool result: " + aerr.Error()})
@@ -616,6 +617,7 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 			run.Error = text
 		}
 		run.Result = text
+		run.Structured = structured
 		run.Images = countImages(parts)
 		run.Ms = ms
 		s.emit(Event{Type: EvtToolResult, Run: run})
@@ -647,10 +649,11 @@ func refOr(xs ...string) string {
 	return "unnamed"
 }
 
-// toolOutput flattens an MCP call result into the text plus image parts we store.
-func toolOutput(res *mcp.CallResult) (string, []ir.Part) {
+// toolOutput flattens an MCP call result into the three things we store: the text, the image
+// parts, and the structuredContent exactly as it arrived.
+func toolOutput(res *mcp.CallResult) (string, []ir.Part, json.RawMessage) {
 	if res == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	var parts []ir.Part
 	for _, c := range res.Content {
@@ -690,13 +693,12 @@ func toolOutput(res *mcp.CallResult) (string, []ir.Part) {
 		}
 	}
 	text := res.Text()
-	if len(res.Structured) > 0 && !strings.Contains(text, string(res.Structured)) {
-		if text != "" {
-			text += "\n"
-		}
-		text += string(res.Structured)
-	}
-	return text, parts
+	// The JSON is handed back untouched instead of appended to the text: what the model sees is
+	// composed per session and per server by the assembler (asm.StructuredMode). Folding it in here
+	// would either store the same bytes twice or freeze a decision the user is meant to be able to
+	// change — and a tool result whose JSON was pasted into its own text is indistinguishable from
+	// one the server really did send that way.
+	return text, parts, res.Structured
 }
 
 // orEmpty normalises missing tool arguments to an empty JSON object: a provider that streamed

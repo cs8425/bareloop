@@ -164,6 +164,7 @@ default:
 | `compact.summaryMode` | absent = `prefix-stable` (one summary request; falls back to the serial chain when the region cannot fit one request) | `"iterative"` always uses the chain; `"map-reduce"` is reserved and currently runs the chain |
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
 | `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
+| `structuredContent` | absent = **`auto`** (fold the tool's JSON in, but never twice) | `fallback` / `always` / `drop`, per server in `mcp[]` ([the four words](#structured-content-in-four-words)) |
 
 `llm.nCtx` is a ceiling you set, not a fact about the server: the number used is the smaller of it and
 what the server reports, and `status.nCtx` / `nCtxSource` tell you which won. Leave it unset and the
@@ -181,6 +182,7 @@ Three things are configured **per session**, all in `mcp[]`:
 | `disabled` | `false` | do not connect to this server at all (this used to be a dead key; the `mcp-` trick in a config is no longer needed) |
 | `disabledTools` | none | hide these tools from the model; matches the **raw** name (`fs_list`) exactly or as a `path.Match` glob (`fs_*`, `*`), case sensitive |
 | `toolPrefix` | none | namespace in front of this server's tools: `"vr"` ⇒ `vr_fs_list` (one underscore) |
+| `structuredContent` | the session's own `structuredContent` | what this server's `structuredContent` is worth to the model: [one of four words](#structured-content-in-four-words) |
 
 Two tools that want the same name are a collision, and the **later** one moves: it is published as
 `<server>_<tool>`, never as `fs_read_2`, because a name you cannot read is a name you cannot use. It is
@@ -208,6 +210,34 @@ means hunting for a name in a server's source first.
 Changes apply at the **next run**: a run in flight keeps the tool array it started with, because switching
 mid-run would break the prefix cache and strand a `tool_call` whose tool vanished. `pendingChanges` says
 when something is waiting; `toolsPending` in the status says the same thing in one bit.
+
+### Structured content, in four words
+
+A tool result can carry two channels: `content` (text, images) and `structuredContent` (JSON validated
+against the tool's `outputSchema`). Both are stored in the log, **apart**: the entry's `content` holds the
+text and its `structuredContent` field holds the raw JSON, exactly as it arrived. Nothing is deleted and
+nothing is pasted twice, which is what lets the mode be changed afterwards — old entries re-decide on every
+payload because assembling never rewrites the entry it read.
+
+What the model is sent is one setting per session (`structuredContent`, next to `asm` rather than inside it,
+because the per-server words live in `mcp[]`), overridable per server:
+
+| word | the model sees | use it when |
+|---|---|---|
+| `auto` *(default)* | the text, plus the JSON **unless** the text already contains it | most servers. A server that already pretty-prints the JSON into its text block is not charged for it twice |
+| `fallback` | the text, and the JSON **only** where there is no text | a server whose text is the prose answer and whose JSON is the same object for a machine |
+| `always` | the text plus the JSON, every time | the JSON has keys the text leaves out, or the text is one status line |
+| `drop` | the text only | a large `outputSchema` you never want tokenised: the history, the payload dump and the replay all lose it, the log does not |
+
+The words are checked where they are written — a typo is refused at create and at `PATCH`, it does not
+quietly become `auto`. `GET .../payload` shows which mode won for the next request.
+
+Four words are a cache decision as much as a token decision. The fold happens at **assembly**, so the mode is
+not recorded in the entry and changing it rewrites the text of every tool result the session already has: the
+KV prefix is gone from the first one, and the next request computes the whole history again. The daemon says
+so when it starts, and `inspect`/`payload` show the truth before the request goes out. A mode switched and
+then switched back does not hand the prefix back, which is why the settings dialog offers one dropdown rather
+than a per-turn choice.
 
 ### Compaction, in short
 

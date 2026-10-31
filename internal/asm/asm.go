@@ -102,7 +102,17 @@ type Options struct {
 	// the model cannot see (a text-only llama.cpp has no projector loaded): the base64 then costs
 	// neither the request nor the context, and the message says the image is there instead.
 	SendImages *bool `json:"sendImages,omitempty"`
+	// Structured decides what a tool's structuredContent does on the way to the model.
+	// It is injected by the session from its own config (the session default plus the per-server
+	// values in mcp[]), and it is deliberately not a key of the asm block: the servers live in the
+	// mcp list, and Assemble must stay a pure function of (Payload, Options) like everything else here.
+	// It is a pointer so that Options stays comparable — manager.Create still asks whether a config
+	// carried an asm block at all by comparing against the zero Options — and nil simply means auto.
+	Structured *StructuredTargets `json:"-"`
 }
+
+// structuredFor is the mode of the server that produced an entry ("" = the session default).
+func (o Options) structuredFor(server string) StructuredMode { return o.Structured.For(server) }
 
 // SendReasoningOn is the effective value of SendReasoning: on unless explicitly disabled.
 func (o Options) SendReasoningOn() bool { return o.SendReasoning == nil || *o.SendReasoning }
@@ -166,7 +176,9 @@ func messageFor(e *ir.Entry, opts Options) Message {
 	m := Message{Role: e.Role}
 	switch e.Role {
 	case "tool":
-		m.Content = content(e, opts.SendImagesOn())
+		// The structuredContent fold happens here and nowhere else: it is a tool-result field, so an
+		// entry of another role that carries one is left alone rather than guessed at.
+		m.Content = content(foldStructured(e, opts.structuredFor(e.Server)), opts.SendImagesOn())
 		m.ToolCallID = e.ToolCallID
 		if !opts.OmitToolResultName && e.Server != "" {
 			m.Name = e.Server
@@ -401,6 +413,13 @@ func Estimate(e *ir.Entry) int {
 		} else {
 			n += len(p.Text) / 4
 		}
+	}
+	// A tool's structuredContent is counted whether or not this session's mode sends it: the
+	// estimate is a ceiling on what the entry can cost, and under-counting a 200 KB JSON is how a
+	// request reaches the pre-send guard instead of the compaction trigger that would have made
+	// room for it. Over-counting under "drop" only makes the unsent tail look bigger than it is.
+	if len(e.Structured) > 0 {
+		n += len(e.Structured) / 4
 	}
 	if n == 0 {
 		n = 1

@@ -233,6 +233,27 @@ func (s *stub) callTool(params map[string]any, ask func(string, any) (json.RawMe
 		}
 		time.Sleep(d)
 		return must(text(fmt.Sprintf("slept %s", d))), nil
+	case "structured":
+		// The four shapes one of these answers can take, so the four structuredContent modes can be
+		// tried against a real MCP server instead of only in a unit test — what each one costs is the
+		// question the modes exist to answer.
+		payload := map[string]any{"answer": str("mode", "unique"), "n": 42}
+		flat, _ := json.Marshal(payload) // map keys are sorted, so these bytes are reproducible
+		pretty, _ := json.MarshalIndent(payload, "", "  ")
+		out := map[string]any{"structuredContent": json.RawMessage(flat)}
+		switch str("mode", "unique") {
+		case "dup": // the text block holds exactly those bytes: "auto" must not repeat them
+			out["content"] = []any{map[string]any{"type": "text", "text": string(flat)}}
+		case "pretty": // same data, different bytes: no substring test can tell they are equal
+			out["content"] = []any{map[string]any{"type": "text", "text": string(pretty)}}
+		case "only": // no text block at all: "fallback" exists for this shape
+		default: // "unique": the text says something the JSON does not
+			out["content"] = []any{map[string]any{"type": "text", "text": "structured answer attached"}}
+		}
+		if rt := resultType(s.version); rt != "" {
+			out["resultType"] = rt
+		}
+		return must(out), nil
 	case "fail":
 		out := map[string]any{
 			"content": []any{map[string]any{"type": "text", "text": "this tool always fails"}},
@@ -396,6 +417,9 @@ func tools() []map[string]any {
 			"inputSchema": schema(map[string]any{"text": map[string]any{"type": "string", "x-mcp-header": "text"}})},
 		{"name": "need_input", "description": "Ask the user a question before answering (MRTR / elicitation).",
 			"inputSchema": schema(map[string]any{"text": str})},
+		{"name": "structured", "description": "Answer with structuredContent in shape mode: dup (text holds exactly those bytes), unique (text says something else), pretty (text is the same data pretty-printed), only (no text block).",
+			"inputSchema":  schema(map[string]any{"mode": str}, "mode"),
+			"outputSchema": schema(map[string]any{"answer": str, "n": num}, "answer", "n")},
 	}
 }
 

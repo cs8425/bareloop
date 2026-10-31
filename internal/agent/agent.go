@@ -81,18 +81,23 @@ type ToolCallProgress struct {
 
 // RunInfo describes a tool run for the UI.
 type RunInfo struct {
-	ID      string `json:"id"`
-	CallID  string `json:"callId"`
-	Server  string `json:"server,omitempty"`
-	Tool    string `json:"tool"`
-	Args    string `json:"arguments,omitempty"`
-	Status  string `json:"status"` // running|ok|error
-	Result  string `json:"result,omitempty"`
-	Images  int    `json:"images,omitempty"`
-	Ms      int64  `json:"ms,omitempty"`
-	Error   string `json:"error,omitempty"`
-	EntryID string `json:"entryId,omitempty"`
-	Rounds  int    `json:"rounds,omitempty"`
+	ID     string `json:"id"`
+	CallID string `json:"callId"`
+	Server string `json:"server,omitempty"`
+	Tool   string `json:"tool"`
+	Args   string `json:"arguments,omitempty"`
+	Status string `json:"status"` // running|ok|error
+	Result string `json:"result,omitempty"`
+	// Structured is the tool's structuredContent, sent to the UI whatever the session's mode is:
+	// "drop" hides it from the model, not from the operator reading the transcript. It arrives as a
+	// JSON value, exactly as the server sent it — the same shape the entry carries, so the UI has one
+	// renderer for both.
+	Structured json.RawMessage `json:"structuredContent,omitempty"`
+	Images     int             `json:"images,omitempty"`
+	Ms         int64           `json:"ms,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	EntryID    string          `json:"entryId,omitempty"`
+	Rounds     int             `json:"rounds,omitempty"`
 }
 
 // Status is the session status line.
@@ -261,4 +266,13 @@ type Config struct {
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 	// NotifyTools asks MCP servers for list_changed subscriptions.
 	NotifyTools bool `json:"notifyTools,omitempty"`
+
+	// StructuredContent is this session's default for what a tool's structuredContent does on the way
+	// to the model: "auto" (default: append it unless the text already contains it), "fallback" (only
+	// when the result has no text), "always" (append, duplicates included) or "drop" (never send it).
+	// A server may override it with mcp[].structuredContent. Switching it rewrites the payload from
+	// the first tool result of that server onwards, so the KV prefix is lost there — the log itself is
+	// never rewritten, which is the point: it is how a bad choice gets undone without hand-editing
+	// data/<id>/log.jsonl.
+	StructuredContent string `json:"structuredContent,omitempty"`
 }

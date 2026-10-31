@@ -214,6 +214,29 @@ request is retried under a **new** JSON-RPC id.
 A tool call whose server asks for input raises an elicitation request in the UI (the same dialog serves
 legacy server-initiated `elicitation/create` requests).
 
+### Where a stdio server is started
+
+`command` and `dir` are handed to `exec.Command` as they stand, so both are resolved the way the
+operating system resolves anything a process asks for — against **the working directory `bareloopd` was
+started in**, which is not where `data/` lives and not something `mcp[]` can adjust. Concretely: a
+`command` containing a slash (`./bin/mcpstub`) is found relative to the daemon's cwd, a `command` without
+one goes through `PATH`, and a child whose `dir` is empty inherits that same directory. An absolute path
+in both fields is the only configuration that does not depend on how the daemon was launched.
+
+The other half is how many times it is started: MCP registries are **per session**, and every `data/<id>/`
+directory is opened at startup. The same stdio entry written into three session configs is three child
+processes, each with its own tools/list cache.
+
+### What a tool result is stored as
+
+A result's `content` blocks become the entry's `content` and its image `parts`; `structuredContent` goes
+into the entry's own `structuredContent` field, byte for byte, never pasted into the text. Whether the
+model sees it is decided per session and per server **while assembling**, which is what lets the decision
+be changed later without rewriting `data/<id>/log.jsonl`
+([the four words](../README.md#structured-content-in-four-words)). `outputSchema` is parsed and travels
+with the tool definition; nothing here re-validates a result against it — the server is the one that
+promised, and bareloop stores what it answered.
+
 ## The UI, and why it is shaped like this
 
 `web/js/session.js` and its neighbours are plain ES modules; three behaviours are worth knowing because

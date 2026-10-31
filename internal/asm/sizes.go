@@ -141,5 +141,7 @@ func entryBytes(e *ir.Entry) int {
 	for _, p := range e.Parts {
 		n += len(p.Text) + len(p.Data)
 	}
+	// Stored bytes include a tool's structuredContent, mode or no mode: it is in the log either way.
+	n += len(e.Structured)
 	return n
 }

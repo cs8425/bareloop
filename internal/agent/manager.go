@@ -107,6 +107,11 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 	if !cfg.NotifyTools {
 		cfg.NotifyTools = m.defaults.NotifyTools
 	}
+	// Like ReasoningEffort above: only new sessions get the daemon's structuredContent mode, because a
+	// session config that exists on disk is never re-merged.
+	if strings.TrimSpace(cfg.StructuredContent) == "" {
+		cfg.StructuredContent = m.defaults.StructuredContent
+	}
 	// Compaction parameters: a session that did not specify any gets the manager defaults;
 	// a session that did specify some keeps its own, with Normalise() filling the rest.
 	if cfg.Compact == (compact.Params{}) && m.defaults.Compact != (compact.Params{}) {
@@ -209,6 +214,17 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 	cfg = m.MergeDefaults(cfg)
 	if err := cfg.LLM.Pricing.Validate(); err != nil {
 		return nil, err
+	}
+	// A structuredContent mode is checked before anything is written: a session whose config says
+	// "alway" would otherwise read as "auto" forever, and the operator would be hunting a typo in a
+	// file the server rewrites on every settings save. Same rule UpdateConfig follows.
+	if _, err := asm.ParseStructuredMode(cfg.StructuredContent); err != nil {
+		return nil, err
+	}
+	for _, mc := range cfg.MCP {
+		if _, err := asm.ParseStructuredMode(mc.StructuredContent); err != nil {
+			return nil, fmt.Errorf("session %q: mcp server %q: %w", cfg.ID, mc.Name, err)
+		}
 	}
 	// The directory is the identity, so an existing directory means the id is taken - even when no log
 	// has been written yet (a session interrupted before its first entry, or a directory someone made

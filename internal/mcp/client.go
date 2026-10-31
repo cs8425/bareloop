@@ -93,6 +93,14 @@ type Config struct {
 	// alone; a prefix that collides with another server's published name pushes the loser to
 	// "<server>_<tool>", which the log says out loud. Policy, like DisabledTools.
 	ToolPrefix string `json:"toolPrefix,omitempty"`
+	// StructuredContent is what this server's structuredContent does on its way to the model:
+	// "auto" (default: append it unless the text already contains it), "fallback" (use it only when
+	// the result carries no text), "always" (append, duplicates included) or "drop" (never send it).
+	// It is policy, like the two fields above: the connection does not care, the assembler reads it
+	// per server at payload time, so it is not part of Identity. One thing it does cost is the KV
+	// prefix — the folded bytes are part of the message, so switching a server rewrites the payload
+	// from its first tool result onwards. Set it once, not per run.
+	StructuredContent string `json:"structuredContent,omitempty"`
 }
 
 // Identity is the part of a config that decides how the server is reached: the transport, plus
@@ -594,6 +602,11 @@ type CallResult struct {
 }
 
 // Text flattens the text content blocks.
+//
+// structuredContent is deliberately not substituted here, even when there is no text at all:
+// whether the JSON stands in for the text is the session's assembler decision
+// (asm.StructuredFallback), and the stored Content has to stay exactly "the text the server sent"
+// for that decision to be re-makeable later. The JSON travels in ir.Entry.Structured.
 func (r *CallResult) Text() string {
 	var sb strings.Builder
 	for _, c := range r.Content {
@@ -605,9 +618,6 @@ func (r *CallResult) Text() string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString(t)
-	}
-	if sb.Len() == 0 && len(r.Structured) > 0 {
-		return string(r.Structured)
 	}
 	return sb.String()
 }

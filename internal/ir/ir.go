@@ -134,6 +134,11 @@ type Entry struct {
 	Tool       string `json:"tool,omitempty"`
 	Server     string `json:"server,omitempty"`
 	IsError    bool   `json:"isError,omitempty"`
+	// Structured is a tool's structuredContent exactly as the MCP server sent it: raw bytes, never
+	// re-indented, and never mixed into Content. Whether it reaches the model is decided by the
+	// assembler per session and per server (asm.StructuredMode), so changing that decision cannot
+	// rewrite the log — and storing it once keeps a large blob from being written twice.
+	Structured json.RawMessage `json:"structuredContent,omitempty"`
 
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Model       string `json:"model,omitempty"`
