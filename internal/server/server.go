@@ -214,6 +214,9 @@ func pageQuery(r *http.Request) (ir.PageOptions, error) {
 	default:
 		return o, fmt.Errorf("all must be 1 or 0, got %q", v)
 	}
+	// An empty value reads as absent: ?before=&limit=20 is what a client that always serialises both
+	// fields sends, and "no id" from an empty field is the same request as no field. A *bad* id is
+	// refused in ir.PageOf, which is also where an anchor with no size is refused.
 	o.Before = q.Get("before")
 	o.Anchor = q.Get("anchor")
 	return o, nil

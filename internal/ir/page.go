@@ -38,12 +38,15 @@ func IsTurnStart(e *Entry) bool {
 // PageOptions selects a page from a path. The zero value asks for the whole path.
 type PageOptions struct {
 	// Limit counts entries, taken from the newest end. Zero or less means no limit, which is not the
-	// same as no request: Before and Anchor are honoured either way.
+	// same as no request: Before is honoured either way, an Anchor is refused without one.
 	Limit int
 	// Before is exclusive: the page ends before that entry, which is how a client loads the next
-	// older page — it passes back the oldest id it is already holding.
+	// older page — it passes back the oldest id it is already holding. Without a Limit this still
+	// cuts: "everything older than here" is a question with an answer.
 	Before string
 	// Anchor asks for a page around that entry, for a jump target that sits far from both ends.
+	// Unlike Before it is a place and not a cut, so it is refused without a Limit: a page around an
+	// entry with no size is the whole path, and the caller that named an entry did not want that.
 	Anchor string
 	// All asks for the whole path by name: inspection and debugging.
 	All bool
@@ -60,8 +63,8 @@ type Page struct {
 	HasOlder bool
 	HasNewer bool
 	// Limit is the page size the caller asked for, or 0 when it asked for none — which still honours
-	// Before and Anchor, because those cut the path rather than size the page. When Clamped it is the
-	// ceiling that was applied instead of the number asked for.
+	// Before, because that cuts the path rather than sizing the page. When Clamped it is the ceiling
+	// that was applied instead of the number asked for.
 	Limit int
 	// Clamped marks a request for more than MaxPageEntries.
 	Clamped bool
@@ -86,9 +89,15 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	if o.All && (o.Limit > 0 || o.Before != "" || o.Anchor != "") {
 		return nil, errors.New("ir: all cannot be combined with limit, before or anchor")
 	}
+	// why refused rather than answered with no ceiling: an anchored page with no size grows until it
+	// has swallowed the path, so the answer to "centre a page of nothing in particular here" is the
+	// whole transcript — the one thing paging exists to keep out of a response.
+	if o.Anchor != "" && o.Limit <= 0 {
+		return nil, errors.New("ir: anchor needs a limit: an anchor is a place in a page, not a page")
+	}
 	// The two ids are resolved once, here, so that "not on this path" is refused whatever else the
 	// request looked like — including an empty path, where there is nowhere for either to be, and a
-	// request with no limit, where an answer of the whole path would be a guess at what was asked.
+	// before with no limit, where an answer of the whole path would be a guess at what was asked.
 	bi, ai := -1, -1
 	if o.Before != "" {
 		if bi = indexOf(path, o.Before); bi < 0 {

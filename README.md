@@ -367,11 +367,12 @@ and in `/inspect` instead of crossing the wire to be thrown away.
 | *nothing* | the whole path — the default on purpose: the cost panel prices a whole session with one unparameterised call |
 | `?limit=40` | the newest page of at most 40 entries; 200 is the ceiling whatever you ask for, and `window.clamped` says when it was used |
 | `?limit=40&before=<id>` | the page before that one — `before` is exclusive and is normally the `oldestId` just received |
-| `?anchor=<id>` | a page centred on one entry, for a jump that lands far from both ends |
+| `?anchor=<id>&limit=40` | a page centred on one entry, for a jump that lands far from both ends; an anchor is a place in a page, so it is asked for with a size |
 | `?all=1` | the whole path by name, for inspecting and debugging |
 
-`before` and `anchor` cut the path whether or not a `limit` came with them, and an id that is not on the
-path is a 400 either way — answering such a request with the whole path would be guessing at it.
+`before` cuts the path whether or not a `limit` came with it, because "everything older than this entry"
+is a question with an answer. An id that is not on the path is a 400 either way — answering such a
+request with the whole path would be guessing at it.
 
 `window` is always there: `oldestId`, `newestId`, `hasOlder`, `hasNewer`, `count`, `total`, `bytes`,
 `limit` (what you asked for; 0 means no ceiling was asked for), `maxLimit`, `clamped`, `truncated`.
@@ -381,7 +382,8 @@ call never sits on one page with its result on the next, and walking `before` ba
 reproduces the path with no gap and no overlap. The one exception is a single turn larger than the page
 it was asked into: it comes back whole and `truncated` is true, because two pages holding half a tool
 call each are two pages neither can draw. Combining `before` with `anchor`, or `all` with anything else,
-is a 400 — as is a `limit` that is not a positive integer, or an id that is not on the path.
+is a 400 — as is a `limit` that is not a positive integer, an `anchor` with no `limit`, or an id that is
+not on the path.
 
 ### Websocket protocol
 

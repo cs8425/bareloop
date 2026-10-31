@@ -216,8 +216,10 @@ func TestBeforeTheFirstTurnIsEmpty(t *testing.T) {
 }
 
 // TestBeforeWithoutALimitStillCuts is the regression: an early "no limit means the whole path" return
-// sat above the lookup, so `before` and `anchor` with no `limit` were accepted and then ignored — a
-// whole path where a cut was asked for, and a 200 where an unknown id should have been a 400.
+// sat above the lookup, so a `before` with no `limit` was accepted and then ignored — a whole path
+// where a cut was asked for, and a 200 where an unknown id should have been a 400. What is checked of
+// anchors here is the id alone, because an anchor with no limit is refused on its own account
+// (TestAnchorNeedsALimit).
 func TestBeforeWithoutALimitStillCuts(t *testing.T) {
 	path := msgs(3, 3) // 12 entries, turns at 0, 4, 8
 	p, err := PageOf(path, PageOptions{Before: path[8].ID})
@@ -234,8 +236,28 @@ func TestBeforeWithoutALimitStillCuts(t *testing.T) {
 	if _, err := PageOf(path, PageOptions{Before: "not here"}); err == nil {
 		t.Error("an unknown before without a limit must still be refused")
 	}
-	if _, err := PageOf(path, PageOptions{Anchor: "not here"}); err == nil {
-		t.Error("an unknown anchor without a limit must still be refused")
+	// A limit goes with the anchor because an anchor without one is refused on its own account
+	// (TestAnchorNeedsALimit); here the size is deliberately present, so the only thing left to refuse
+	// is the id.
+	if _, err := PageOf(path, PageOptions{Limit: 5, Anchor: "not here"}); err == nil {
+		t.Error("an unknown anchor must still be refused")
+	}
+}
+
+// TestAnchorNeedsALimit: an anchor is a place in a page, and with no size asked for the page would
+// grow until it held the path — so the request that measured nothing is refused rather than answered
+// with the whole transcript.
+func TestAnchorNeedsALimit(t *testing.T) {
+	path := msgs(3, 3)
+	p, err := PageOf(path, PageOptions{Limit: 4, Anchor: path[8].ID})
+	if err != nil {
+		t.Fatalf("PageOf with a size: %v", err)
+	}
+	if len(p.Entries) >= len(path) {
+		t.Fatalf("a page of 4 returned the whole path (%d entries)", len(p.Entries))
+	}
+	if _, err := PageOf(path, PageOptions{Anchor: path[8].ID}); err == nil {
+		t.Error("anchor with no limit: want a refusal, got a page")
 	}
 }
 
@@ -244,7 +266,7 @@ func TestIDsAreRefusedOnAnEmptyPath(t *testing.T) {
 	if _, err := PageOf(nil, PageOptions{Before: "0000001"}); err == nil {
 		t.Error("before on an empty path: want an error, got none")
 	}
-	if _, err := PageOf(nil, PageOptions{Anchor: "0000001"}); err == nil {
+	if _, err := PageOf(nil, PageOptions{Limit: 5, Anchor: "0000001"}); err == nil {
 		t.Error("anchor on an empty path: want an error, got none")
 	}
 }
@@ -311,7 +333,8 @@ func TestRejectedRequests(t *testing.T) {
 		"all with before":            {All: true, Before: "1"},
 		"all with anchor":            {All: true, Anchor: "1"},
 		"before off the path":        {Before: "not here"},
-		"anchor off the path":        {Anchor: "not here"},
+		"anchor off the path":        {Limit: 5, Anchor: "not here"},
+		"anchor with no size":        {Anchor: "2"},
 	} {
 		if _, err := PageOf(path, o); err == nil {
 			t.Errorf("%s: want an error, got none", name)
