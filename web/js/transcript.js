@@ -456,7 +456,12 @@ function structuredText(raw) {
 function reasoningBlock(text) {
   const d = el('details', 'reasoning');
   d.appendChild(el('summary', '', 'reasoning'));
-  d.appendChild(document.createTextNode(text));
+  // The text gets a box of its own because that is where the ceiling lives (app.css, .reasoning-body): a
+  // max-height on the <details> would scroll the "reasoning" label away together with the thought, and the
+  // label is the only thing telling a reader what they are looking at. Streaming builds the same shape.
+  const box = el('div', 'reasoning-body');
+  box.appendChild(document.createTextNode(text));
+  d.appendChild(box);
   return d;
 }
 
@@ -566,7 +571,7 @@ function streamStart(streamId) {
   const body = el('div', 'body md');
   node.appendChild(body);
   logEl().appendChild(node);
-  const s = { id: streamId, node, body, reasoning, tag, content: '', reasoningText: '', rText: null, rShownLen: 0, tools: new Map(), args: new Map(), argsShown: new Map() };
+  const s = { id: streamId, node, body, reasoning, tag, content: '', reasoningText: '', rText: null, rBox: null, rShownLen: 0, tools: new Map(), args: new Map(), argsShown: new Map() };
   // Two channels arrive per delta besides the reply: the reasoning text and a tool call's arguments. Both
   // used to be written straight into the DOM as they landed — an O(n) text replacement plus a forced layout
   // per token. Measured over 13 KB of reasoning in 216 deltas: panel open 21.9 s of wall with a long task
@@ -579,16 +584,30 @@ function streamStart(streamId) {
     if (s.rShownLen === s.reasoningText.length) return;
     if (!s.rText) {
       s.rText = document.createTextNode('');
-      reasoning.appendChild(s.rText);
+      // Same shape as a committed entry's reasoningBlock(): the ceiling and the scrollbar live on the box,
+      // not on the <details>, so the "reasoning" label never scrolls away.
+      s.rBox = el('div', 'reasoning-body');
+      s.rBox.appendChild(s.rText);
+      reasoning.appendChild(s.rBox);
       s.rShownLen = 0; // a fresh node starts empty; opening the panel later draws all of it below
     }
+    // "Is the reader at the bottom?" has to be answered from the layout *before* the new text lands:
+    // afterwards the distance below the fold is exactly the height of whatever just arrived, so a frame
+    // carrying two or three lines looks "scrolled away" and the box never follows again (the first version
+    // read it after the append with 32px of slack, which only worked for deltas smaller than one line).
+    // 4px just absorbs fractional metrics; a reader who scrolls up inside the box keeps their place, and
+    // scrolling back to the bottom hands the follow back to us.  The reads and the write are not free — they
+    // flush layout for the whole document — but they run only while the model is thinking, which is the phase
+    // the reader opened the block to watch; folding at the first answer delta keeps the reply at its old cost.
+    const atBottom = s.rBox.scrollHeight - s.rBox.scrollTop - s.rBox.clientHeight < 4;
     // Append what arrived since the last frame instead of replacing the whole string. Honest numbers: at
     // 100 KB over 60 frames this is 0.14 ms/frame against 0.34 ms/frame for rewriting the whole string —
-    // real, but small next to the transcript term below, and it did not move the wall clock here. It stays
+    // real, but small next to the transcript term above, and it did not move the wall clock here. It stays
     // because it is strictly less work (proportional to what arrived, not to what is already on screen) and
     // because a thinking model can stream 100 KB the way an ordinary reply streams 1 KB.
     s.rText.appendData(s.reasoningText.slice(s.rShownLen));
     s.rShownLen = s.reasoningText.length;
+    if (atBottom) s.rBox.scrollTop = s.rBox.scrollHeight;
   };
   const drawToolArgs = () => {
     for (const [key, card] of s.tools) {
@@ -610,9 +629,30 @@ function streamStart(streamId) {
   s.markNews = () => {
     if (worthDrawing()) s.drawer.mark();
   };
+  // U3 — the block opens itself while the model is thinking and closes itself when the answer starts, and
+  // the two transitions are allowed to be interrupted but not overruled: a reader who opened the panel to
+  // re-read a thought keeps it open for good, and one who closed it by hand never has it reopened.
+  // Why the comparison instead of a flag: the <details> toggle event is dispatched asynchronously (measured
+  // in r45 — it can land after the next rAF), so a flag set around a programmatic write is long gone by the
+  // time the handler runs. A state that differs from what we asked for can only have come from the reader.
+  let askedOpen = false;
+  let readerOwns = false;
+  const setThinking = (on) => {
+    askedOpen = on;
+    reasoning.open = on;
+  };
+  s.beginThinking = () => {
+    if (!readerOwns && !askedOpen) setThinking(true);
+  };
+  s.endThinking = () => {
+    if (!readerOwns && askedOpen) setThinking(false);
+  };
   // Opening the panel is a click, not a delta: it draws immediately rather than waiting for a frame, and
   // that is what keeps `?hz=0` usable — the thinking that already arrived is there the moment you ask.
   reasoning.addEventListener('toggle', () => {
+    if (reasoning.open === askedOpen) return; // our own write, arriving late
+    readerOwns = true; // from here on the reader decides, once and for all
+    askedOpen = reasoning.open;
     if (reasoning.open) drawThinking();
   });
   // The drawer decides what to redraw; the gate inside it decides how often. `s.content` keeps accumulating
@@ -645,17 +685,25 @@ export function streamDelta(d) {
   const s = streamStart(d.streamId);
   if (!s) return;
   if (d.reasoning) {
+    // The first thinking of a stream is what opens the block, not the first delta of the reply: a model that
+    // never thinks must not get an empty open box, and until something is on screen the gate must stay off
+    // (worthDrawing below) — that difference is 4.5% against 56.2% of the main thread (r45 ruler).
+    if (!s.reasoningText) s.beginThinking();
     // Accumulate, and ask for a frame only if the panel or a tool card is actually open (see markNews).
     // Whether anything is drawn stays the frame painter's call, and the rate stays the gate's.
     s.reasoningText += d.reasoning;
     s.markNews();
   }
   if (d.content) {
+    // "Thinking is over" is a fact the deltas state directly: the answer started. Closing here hands the rest
+    // of the reply back to the answer alone, and hands the frame budget back to the gate.
+    s.endThinking();
     s.content += d.content;
     s.drawer.mark();
   }
   const tc = d.toolCall;
   if (tc) {
+    s.endThinking(); // a tool call ends the thinking too, and from here the card is what a reader watches
     const key = tc.index ?? tc.id ?? s.tools.size;
     if (tc.id || tc.name) {
       s.args.set(key, tc.args || '');
@@ -696,6 +744,10 @@ export function flushStreams() {
 }
 
 function streamFinish(s) {
+  // A stream that ends while still thinking (an abort between the tokens, a provider that stops mid-reasoning)
+  // must not leave the block open: this is the one path that runs without a content or toolCall delta, and
+  // `done` is the last thing the hub will ever say about it.
+  s.endThinking();
   s.node.classList.remove('stream');
   // The header chip says "streaming", and the moment this runs that is no longer true. It goes rather
   // than being reworded: the committed entry brings its own chips (id, model, usage) when it lands, and a

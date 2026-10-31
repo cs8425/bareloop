@@ -227,6 +227,15 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .msg.error > header .who { color: var(--err); }
 .reasoning { margin: 0 12px 9px; border: 1px dashed var(--border); border-radius: 6px; padding: 6px 9px; color: var(--muted); white-space: pre-wrap; font-size: var(--t-2); }
 .reasoning > summary { color: #9a8fc7; cursor: pointer; font-size: var(--t-0); text-transform: uppercase; letter-spacing: .05em; }
+/* The thinking streams inside a ceiling instead of pushing the transcript down: a thinking model can send
+   100 KB the way an ordinary reply sends 1 KB, and an open block of that length is a wall you scroll past
+   twice — once to reach the answer, once to get away from it. The tool ceiling above is a max() floor,
+   because reading code wants room; this one is a min(), because thinking is subordinate to the answer it
+   produced: 240px (a dozen lines of --t-2) is the most it ever takes, and a short window gets less. */
+.reasoning > .reasoning-body {
+  max-height: min(30dvh, 240px);
+  overflow-y: auto;
+}
 
 .tool-card { margin: 0 12px 10px; border: 1px solid var(--border); border-radius: 6px; background: #1a1f27; }
 /* flex-wrap: a card header is four labels in a row, and a tool name is not a bounded string. Nothing wraps
@@ -668,6 +677,11 @@ button,
        a fifth of the height: 200px is ten lines of the mono body and still leaves half a phone screen of
        transcript above and below it. */
     max-height: max(38dvh, 200px);
+  }
+  /* The phone reading area is half a thumb-swipe and no more: the answer is what a phone reader came for,
+     and 180px of thinking is already nine lines of --t-2 at 375px wide. */
+  .reasoning > .reasoning-body {
+    max-height: min(26dvh, 180px);
   }
   #pending {
     padding: 5px 8px;
