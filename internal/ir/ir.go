@@ -1,6 +1,6 @@
 // Package ir holds the conversation record model ("entries on a path").
 //
-// Design notes (see notes/compact-threshold-mode.en.md §0):
+// Design notes (see _notes/compact-threshold-mode.en.md §0 — a private dir, not in this repo):
 //   - the path (root -> tip) is the single source of truth for "what gets sent"
 //   - a compaction is just another record on the path, not a field on the session
 //   - entries are never removed by compaction; they simply stop appearing in the payload

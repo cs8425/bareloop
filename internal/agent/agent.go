@@ -1,6 +1,6 @@
 // Package agent holds the server-side agent loop.
 //
-// The design follows notes/compact-threshold-mode.en.md:
+// The design follows _notes/compact-threshold-mode.en.md:
 //
 //   - the path in storage is the truth; every turn re-reads it, so a message the user
 //     sends while the loop runs becomes part of the next payload without extra machinery

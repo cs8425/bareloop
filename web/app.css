@@ -87,7 +87,7 @@ label.file-btn:focus-visible { outline: 2px solid var(--accent); outline-offset:
    Why the shorthand instead of `font-size`: inheriting only the size keeps the UA's own face and weight,
    which is how one word ends up set in two fonts on one screen. Checkboxes and radios are unaffected -
    their box comes from `appearance`, not from a glyph. Fields are still below 16px on a phone, which is
-   the next job (`state/todo-and-decisions.md`, A2): the composer got that floor last round, the rest did not. */
+   the next job (`_state/todo-and-decisions.md`, A2): the composer got that floor last round, the rest did not. */
 input,
 textarea,
 select { font: inherit; }
@@ -408,7 +408,7 @@ dialog form { display: flex; flex-direction: column; gap: 8px; }
    labels", which is literally this. The fields below still say `font: inherit`, so this one line moves the
    label and every control in the dialog together (D39). Measured cost - desktop dialog (640px) form
    1264 -> 1303px, and on a phone +1.2% on top of the 16px floor, with zero wrapped labels and zero clipped
-   values, still zero at `:root` 20px: `state/r39-tap-targets-draft.md`. */
+   values, still zero at `:root` 20px: `_state/r39-tap-targets-draft.md`. */
 dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-2); color: var(--muted); }
 dialog input, dialog select, dialog textarea { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; }
 dialog textarea[name=mcp] { font: var(--t-2) var(--mono); } /* same rung as its own label; mono because JSON */

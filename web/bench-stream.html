@@ -26,7 +26,7 @@
     mid-stream     the L2 invariant, checked while the stream runs: what has been frozen must never be
                    redrawn, and must be exactly the head of what the finished reply will render to.
 
-  Drive it from the console (that is how the numbers in state/render-throttle-plan.md were taken):
+  Drive it from the console (that is how the numbers in _state/render-throttle-plan.md were taken):
     await window.__benchRun({ sizes: [8, 40], gap: 3, chunk: 12 })
     window.__boundaryTests()
   and read window.__bench. CPU throttling is applied from outside with CDP
