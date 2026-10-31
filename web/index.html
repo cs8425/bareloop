@@ -163,7 +163,31 @@
           <label class="check"><input name="inLoop" type="checkbox" /> allow compaction between tool calls (T2)</label>
           <label class="check"><input name="sendReasoning" type="checkbox" /> re-send the reasoning channel</label>
           <label class="check"><input name="sendImages" type="checkbox" /> send image attachments to the model</label>
+          <!-- One word for the whole session; a server can overrule it in its own entry below. The row
+               spans the grid because every option is a sentence the reader has to finish before choosing. -->
+          <label class="span3">
+            tool structuredContent
+            <select name="structuredContent">
+              <option value="auto">auto (default) — send it unless the text already contains it</option>
+              <option value="fallback">fallback — only when the tool returned no text</option>
+              <option value="always">always — even when it repeats the text</option>
+              <option value="drop">drop — never send it</option>
+            </select>
+          </label>
         </div>
+        <p class="hint">
+          A tool may answer twice: once as text, and once as <code>structuredContent</code> — a JSON value
+          the log keeps beside the text, never merged into it. This row says which of the two the model is
+          sent; <em>auto</em> sends the JSON unless the text already carries the same bytes. On screen both
+          channels are always shown, the second one folded shut inside its tool card.
+          <!-- The warning is the point of the row: the word is applied while assembling, so it is not a
+             view setting and has to be priced before anyone touches it. -->
+          Whichever word you pick, the log is never rewritten — but the word is applied to every tool
+          result the session already has, so changing it sends rewritten text for all of them on the next
+          request and the server reads the whole history again instead of reusing its KV cache. Pick one
+          and leave it. One server may use a different word than the session by adding a
+          <code>structuredContent</code> key to its own entry in the list below.
+        </p>
         <label>system prompt <textarea name="systemPrompt" rows="4" spellcheck="false"></textarea></label>
         <label>
           MCP servers (JSON array)

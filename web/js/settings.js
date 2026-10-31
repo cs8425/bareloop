@@ -54,6 +54,9 @@ export async function openSettings() {
   // "not false" rather than from "true".
   fld(f, 'sendReasoning').checked = cfg.asm?.sendReasoning !== false;
   fld(f, 'sendImages').checked = cfg.asm?.sendImages !== false;
+  // The structuredContent word is a plain string on the server and absent means "auto", so the picker
+  // starts from the word the session is actually running rather than from an empty choice.
+  fld(f, 'structuredContent').value = cfg.structuredContent || 'auto';
   // Prices are three numbers or nothing, and the difference between "0" and "no price at all" has to
   // survive a round trip through a form: an empty field stays empty, a stored zero shows a zero.
   const price = cfg.llm?.pricing;
@@ -103,6 +106,10 @@ export async function saveSettings() {
       sendReasoning: fld(f, 'sendReasoning').checked,
       sendImages: fld(f, 'sendImages').checked,
     },
+    // Top level, not inside asm: it is a policy about what the model is sent, and asm.* is the block of
+    // narrow assembler switches. A select cannot come back empty, which is good — the server reads an
+    // empty word here as "keep what is stored", so this row always answers.
+    structuredContent: fld(f, 'structuredContent').value,
     mcp,
   };
   // Fields this dialog does not have are dropped rather than guessed at: absent means "unchanged",

@@ -239,6 +239,14 @@ so when it starts, and `inspect`/`payload` show the truth before the request goe
 then switched back does not hand the prefix back, which is why the settings dialog offers one dropdown rather
 than a per-turn choice.
 
+On screen the word is not applied: **both channels are always shown**. A tool result that carries the second
+channel gets one more fold inside its card, labelled `structuredContent` and — once opened — how many
+characters it holds. It is closed like the output fold above it, and its JSON is formatted and laid out only
+on the first open, so a server that answers every call with 100 KB of JSON costs the transcript one 24 px row
+until someone asks to read it. The four words are chosen in the settings dialog, where the paragraph above is
+repeated in one sentence — this is the only row in that dialog whose price is a whole KV prefix rather than a
+handful of tokens.
+
 ### Compaction, in short
 
 A turn is folded away when `contextUsed > n_ctx × threshold%`: the newest suffix that fits `keepTarget%`

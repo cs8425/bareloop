@@ -363,7 +363,10 @@ function fillBody(node, body, e) {
     node.classList.add('compact-banner');
     return;
   }
-  if (!e.content && !(e.toolCalls || []).length) return;
+  // "Nothing to draw" used to mean no text and no tool calls. A tool result carrying only its
+  // structuredContent is not nothing: under fallback the model is reading that JSON right now, and an
+  // empty bubble on screen would be the one case where the transcript says less than the request does.
+  if (!e.content && !(e.toolCalls || []).length && !hasStructured(e)) return;
   if (e.kind === 'assistant') {
     if (e.content) md.renderTo(body, e.content);
     // Replay the call arguments so a reloaded page still shows what was passed.
@@ -375,6 +378,8 @@ function fillBody(node, body, e) {
     }
   } else if (e.kind === 'tool') {
     body.appendChild(toolOutput(collapseDataUrls(e.content).text));
+    const sc = structuredBlock(e.structuredContent);
+    if (sc) body.appendChild(sc);
   } else {
     body.appendChild(document.createTextNode(collapseDataUrls(e.content).text));
   }
@@ -409,6 +414,43 @@ function toolOutput(text) {
   fold.appendChild(summary);
   fold.appendChild(pre);
   return fold;
+}
+
+// hasStructured is the single test for "this entry carries the second channel": the key is absent on
+// every entry written before the field existed, and an empty value is not a channel.
+const hasStructured = (e) => e.structuredContent !== undefined && e.structuredContent !== null && e.structuredContent !== '';
+
+function structuredBlock(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const fold = el('details', 'tool-fold tool-structured');
+  const summary = el('summary', '', 'structuredContent');
+  const pre = el('pre');
+  fold.appendChild(summary);
+  fold.appendChild(pre);
+  // Nothing about the bytes is computed until the first open. The transcript is mounted entry by entry,
+  // and a server that answers every call with a 100 KB JSON would otherwise pay for a pretty-print
+  // nobody clicked — the mount path is the one place this project has measured (state/render-throttle-plan.md).
+  // `toggle` fires on close too, hence the open test and the `textContent` guard.
+  fold.addEventListener('toggle', () => {
+    if (!fold.open || pre.textContent) return;
+    const text = structuredText(raw);
+    pre.textContent = text;
+    summary.textContent = `structuredContent (${fmtN(text.length)} chars)`;
+  });
+  return fold;
+}
+
+// structuredText renders that channel however it arrived. Usually an object or an array, because the
+// entry embeds its raw JSON as a value; a string is what a hand-written log line holds, and a value
+// JSON cannot represent (a circular object never happens here, but a proxy of a future data source
+// might) falls back to printing whatever it is rather than dropping the channel.
+function structuredText(raw) {
+  if (typeof raw === 'string') return raw;
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return String(raw);
+  }
 }
 
 function reasoningBlock(text) {

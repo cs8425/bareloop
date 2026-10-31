@@ -429,6 +429,9 @@ dialog .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1f
    wide - with nothing else spilling out of the box. */
 dialog form > *, dialog .grid > *, dialog input, dialog select, dialog textarea { min-width: 0; }
 dialog .grid .check { grid-column: span 3; flex-direction: row; align-items: center; }
+/* A select whose answers are whole words needs the row too: at one column of the 595px content box,
+   "fallback — only when the tool returned no text" is a control you cannot read, let alone tap. */
+dialog .grid .span3 { grid-column: span 3; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
 dialog .hint { color: var(--muted); font-size: var(--t-1); margin: 0; }
 dialog p { margin: 0 0 4px; }
@@ -672,6 +675,10 @@ button,
                                               320px viewport at a 24px text size. */
   }
   dialog .grid .check {
+    grid-column: auto;
+  }
+  dialog .grid .span3 {
+    /* One column already is the whole row, and spanning 3 in a one-column grid invents two implicit ones. */
     grid-column: auto;
   }
   /* (the sticky save/cancel row left this breakpoint with the height cap it exists for) */
