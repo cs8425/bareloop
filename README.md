@@ -252,7 +252,16 @@ never one that loses it ([details](docs/design.md#compaction-in-one-paragraph)).
 ```sh
 curl -s localhost:8090/api/session/main/payload   # the exact body of the next request
 BARELOOP_PAYLOAD_DUMP=1 ./bin/bareloopd ...        # and dump every request to the log
+./bin/bareloopd -pprof 127.0.0.1:6060              # Go runtime profiles: heap, goroutine, CPU
 ```
+
+`-pprof` is off unless you ask: `-pprof 127.0.0.1:6060` gets a listener of its own, `-pprof same` mounts
+`/debug/pprof/` on the API port (the config file's `"pprof"` field takes either, and the flag wins).
+Nothing authenticates any of it, and `/debug/pprof/profile` holds a connection for thirty seconds of CPU
+sampling, so `same` on a non-loopback `-addr` earns a startup warning. It answers what no log in this
+project can: what one session and its MCP servers cost in goroutines, whether an interrupted run left one
+parked, and whether the process is still holding every `data/<id>/` transcript it opened at startup.
+Nothing about the browser — that side has its own instruments.
 
 Every turn also logs one line - `turn 3: 14 messages + system prompt (287 bytes), 9 tools, 41233 bytes`.
 Language and script are not free: the assembler adds no prose of its own, so unless the system prompt says

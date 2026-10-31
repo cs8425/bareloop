@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	bareloopd [-config config.json] [-addr 127.0.0.1:8090] [-data data] [-web web]
+//	bareloopd [-config config.json] [-addr 127.0.0.1:8090] [-data data] [-web web] [-pprof 127.0.0.1:6060]
 //
 // Everything except the listen address, the data directory and the web directory comes from
 // the JSON config file, whose "defaults" block is inherited by every new session (each session
@@ -45,16 +45,21 @@ type fileConfig struct {
 	Sessions []agent.Config `json:"sessions,omitempty"`
 	// Debug turns on per-request logging.
 	Debug bool `json:"debug,omitempty"`
+	// Pprof turns Go's runtime profiles on: either an address to listen on ("127.0.0.1:6060") or
+	// "same" to serve them on the API port at /debug/pprof/. Empty means off. They are unauthenticated
+	// either way, which is why 127.0.0.1 is the point of asking for it.
+	Pprof string `json:"pprof,omitempty"`
 }
 
 func main() {
 	var (
-		cfgPath = flag.String("config", "config.json", "JSON config file (optional)")
-		addr    = flag.String("addr", "", "listen address, e.g. 127.0.0.1:8090")
-		dataDir = flag.String("data", "", "directory for session logs (default ./data)")
-		webDir  = flag.String("web", "", "directory of the web UI (default ./web)")
-		fsync   = flag.Bool("fsync", false, "fsync every log append")
-		verbose = flag.Bool("v", false, "log every HTTP request under /api")
+		cfgPath   = flag.String("config", "config.json", "JSON config file (optional)")
+		addr      = flag.String("addr", "", "listen address, e.g. 127.0.0.1:8090")
+		dataDir   = flag.String("data", "", "directory for session logs (default ./data)")
+		webDir    = flag.String("web", "", "directory of the web UI (default ./web)")
+		fsync     = flag.Bool("fsync", false, "fsync every log append")
+		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
+		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
 	)
 	flag.Parse()
 
@@ -89,6 +94,9 @@ func main() {
 	if *verbose {
 		cfg.Debug = true
 	}
+	if *pprofAddr != "" {
+		cfg.Pprof = *pprofAddr
+	}
 
 	if err := os.MkdirAll(cfg.Data, 0o755); err != nil {
 		logger.Fatalf("data dir: %v", err)
@@ -120,6 +128,37 @@ func main() {
 	}
 
 	srv := server.New(mgr, hub, cfg.Web, logf)
+
+	// pprof is off unless asked for, and asking has two shapes: an address (a listener of its own) or
+	// "same" (the API port, under /debug/pprof/). The difference matters because /debug/pprof/profile is
+	// a 30-second CPU profile with nothing in front of it, so the startup line names which one you got.
+	// This switch is above srv.Handler() on purpose: EnablePprof has to be seen before the mux is built.
+	var pprofSrv *http.Server
+	switch cfg.Pprof {
+	case "":
+	case "same":
+		srv.EnablePprof()
+		if h, _, err := net.SplitHostPort(cfg.Addr); err == nil && h != "127.0.0.1" && h != "::1" && h != "localhost" {
+			logf(`pprof on the API port at %s, which is not loopback — these endpoints are unauthenticated: bind 127.0.0.1, or use -pprof 127.0.0.1:6060 instead`, cfg.Addr)
+		} else {
+			logf("pprof on http://%s/debug/pprof/ (the API port, unauthenticated)", cfg.Addr)
+		}
+	default:
+		if _, _, err := net.SplitHostPort(cfg.Pprof); err != nil {
+			logger.Fatalf(`pprof: %q is neither an address like 127.0.0.1:6060 nor "same"`, cfg.Pprof)
+		}
+		// Its own listener, because the API port is what the browser talks to and its catch-all route is
+		// the UI. A bind failure is fatal on purpose: a daemon quietly running without the profiler you
+		// asked for is the confusing outcome.
+		pprofSrv = &http.Server{Addr: cfg.Pprof, Handler: server.PprofHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Fatalf("pprof listener: %v", err)
+			}
+		}()
+		logf("pprof on http://%s/debug/pprof/ (its own port, unauthenticated)", cfg.Pprof)
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Handler(),
@@ -158,6 +197,11 @@ func main() {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logf("http shutdown: %v", err)
+	}
+	if pprofSrv != nil {
+		if err := pprofSrv.Shutdown(shutdownCtx); err != nil {
+			logf("pprof shutdown: %v", err)
+		}
 	}
 	mgr.Close()
 	logf("bye")

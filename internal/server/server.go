@@ -25,6 +25,8 @@ type Server struct {
 	hub  *Hub
 	web  string
 	logf func(string, ...any)
+	// pprof is the operator's "serve Go's runtime profiles on the API port too" switch (EnablePprof).
+	pprof bool
 }
 
 // New creates the HTTP handler set.
@@ -64,6 +66,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/session/{id}/reload", s.handleReload)
 	mux.HandleFunc("GET /api/session/{id}/events", s.handleSSE)
 	mux.HandleFunc("GET /ws", s.handleWS)
+
+	// The profiler, when asked for: its own mux keeps the /debug/pprof/ prefix intact (pprof.Index
+	// reads the profile name out of the URL), and it wins over the catch-all below because ServeMux
+	// prefers the more specific pattern.
+	if s.pprof {
+		mux.Handle("/debug/pprof/", PprofHandler())
+	}
 
 	mux.HandleFunc("/", s.handleStatic)
 	return logWrap(s.logf, mux)
@@ -601,7 +610,9 @@ func logWrap(logf func(string, ...any), next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
+			// The pprof path is in the list because on the shared port a 30-second CPU profile leaves
+			// no other trace; the profiler's own listener is not wrapped at all.
 			logf("%s %s -> %d in %s", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
 		}
 	})
