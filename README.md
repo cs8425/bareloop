@@ -129,6 +129,7 @@ its own copy in `data/<id>/config.json`.
 | `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `headers`, `pricing` (`input` for the prompt tokens the server had to compute, `cachedInput` for the ones it served from cache, `output` for what it generated — **all three per 1 000 000 tokens**, and no currency field, because bareloop cannot know which one you are billed in. Leave it out and nothing is priced; an explicit `0` is an answer meaning free. A session inherits it and may override; a price changes no request, so saving one never reconnects anything) |
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
+| `insecureTLS`, `caFile` | on `defaults.llm` and on any `mcp[]` entry with a `url`: how an https endpoint is trusted ([reaching an endpoint no trust store knows](#reaching-an-endpoint-no-trust-store-knows)) |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
 | `defaults.asm` | payload options: `sendReasoning` (**on** by default), `sendImages` (**on**), `omitToolResultName` (off) |
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
@@ -165,11 +166,48 @@ default:
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
 | `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
 | `structuredContent` | absent = **`auto`** (fold the tool's JSON in, but never twice) | `fallback` / `always` / `drop`, per server in `mcp[]` ([the four words](#structured-content-in-four-words)) |
+| `llm.insecureTLS` | absent = verify, like anyone else | `false` is the same as absent; **`true` is a different endpoint** and is logged every time it applies |
+| `llm.caFile` | absent = the system trust store | a PEM bundle to verify against — and the only thing it is verified against |
 
 `llm.nCtx` is a ceiling you set, not a fact about the server: the number used is the smaller of it and
 what the server reports, and `status.nCtx` / `nCtxSource` tell you which won. Leave it unset and the
 server is asked; if neither knows, compaction stays off until you fill it in
 ([the five cases](docs/design.md#the-context-window)).
+
+### Reaching an endpoint no trust store knows
+
+The llama.cpp box on the next desk with a certificate it made itself, or an MCP server under your own CA,
+is refused by the default verifier. Two fields say what to do about that, on `llm` and on every `mcp[]`
+entry with a `url`:
+
+| field | default | what it does |
+|---|---|---|
+| `insecureTLS` | absent = verify | `true` sends the request without checking anything. What it buys is a connection; what it costs is that **any host between here and there can answer for that endpoint**, which is why the session says so in the log every time it starts using it. There is no "skip the certificate but still check the hostname": in `crypto/tls` those are one verification |
+| `caFile` | absent = the system trust store | a PEM bundle to verify against, **and the only thing it is verified against**: naming a file is a trust decision, so the system store is not consulted beside it. The hostname is still checked |
+
+Three things follow, and all three are checked where the config is written rather than on the first
+request that would need them:
+
+- the two together are refused: one says "do not check the certificate", the other says which one to check;
+- a `caFile` that cannot be read, or that holds no `-----BEGIN CERTIFICATE-----`, is an **error** — never
+  "fall back to the system store then". The endpoint that needs a `caFile` is precisely the one the system
+  store cannot verify, so a fallback would turn a wrong path into a session that looks healthy over a
+  connection nobody checks;
+- a policy on an entry with no connection to verify (a `stdio` server) is refused as well, because a
+  config line that does nothing is a line someone will later read as a guarantee.
+
+`insecureTLS` keeps three states over the API: **absent** means unchanged, `false` means verify, `true`
+means do not. And because a string cannot spell "no file", a body carrying `"insecureTLS": true` is taken
+as the whole answer about how that endpoint is verified, and clears a stored `caFile`.
+
+A policy belongs to the identity of the endpoint: changing it rebuilds the provider and reconnects the
+server, while a patch that only spells out `false` — which is what a UI sends without being asked —
+reconnects nothing. The transport a policy needs is `http.DefaultTransport` cloned with only its TLS
+configuration replaced, so trusting one CA cannot change anything else about how the endpoint is dialled
+— the proxy from the environment is the property a test checks. Neither field has a control of its own in
+the settings dialog: on `llm` they are set in `data/<id>/config.json` or by
+`PATCH` (a dialog save keeps them, because it sends back the fields it did not draw), and on an `mcp[]`
+entry they travel with the JSON box that already edits `url` and `headers`.
 
 ### Tools: switches, prefixes and the cache
 
@@ -183,6 +221,7 @@ Three things are configured **per session**, all in `mcp[]`:
 | `disabledTools` | none | hide these tools from the model; matches the **raw** name (`fs_list`) exactly or as a `path.Match` glob (`fs_*`, `*`), case sensitive |
 | `toolPrefix` | none | namespace in front of this server's tools: `"vr"` ⇒ `vr_fs_list` (one underscore) |
 | `structuredContent` | the session's own `structuredContent` | what this server's `structuredContent` is worth to the model: [one of four words](#structured-content-in-four-words) |
+| `insecureTLS`, `caFile` | verify normally | how this server's `url` is trusted — the same two answers as on `llm` ([here](#reaching-an-endpoint-no-trust-store-knows)), and refused on a `stdio` entry, which has no certificate to check |
 
 Two tools that want the same name are a collision, and the **later** one moves: it is published as
 `<server>_<tool>`, never as `fs_read_2`, because a name you cannot read is a name you cannot use. It is

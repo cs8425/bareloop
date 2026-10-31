@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"bareloop/internal/tlsconf"
 )
 
 // Protocol eras this client can speak.
@@ -101,6 +103,47 @@ type Config struct {
 	// prefix — the folded bytes are part of the message, so switching a server rewrites the payload
 	// from its first tool result onwards. Set it once, not per run.
 	StructuredContent string `json:"structuredContent,omitempty"`
+	// InsecureTLS and CAFile are this server's certificate policy, for a "url" entry: the same two
+	// answers as an llm endpoint (skip verification / verify against this PEM bundle only). They are
+	// part of Identity below — what they decide is whether the connection is allowed to be open at
+	// all — and they mean nothing to a stdio entry, which agent/validateTLS refuses rather than
+	// accepting into a config that would quietly do nothing.
+	InsecureTLS *bool  `json:"insecureTLS,omitempty"`
+	CAFile      string `json:"caFile,omitempty"`
+}
+
+// Insecure reports whether this entry asks for certificate verification to be skipped.
+func (c Config) Insecure() bool { return c.InsecureTLS != nil && *c.InsecureTLS }
+
+// IsHTTP reports whether this entry is reached over a url rather than started as a child process.
+// It is the one list of the accepted spellings — New switches on it too — because "does this entry
+// have a TLS policy worth validating" has to be asked in two packages.
+func (c Config) IsHTTP() bool {
+	switch strings.ToLower(strings.TrimSpace(c.Type)) {
+	case "http", "streamable-http", "streamable_http", "sse":
+		return true
+	}
+	return false
+}
+
+// httpClient is the client the HTTP transport should use: the injected one when a caller supplied a
+// client (what it does about certificates is then that caller's decision), a client with this entry's
+// TLS policy when it has one, and nil for neither — which is how the transport keeps its own default.
+func (c Config) httpClient() (*http.Client, error) {
+	if c.HTTP != nil {
+		return c.HTTP, nil
+	}
+	tr, err := tlsconf.Options{InsecureTLS: c.InsecureTLS, CAFile: c.CAFile}.Transport(fmt.Sprintf("mcp server %q", c.Name))
+	if err != nil {
+		return nil, err
+	}
+	if tr == nil {
+		return nil, nil
+	}
+	// No http.Client.Timeout: a timeout here would also bound the GET that carries an SSE stream,
+	// which is a connection meant to stay open until the server stops talking. cfg.Timeout bounds one
+	// round trip instead, inside the transport.
+	return &http.Client{Transport: tr}, nil
 }
 
 // Identity is the part of a config that decides how the server is reached: the transport, plus
@@ -108,9 +151,13 @@ type Config struct {
 // part of it — switching one tool off must never take a working MCP connection down with it, and
 // must never restart a stdio child process. Two configs with the same Identity can be served by
 // the same live client; two that differ cannot.
+//
+// The TLS fields are part of it, because they decide whether the connection is permitted: a server
+// that was refused an unverifiable certificate has to be reconnected when the operator says "verify
+// against this file instead", and must not be reconnected for a policy nothing reached.
 func (c Config) Identity() string {
-	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q dir=%s url=%s headers=%v roots=%v",
-		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.Dir, c.URL, c.Headers, c.Roots)
+	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q dir=%s url=%s headers=%v roots=%v insecure=%t caFile=%s",
+		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.Dir, c.URL, c.Headers, c.Roots, c.Insecure(), c.CAFile)
 }
 
 // Event is a notification received from the server.
@@ -194,8 +241,11 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	c := &Client{cfg: cfg, logf: cfg.Logf, era: eraModern, toolSchema: map[string]json.RawMessage{}}
 
 	var t transport
-	switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
-	case "", "stdio":
+	// IsHTTP is the one list of what counts as a url transport, because agent/validateTLS has to ask
+	// the same question of every entry. The default branch stays an error: a typo in "type" must not
+	// fall through to stdio and start a process nobody asked for.
+	switch kind := strings.ToLower(strings.TrimSpace(cfg.Type)); {
+	case kind == "" || kind == "stdio":
 		st, err := newStdio(ctx, StdioConfig{
 			Command: cfg.Command, Args: cfg.Args, Env: cfg.Env, Dir: cfg.Dir, Logf: cfg.Logf,
 		})
@@ -203,8 +253,12 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 			return nil, err
 		}
 		t = st
-	case "http", "streamable-http", "streamable_http", "sse":
-		t = newHTTP(HTTPConfig{URL: cfg.URL, Headers: cfg.Headers, Timeout: cfg.Timeout, HTTP: cfg.HTTP, Logf: cfg.Logf}, eraModern)
+	case cfg.IsHTTP():
+		hc, err := cfg.httpClient()
+		if err != nil {
+			return nil, err
+		}
+		t = newHTTP(HTTPConfig{URL: cfg.URL, Headers: cfg.Headers, Timeout: cfg.Timeout, HTTP: hc, Logf: cfg.Logf}, eraModern)
 	default:
 		return nil, fmt.Errorf("mcp: unknown transport type %q", cfg.Type)
 	}

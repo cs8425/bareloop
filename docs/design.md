@@ -177,6 +177,32 @@ owing one forever. A provider that answers 500 reliably then produces a storm - 
 round, each with a payload line and an error event, forever. As the belt to those braces, a round that
 committed nothing stops the run instead of starting another round.
 
+### A certificate nobody trusts
+
+An https endpoint whose certificate the system trust store cannot check — a llama.cpp box with a
+self-signed certificate, an MCP server under a private CA — fails as a transport error, which means it is
+retried twice like a dropped connection and then lands in the transcript as a failed entry saying
+`x509: certificate signed by unknown authority`. Two fields answer for it, `insecureTLS` and `caFile`, on
+the llm endpoint and on any MCP entry with a `url`
+([README](../README.md#reaching-an-endpoint-no-trust-store-knows)); three rules are what keep them honest:
+
+- they are **mutually exclusive**, and both are checked where the config is written rather than on the
+  first request that needed them: a `caFile` that cannot be read, or that holds no certificate, fails the
+  save while the session is still in front of whoever typed the path;
+- there is **no fallback to the system trust store** when a `caFile` cannot be used, because the endpoint
+  that needs one is precisely the one the system store cannot verify — a fallback would turn a wrong path
+  into a session that looks healthy over a connection nobody checks;
+- a policy where it can mean nothing — a plain `http` endpoint, or a `stdio` server with no connection to
+  verify — is refused rather than stored, because a line in a config that does nothing is a line someone
+  will later read as a guarantee.
+
+`internal/tlsconf` is the only place that reads the pair, and it returns a transport or an error: the two
+packages that reach the network (`internal/llm`, `internal/mcp`) may not import each other, so a third one
+holds the rule. A policy is part of the identity of an endpoint (`llm.Config.Same`, `mcp.Config.Identity`),
+so changing one rebuilds the provider or reconnects the server, while a patch that merely spells out the
+default does neither. Whatever it decides is said once when a session opens and once when its endpoints
+move, because a connection that is being impersonated looks exactly like one that is not.
+
 ## Images
 
 An attached image is stored in the log as base64 and goes on the wire as an `image_url` part with the

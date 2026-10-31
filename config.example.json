@@ -57,7 +57,9 @@
         "url": "http://127.0.0.1:8911/mcp",
         "disabled": false,
         "toolPrefix": "",
-        "disabledTools": []
+        "disabledTools": [],
+        "insecureTLS": false,
+        "caFile": ""
       }
     ]
   }

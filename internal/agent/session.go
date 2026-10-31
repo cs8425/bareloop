@@ -182,6 +182,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 		s.emitState()
 	}()
 	s.logStructuredMode(cfg)
+	s.logTLS(cfg)
 	return s, nil
 }
 
@@ -631,6 +632,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 			return fmt.Errorf("mcp server %q: %w", mc.Name, err)
 		}
 	}
+	// The TLS pair the body carries is checked here for the same reason: a body that names a caFile it
+	// cannot read should fail now, and the merged result is checked again below, where it can also be
+	// a body's new policy combined with a stored file.
+	if err := validateTLS(patch); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if s.phase != phaseIdle {
 		s.mu.Unlock()
@@ -653,6 +660,18 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	}
 	if patch.LLM.NCTX == 0 {
 		patch.LLM.NCTX = old.LLM.NCTX
+	}
+	// The two TLS fields merge as one policy rather than as two fields, and only one of them can do it
+	// by itself: insecureTLS is a pointer, so "absent" really is "nobody said anything" and an explicit
+	// false is a statement, while caFile shares with apiKey and model the rule that empty means
+	// unchanged. That leaves one thing a string cannot express — "no file" — so asking not to verify is
+	// taken as the whole answer for how this endpoint is verified. Without that, a session that once
+	// pinned a CA could never be moved off it over the API at all.
+	if patch.LLM.InsecureTLS == nil {
+		patch.LLM.InsecureTLS = old.LLM.InsecureTLS
+	}
+	if patch.LLM.CAFile == "" && !patch.LLM.TLS().Insecure() {
+		patch.LLM.CAFile = old.LLM.CAFile
 	}
 	// Same rule as everything else in a patch: no pricing block means no change. Unlike the fields
 	// above, this one can be turned back off — send {"pricing":{"input":0,"cachedInput":0,"output":0}}
@@ -710,6 +729,14 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.Temperature == nil {
 		patch.Temperature = old.Temperature
 	}
+	// The merged policy is validated too, not only the body: the rules above can combine a body's
+	// insecureTLS with a stored caFile, and this is the last point where nothing has been written or
+	// applied yet. s.mu is held here, so the unlock on the error path is by hand — see the note above
+	// the lock about what a forgotten one costs.
+	if err := validateTLS(patch); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	reconnectMCP := !sameMCP(old.MCP, patch.MCP)
 	llmChanged := !old.LLM.Same(patch.LLM)
 	s.cfg = patch
@@ -754,6 +781,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	s.emitState()
 	if patch.StructuredContent != "" || len(patch.MCP) > 0 {
 		s.logStructuredMode(patch)
+	}
+	// Both flags already mean "an endpoint changed", which is exactly when the certificate policy is
+	// worth restating — including when it did not change, because the line is the notice that a
+	// deviation is still in force.
+	if llmChanged || reconnectMCP {
+		s.logTLS(patch)
 	}
 	return nil
 }

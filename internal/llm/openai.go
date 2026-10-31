@@ -16,15 +16,21 @@ import (
 	"bareloop/internal/ir"
 )
 
-type openai struct{ cfg Config }
+// tr is the transport New built from the endpoint's TLS policy (nil meaning http.DefaultTransport).
+// It lives on the provider rather than being built per request so that a policy which needs its own
+// transport still pools connections, and so a caFile is read while the config is being applied rather
+// than on the first request that would need it.
+type openai struct {
+	cfg Config
+	tr  http.RoundTripper
+}
 
 func (p *openai) Name() string { return "openai" }
 
+// client is one http.Client per request on purpose — it is cheap, and the timeout differs per call
+// (a stream must not carry one). The transport is the shared one.
 func (p *openai) client(timeout time.Duration) *http.Client {
-	c := &http.Client{}
-	if p.cfg.HTTP != nil {
-		c.Transport = p.cfg.HTTP.Transport
-	}
+	c := &http.Client{Transport: p.tr}
 	if timeout > 0 {
 		c.Timeout = timeout
 	}

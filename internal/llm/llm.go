@@ -16,6 +16,7 @@ import (
 
 	"bareloop/internal/asm"
 	"bareloop/internal/ir"
+	"bareloop/internal/tlsconf"
 )
 
 // Tool is a tool definition sent to the model.
@@ -130,6 +131,19 @@ type Config struct {
 	NCTX int `json:"nCtx"`
 	// Path overrides the endpoint path (default /chat/completions).
 	Path string `json:"path"`
+	// InsecureTLS skips certificate verification for this endpoint. It is a pointer so the three
+	// answers stay separate over the API: absent means nobody configured it, false means "verify",
+	// true means "do not verify". A plain bool would make absent and false the same value, and a
+	// session that once asked for it could never be switched back. It is not "ignore the certificate but
+	// still check the name": in crypto/tls the name and the chain are one verification, so skipping it
+	// lets any host between here and there answer for that endpoint — not only the one you meant — which
+	// is why the daemon says so out loud when it is on.
+	InsecureTLS *bool `json:"insecureTLS,omitempty"`
+	// CAFile is a PEM bundle this endpoint is verified against — and the only thing it is verified
+	// against, because naming a file is a trust decision rather than an addition to one: the system
+	// trust store is not consulted. It is read when the config is saved, not on the first request,
+	// so a wrong path is reported while there is still a session open in front of whoever typed it.
+	CAFile string `json:"caFile,omitempty"`
 	// Pricing is what a token costs on this endpoint (per 1,000,000). It changes no request, which is
 	// why it is a pointer to a struct of plain numbers: absent means "no idea, show no cost", and an
 	// explicit {"input":0,"cachedInput":0,"output":0} is a real answer meaning "free".
@@ -147,9 +161,17 @@ type Config struct {
 // Pricing is deliberately not compared, and adding it here would be a bug: a price tag changes no
 // request, so it must never be a reason to rebuild a provider, reconnect, or warn that saving a
 // setting costs the KV cache.
+//
+// The two TLS fields are compared, and they belong here: they decide whether a request is even sent
+// to that host. Absent and false are treated as the same answer, though — neither asks anything of the
+// transport — so a PATCH that only spells out "false" does not rebuild a provider and does not warn
+// about a KV cache nothing changed.
 func (c Config) Same(o Config) bool {
 	if c.Kind != o.Kind || c.BaseURL != o.BaseURL || c.APIKey != o.APIKey || c.Model != o.Model ||
 		c.Path != o.Path || c.NCTX != o.NCTX {
+		return false
+	}
+	if a, b := c.TLS(), o.TLS(); a.Insecure() != b.Insecure() || c.CAFile != o.CAFile {
 		return false
 	}
 	if len(c.Headers) != len(o.Headers) {
@@ -163,15 +185,36 @@ func (c Config) Same(o Config) bool {
 	return true
 }
 
+// TLS is this endpoint's certificate policy in the shape internal/tlsconf takes. A method, so that
+// nothing asking "how is this endpoint verified" can read one of the two fields without the other.
+func (c Config) TLS() tlsconf.Options {
+	return tlsconf.Options{InsecureTLS: c.InsecureTLS, CAFile: c.CAFile}
+}
+
 // New builds a provider from cfg.
 func New(cfg Config) (Provider, error) {
 	if cfg.BaseURL == "" {
 		return nil, errors.New("llm: baseUrl is required")
 	}
+	// The kind is settled before anything is read from disk: an unknown kind should fail without
+	// having opened a caFile.
 	switch strings.ToLower(strings.TrimSpace(cfg.Kind)) {
 	case "", "openai", "openai-compatible", "llamacpp", "vllm", "ollama":
-		return &openai{cfg: cfg}, nil
 	default:
 		return nil, errors.New("llm: unknown provider kind " + cfg.Kind)
 	}
+	// The TLS policy is resolved once, here, for two reasons: a caFile that cannot be read is a
+	// failure of the config rather than of the first request, and every request this provider makes
+	// then shares one transport — which is what keeps connections pooled now that the policy means
+	// a transport of its own instead of the process-wide default.
+	tr, err := cfg.TLS().Transport("llm")
+	if err != nil {
+		return nil, err
+	}
+	if cfg.HTTP != nil && cfg.HTTP.Transport != nil {
+		// A caller-supplied transport wins, policy fields and all: what it does about certificates is
+		// that caller's business, not a second policy to reconcile with the first.
+		tr = cfg.HTTP.Transport
+	}
+	return &openai{cfg: cfg, tr: tr}, nil
 }

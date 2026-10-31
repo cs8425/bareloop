@@ -84,6 +84,16 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 	if cfg.LLM.Pricing == nil {
 		cfg.LLM.Pricing = m.defaults.LLM.Pricing
 	}
+	// Trust is a property of the endpoint as much as its price is, so a daemon whose default endpoint is
+	// a private https server can state the answer once instead of in every session. It is inherited as a
+	// pair rather than field by field, because a create body has no way to say "no caFile" — an empty
+	// string means "inherit", as it does for apiKey and model. Inheriting the default's file next to a
+	// session's own insecureTLS would therefore be a contradiction the caller could not talk their way
+	// out of; a session that says anything about certificates replaces the daemon's answer entirely.
+	if cfg.LLM.InsecureTLS == nil && cfg.LLM.CAFile == "" {
+		cfg.LLM.InsecureTLS = m.defaults.LLM.InsecureTLS
+		cfg.LLM.CAFile = m.defaults.LLM.CAFile
+	}
 	if cfg.Temperature == nil {
 		cfg.Temperature = m.defaults.Temperature
 	}
@@ -225,6 +235,12 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 		if _, err := asm.ParseStructuredMode(mc.StructuredContent); err != nil {
 			return nil, fmt.Errorf("session %q: mcp server %q: %w", cfg.ID, mc.Name, err)
 		}
+	}
+	// Same rule as the two above: a certificate policy that cannot work — or names a file that cannot be
+	// read — is refused before data/<id>/config.json exists, so whoever typed the path hears about it now
+	// rather than as a failed request an hour later.
+	if err := validateTLS(cfg); err != nil {
+		return nil, err
 	}
 	// The directory is the identity, so an existing directory means the id is taken - even when no log
 	// has been written yet (a session interrupted before its first entry, or a directory someone made
