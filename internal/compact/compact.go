@@ -51,8 +51,10 @@ type Params struct {
 	ThresholdPct int `json:"threshold"`
 	// KeepTargetPct is the cap on the summary itself (acceptance check).
 	KeepTargetPct int `json:"keepTarget"`
-	// MinKeptUserTurns applies to boundary cuts, MinKeptMessages to split cuts (0 = compact
-	// everything allowed).
+	// MinKeptUserTurns is a floor on boundary cuts (phase 1) and MinKeptMessages is a floor on the
+	// kept tail itself, raising the cap when the two contradict each other (§2.1). Both mean "no floor"
+	// at 0 and clamp negatives to 0 (see Normalise); the fresh-session default of 4 turns belongs to
+	// the defaults, not to the field.
 	MinKeptUserTurns int `json:"minKeptUserTurns"`
 	MinKeptMessages  int `json:"minKeptMessages"`
 	// MinSummarizeTokens: below this, a summary call is not worth it.
@@ -93,7 +95,12 @@ func DefaultParams() Params {
 // UseInLoop is the effective value of InLoop: on unless explicitly disabled (T2, §1.1).
 func (p Params) UseInLoop() bool { return p.InLoop == nil || *p.InLoop }
 
-// Normalise fills in blanks and clamps nonsense.
+// Normalise fills in blanks and clamps nonsense, by one rule with two halves. A field whose 0 would
+// be destructive (threshold, keepTarget, summaryMax, minSummarizeTokens) or is not a real answer
+// (maxAttempts) falls back to its default at 0 and below. A field whose 0 IS the answer — the two
+// floors minKeptUserTurns and minKeptMessages — keeps 0 as "no floor" and clamps only negatives to
+// it, because promoting a negative to the shipped default would enforce a floor nobody asked for.
+// The one documented exception is maxAttempts, where a negative means "retry forever" and survives.
 func (p Params) Normalise() Params {
 	d := DefaultParams()
 	if p.ThresholdPct <= 0 {
@@ -103,7 +110,7 @@ func (p Params) Normalise() Params {
 		p.KeepTargetPct = d.KeepTargetPct
 	}
 	if p.MinKeptUserTurns < 0 {
-		p.MinKeptUserTurns = d.MinKeptUserTurns
+		p.MinKeptUserTurns = 0
 	}
 	if p.MinKeptMessages < 0 {
 		p.MinKeptMessages = 0
@@ -138,13 +145,19 @@ func (p Params) Normalise() Params {
 // Budget is the cap on the kept suffix: (threshold% − keepTarget%) × n_ctx (§2.1). The
 // budget is the difference of two numbers the user understands — no extra "clever
 // reservation" on top.
+//
+// 0 is a legal value, not a broken one: it asks for every recorded message to be replaced by the
+// summary, and only the brake parameters hold that back (§2.1).
 func (p Params) Budget(nctx int) int {
 	if nctx <= 0 {
 		return 0
 	}
 	d := p.ThresholdPct - p.KeepTargetPct
 	if d <= 0 {
-		return 0 // misconfiguration → protective floor → never auto-compacts
+		// why clamp to 0 instead of passing the difference through: Select compares the kept suffix
+		// against the budget, so a negative budget would reject even an empty tail and turn "compact
+		// everything" — a legal configuration (§2.1) — back into "never compact".
+		return 0
 	}
 	return nctx * d / 100
 }
@@ -190,8 +203,8 @@ const (
 	// TriggerInLoop is T2: before sending, inside the loop. On by default (compact.inLoop=false
 	// turns it off).
 	TriggerInLoop Trigger = "in_loop"
-	// TriggerManual is T3: the user pressed the button. It bypasses the trigger condition
-	// and the protective floor, never the safety floors (§1.1, §2.3).
+	// TriggerManual is T3: the user pressed the button. It bypasses the trigger condition and
+	// the need for real usage, never the safety floors, and never the geometry of the cut (§1.1, §2.3).
 	TriggerManual Trigger = "manual"
 )
 
@@ -204,8 +217,7 @@ const (
 	ReasonNCTXUnknown   Reason = "n_ctx unknown: no basis for a budget, no compaction"
 	ReasonNoUsage       Reason = "real context usage unavailable: not guessing"
 	ReasonBelowTrigger  Reason = "context usage below threshold"
-	ReasonBudgetZero    Reason = "threshold ≤ keepTarget: budget is 0, never auto-compacts"
-	ReasonTooSmall      Reason = "summarize region below minSummarizeTokens"
+	ReasonTooSmall      Reason = "summarize region below minSummarizeTokens: lower it, or there is nothing worth summarising yet"
 	ReasonNoBoundary    Reason = "no legal boundary keeps enough context"
 	ReasonInLoopOff     Reason = "in-loop compaction is off"
 	ReasonAlreadyActive Reason = "a compaction is already running"
@@ -220,7 +232,8 @@ type Plan struct {
 	// deliberate empty kept (compact everything). It must never be confused with "id present
 	// but not on the path", which is a broken boundary (§2.5).
 	BoundaryID *string
-	// Split marks a cut inside a user-message span (phase 2).
+	// Split marks a cut that is not a user-message span boundary: the summary covers part of a turn, or
+	// the whole path (Empty). A phase-2 cut that still lands on a user message is NOT a split (§2.3).
 	Split bool
 	// Empty marks compact-everything (kept is empty).
 	Empty bool
@@ -242,29 +255,56 @@ type Plan struct {
 // path is the EFFECTIVE path for planning (§3.2): the same entries the assembler would
 // send, i.e. [old summary(user), kept…] with the system head excluded (it is never
 // summarised and never part of the search). sizes holds real per-message tokens.
-func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params, manual bool) (*Plan, bool) {
+//
+// The kept tail is max(budget, the newest MinKeptMessages): budget is how much the user wants to
+// leave room for and MinKeptMessages is how little they will accept, so when the two contradict
+// each other the tail is made of the floor (§2.1).
+//
+// Select is pure geometry: it does not know or care which trigger asked for the cut, so an
+// automatic and a manual compaction of the same path land on the same boundary (§1.1).
+func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool) {
 	if nctx <= 0 {
 		return &Plan{Reason: ReasonNCTXUnknown}, false
 	}
-	budget := p.Budget(nctx)
-	if budget <= 0 && !manual {
-		// Manual compaction is not limited by the protective floor: with budget 0 the
-		// algorithm naturally lands on compact-everything.
-		return &Plan{Reason: ReasonBudgetZero}, false
-	}
+	budget := p.Budget(nctx) // the cap as the user set it: what the plan reports as Budget
 	suffix, _ := sizes.Suffix()
 	n := len(path)
 	if n == 0 {
 		return &Plan{Reason: ReasonTooSmall}, false
 	}
 	total := suffix[0]
+	// why this is checked before the search and not as one more floor inside it: this is the one refusal
+	// where minSummarizeTokens is certainly the blocker — the whole path is smaller than the minimum
+	// worth summarising, so no cut of any kind can pass it — and reporting "no legal boundary" instead
+	// sends the reader looking for a tool span when the number to change is the floor itself (§2.3).
+	if total < p.MinSummarizeTokens {
+		return &Plan{Reason: ReasonTooSmall}, false
+	}
+
+	// budget caps the kept tail while MinKeptMessages floors it, and the two can contradict each other:
+	// threshold ≤ keepTarget sets the cap to 0 while the floor says "keep N raw messages". The floor
+	// wins, and only outward — allowed is raised to the cost of the deepest legal cut that still leaves
+	// N entries, never lowered, because a floor can only ever demand more (§2.1). Every entry is at
+	// least one token, so suffix[] is strictly decreasing and the search below lands exactly on that
+	// cut: no shallower tail fits the raised cap and no deeper one survives the floor.
+	//
+	// why the plan still reports the unrevised budget: "KeptTokens > Budget" is the whole story of this
+	// paragraph, and it has to stay visible in the log and the inspector instead of being smoothed out.
+	allowed := budget
+	if p.MinKeptMessages > 0 && p.MinKeptMessages < n {
+		// why not raised when MinKeptMessages >= n: keeping all of it means summarising nothing, and the
+		// floors below refuse that rather than committing a compaction that replaced zero messages.
+		if j := floorCut(path, p.MinKeptMessages); j >= 0 && suffix[j] > allowed {
+			allowed = suffix[j]
+		}
+	}
 
 	floors := func(j int) bool {
 		if total-suffix[j] < p.MinSummarizeTokens {
 			return false // the region is not worth a summary call
 		}
 		if p.MinKeptMessages > 0 && len(path)-j < p.MinKeptMessages {
-			return false
+			return false // the floor: made reachable by the raised cap above, never negotiable here
 		}
 		return true
 	}
@@ -286,7 +326,7 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params, manual bool)
 		if roleOf(path[j]) != "user" {
 			continue
 		}
-		if suffix[j] > budget {
+		if suffix[j] > allowed {
 			continue
 		}
 		if !floors(j) || !userTurnsOK(j) {
@@ -301,33 +341,60 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params, manual bool)
 		}, true
 	}
 
-	// phase 2 — split a user-message span: the boundary may also sit before an assistant
-	// message inside the span; j == n means empty kept (compact everything).
+	// phase 2 — the boundary may also sit anywhere else that is legal: before an assistant message inside
+	// a user-message span (that is what makes a cut a split one), on a user message phase 1's
+	// minKeptUserTurns refused (a clean turn boundary, so not a split), or at j == n, which keeps
+	// nothing (compact everything).
+	// why j == n is written before roleOf(path[j]) in the Split expression: that index is one past the
+	// end of the path on purpose, and Go's || short-circuits.
 	for j := 0; j <= n; j++ {
 		if j < n && !legalBoundary(path[j]) {
 			continue
 		}
-		if suffix[j] > budget {
+		if suffix[j] > allowed {
 			continue
 		}
 		if !floors(j) {
 			continue
 		}
 		pl := &Plan{
-			Cut: j, Split: true, Empty: j == n,
+			Cut: j, Split: j == n || roleOf(path[j]) != "user", Empty: j == n,
 			SummarizeTokens: total - suffix[j], KeptTokens: suffix[j],
 			KeptUserTurns: countUsers(path[j:]),
 			Budget:        budget, Replaced: j,
 		}
 		if j < n {
-			// A split cut must still respect minKeptUserTurns only for boundary cuts, so
-			// nothing more to check here (§2.3).
+			// why minKeptUserTurns is not checked again here: the floor is a rule about turn boundaries
+			// (phase 1), and a cut that reaches this line either is not a turn boundary at all or is the
+			// only one that fits the tail — refusing then would turn the floor into a way to stop
+			// compaction, which §2.3 does not allow.
 			id := path[j].ID
 			pl.BoundaryID = &id
 		}
 		return pl, true
 	}
 	return &Plan{Reason: ReasonNoBoundary}, false
+}
+
+// floorCut is the deepest cut index that still leaves keep entries at a legal boundary, or -1 when
+// the path has no legal boundary that far back. Walking from n-keep towards 0 and stopping at the
+// first legal entry rounds the cut OUTWARD on purpose: the kept tail grows past the floor rather
+// than falling below it, which is the only reading of "keep at least N" that survives an illegal
+// boundary (a tool result cannot start the kept tail, §2.2). Select only ever asks for 1 ≤ keep <
+// len(path) (§2.1), but every keep is answered rather than left to index out of range.
+func floorCut(path []*ir.Entry, keep int) int {
+	// why keep <= 0 answers len(path): that cut keeps nothing, and keeping nothing is legal for every
+	// path — phase 2 of Select writes it as j == n without a boundary check — so it is the deepest cut
+	// there is, and path[len(path)] is exactly the index that does not exist.
+	if keep <= 0 {
+		return len(path)
+	}
+	for j := len(path) - keep; j >= 0; j-- {
+		if legalBoundary(path[j]) {
+			return j
+		}
+	}
+	return -1
 }
 
 func roleOf(e *ir.Entry) string {

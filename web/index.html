@@ -135,7 +135,11 @@
           <label>name <input name="name" /></label>
           <label>model <input name="model" spellcheck="false" /></label>
           <label>base URL <input name="baseUrl" spellcheck="false" placeholder="http://127.0.0.1:8901/v1" /></label>
-          <label>API key <input name="apiKey" type="password" spellcheck="false" placeholder="unchanged when empty" /></label>
+          <!-- autocomplete=off because an empty API key means "keep the stored one": a browser offering to
+               fill a credential here would be filling a field whose blank value is the answer. Chrome only
+               asks for the attribute to exist, and current-password / new-password would both be a lie. -->
+          <label>API key <input name="apiKey" type="password" spellcheck="false" autocomplete="off"
+            placeholder="unchanged when empty" /></label>
           <label>n_ctx <input name="nCtx" type="number" min="0" placeholder="0 = probe the server" /></label>
           <label>max turns <input name="maxTurns" type="number" min="0" placeholder="0 = unlimited" /></label>
           <!-- Prices live with the endpoint they price, which is why they are here and not per model.
@@ -155,14 +159,51 @@
             <input name="priceOutput" type="number" min="0" step="any" placeholder="per 1M tokens"
               title="what one million generated tokens cost." />
           </label>
-          <label>trigger % <input name="threshold" type="number" min="1" max="100" /></label>
-          <label>keep target % <input name="keepTarget" type="number" min="1" max="99" /></label>
-          <label>summary max % <input name="summaryMax" type="number" min="1" max="99" /></label>
-          <label>summary tries <input name="maxAttempts" type="number" min="1" max="9" /></label>
-          <label class="check"><input name="auto" type="checkbox" /> automatic compaction</label>
-          <label class="check"><input name="inLoop" type="checkbox" /> allow compaction between tool calls (T2)</label>
-          <label class="check"><input name="sendReasoning" type="checkbox" /> re-send the reasoning channel</label>
-          <label class="check"><input name="sendImages" type="checkbox" /> send image attachments to the model</label>
+          <label title="the share of n_ctx above which automatic compaction fires — and, because the summary cap and the kept tail add up to it, the ceiling on what is left afterwards. A cap set at or above this number leaves the tail nothing at all.">compact above %
+            <input name="threshold" type="number" min="1" max="100" /></label>
+          <label title="the ceiling on the summary itself: longer is retried, and after max attempts the session is asked what to do. The messages kept after the summary get (trigger − cap)% of the window — and 0 is a number that means something: a compaction then keeps head plus summary and nothing else, unless min kept messages floors the tail and makes the budget pay for the newest messages.">summary cap %
+            <input name="keepTarget" type="number" min="1" max="99" /></label>
+          <label title="max_tokens of the summary request itself, as a share of n_ctx: how much the summariser may write, not what it may leave behind">max_tokens %
+            <input name="summaryMax" type="number" min="1" max="99" /></label>
+          <label title="how many times the summary is asked again when it comes back over the cap; after that the session is asked whether to accept, retry, or keep the full history">summary attempts
+            <input name="maxAttempts" type="number" min="1" max="9" /></label>
+          <!-- This one is the floor under the tail above it: with a summary cap at or above the trigger the kept
+               tail is 0 tokens, and this number then decides how many raw messages stay behind anyway — a floor is
+               what the tail is made of when it disagrees with the budget, so raising it changes the size of the
+               tail, never whether compaction runs. It is not a percentage, and 0 is its default (compact everything
+               allowed), which is why the arithmetic line has to read it to say anything true.
+          -->
+          <label title="how many raw messages a compaction has to leave behind, whatever the tail budget says: the tail is the greater of the budget and the newest N messages, rounded outwards so the cut stays legal (that can keep more than N, never fewer). 0 — the default — says it may keep nothing but the summary (head + summary), which is what a summary cap at or above the trigger asks for. What a floor costs in tokens is in inspect, not here.">min kept messages
+            <input name="minKeptMessages" type="number" min="0" max="99" /></label>
+          <!-- The two parameters that refuse a compaction rather than size one, which is why this dialog was
+               built without them: neither changes the arithmetic line below. One constrains where a cut may land,
+               the other is a size question about the whole conversation, and the reason the server gives now says
+               which of the two it was — so both numbers are shown while that reason is being read.
+          -->
+          <label title="the smallest number of user messages a cut that lands on a turn boundary may leave behind. Only turn boundaries are held to it: when the tail budget leaves no boundary with that many turns, the cut moves inside a turn instead of compaction refusing — a preference about where, not a veto. 0 turns the floor off and lets the budget decide alone; the default is 4.">min kept user turns
+            <input name="minKeptUserTurns" type="number" min="0" max="99" /></label>
+          <label title="how many real tokens there have to be worth summarising, so that a short conversation never pays for a summary call. Below it compaction refuses and names this number rather than blaming a boundary. Unlike the two floors above it, 0 is not an answer here: an empty box is stored as the default of 2000.">min tokens to summarise
+            <input name="minSummarizeTokens" type="number" min="1" /></label>
+          <!-- The three percentages are each other's arithmetic, and the one thing with no field of its own is
+               the tail: it gets (trigger − cap), or this block's min kept messages if that is more. So the
+               arithmetic is said out loud, in tokens, next to the fields that set it. Computed here and not read
+               from the server because it has to answer while the fields are being edited;
+               internal/compact/compact.go is the source of the formulas. A <p> rather than an <output> because
+               there is no form owner to submit and no value to carry.
+          -->
+          <p class="hint span3" id="compact-math"></p>
+          <label class="check">
+            <input name="auto" type="checkbox" role="switch" /> automatic compaction
+          </label>
+          <label class="check">
+            <input name="inLoop" type="checkbox" role="switch" /> allow compaction between tool calls (T2)
+          </label>
+          <label class="check">
+            <input name="sendReasoning" type="checkbox" role="switch" /> re-send the reasoning channel
+          </label>
+          <label class="check">
+            <input name="sendImages" type="checkbox" role="switch" /> send image attachments to the model
+          </label>
           <!-- One word for the whole session; a server can overrule it in its own entry below. The row
                spans the grid because every option is a sentence the reader has to finish before choosing. -->
           <label class="span3">
@@ -193,25 +234,35 @@
           MCP servers (JSON array)
           <textarea name="mcp" rows="8" spellcheck="false"></textarea>
         </label>
-        <label>
-          redraw rate while a reply streams (Hz)
-          <input name="renderHz" type="number" min="0" max="120" step="1" />
-        </label>
-        <label class="check"><input name="renderHzAuto" type="checkbox" /> let it step down by itself (auto)</label>
+        <!-- The rate and the switch that owns it share a row: the switch is a mode of that number. Left to
+             the label's own column layout the box stacked *above* the words belonging to it, which reads as a
+             heading for whatever came next. -->
+        <div class="hz">
+          <label>
+            how often a streaming reply is redrawn
+            <span class="with-unit"><input name="renderHz" type="number" min="0" max="120" step="1" /><span>Hz</span></span>
+          </label>
+          <label class="check">
+            <input name="renderHzAuto" type="checkbox" role="switch" /> pick the rate by itself (auto)
+          </label>
+        </div>
         <p class="hint">
-          This one belongs to <em>this browser</em>: it says how much of your machine a growing reply may
+          <em>This browser</em> asks this one, not the session: it says how much of your machine a growing reply may
           spend redrawing, so it is stored locally and never sent to the server. Text is never lost by
           redrawing less — the characters keep arriving and the next frame draws everything up to now. At 0
           the bubble shows its cursor and the whole reply appears when the stream ends, which is cheaper
           than 1 Hz on a machine that cannot afford a parse a second; <code>?mode=plain</code> is the
           readable version of that bargain (text as it arrives, markdown at the end). A <code>?hz=</code>
           in the address bar wins over this row until the next load, and the streaming message prints the
-          rate it is actually managing in its own header. <em>auto</em> starts at 20 Hz and steps one rung at
-          a time — 10, 5, 1, then not at all — after three frames in a row cost more than 60% of what the
-          current rate promises, and back up after twenty cheap ones. It is judged on the whole delta,
+          rate it is really managing in its own header.
+        </p>
+        <p class="hint">
+          <em>auto</em> keeps choosing while the reply runs: it starts at 20 Hz and moves one rung at a time
+          — 10, 5, 1, then 0 — down after three redraws in a row cost more than 60% of what the
+          current rate promises, and back up after twenty cheap ones. It is judged on the whole redraw,
           follow-scroll included, which is the only way to catch the cost that lands after the markdown is
-          drawn. What stepping down cannot do is make one frame cheaper: on a long transcript the money goes
-          to re-laying-out the document, so <em>auto</em> keeps the page from falling over rather than making
+          drawn. What no rate can do is make a single redraw cheaper: on a long transcript the money goes
+          to laying the document out again, so <em>auto</em> keeps the page from falling over rather than making
           it fast.
         </p>
         <label>

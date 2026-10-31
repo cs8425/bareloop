@@ -40,6 +40,14 @@ export async function openSettings() {
   fld(f, 'keepTarget').value = cfg.compact?.keepTarget ?? 50;
   fld(f, 'summaryMax').value = cfg.compact?.summaryMax ?? 70;
   fld(f, 'maxAttempts').value = cfg.compact?.maxAttempts ?? 3;
+  // 0 is what the server runs on when the key is absent (DefaultParams/Normalise), so showing 0 for a session
+  // that never set it is not a guess — and saving that 0 back changes nothing.
+  fld(f, 'minKeptMessages').value = cfg.compact?.minKeptMessages ?? 0;
+  // The two below coerce differently, and that difference is the rule for this whole block: minKeptUserTurns is a
+  // floor like the one above it, so 0 is a real answer and only the default of 4 comes from the server, while
+  // minSummarizeTokens has no meaningful 0 and an empty box means its default of 2000 — like the percentages.
+  fld(f, 'minKeptUserTurns').value = cfg.compact?.minKeptUserTurns ?? 4;
+  fld(f, 'minSummarizeTokens').value = cfg.compact?.minSummarizeTokens ?? 2000;
   fld(f, 'maxTurns').value = cfg.maxTurns || '';
   // The redraw rate is not config — it is this browser's preference — but it lives in this dialog
   // because it is a knob people only reach for once and then forget. Show what is actually in force
@@ -72,7 +80,79 @@ export async function openSettings() {
   fld(f, 'priceOutput').value = price ? price.output ?? 0 : '';
   fld(f, 'systemPrompt').value = cfg.systemPrompt || '';
   fld(f, 'mcp').value = JSON.stringify(cfg.mcp || [], null, 2);
+  compactMath(f);
   $('#dlg-settings').showModal();
+}
+
+// tok writes a token count the way every token count in this project's own notes is written: digits and a
+// space every three. `fmtN` is deliberately not used: it rounds 8 192 to "8k", and a line whose entire job is
+// to let someone check their arithmetic against the server's cannot afford to be the one that rounds.
+const tok = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+
+// pct is the server's own integer arithmetic: Params.TriggerLevel, SummaryCap and Budget all compute
+// `nctx * pct / 100` on ints, so rounding down here is agreeing with it rather than inventing a style.
+const pct = (nctx, p) => Math.trunc((nctx * p) / 100);
+
+// compactMath says out loud, in tokens, what the three percentages of the compaction block add up to — and what
+// the kept-tail floor does when they leave no room at all.
+//
+// They are each other's arithmetic and three columns of labels cannot say so: the trigger is also the ceiling
+// afterwards, the summary cap caps the summary ALONE, and the kept tail gets the difference — which is why the
+// tail has no field of its own, except for minKeptMessages: that is a floor under the tail, and a floor is what
+// the tail is made of when it disagrees with the budget (internal/compact/compact.go: Select, floorCut).
+// The formulas and both failure sentences are the server's (TriggerLevel, SummaryCap, Budget, ReasonNCTXUnknown,
+// ReasonNoBoundary), re-derived here so the answer is there while the fields are still being edited.
+//
+// The coercion is saveSettings' own (|| 70, || 50, || 0): an empty box is stored as the default, so the line
+// previews what pressing save does instead of the empty field. It is written a second time rather than
+// extracted because the PATCH body reads better with each default beside its own field, and the two places
+// are ten lines apart.
+function compactMath(f) {
+  const out = $('#compact-math');
+  // why: the markup and this script are two files. If that paragraph is ever renamed or dropped, the dialog
+  // still has to open and save — losing its arithmetic line is not a reason to throw on the way in.
+  if (!out) return;
+  const nctx = Number(fld(f, 'nCtx').value) || 0;
+  const trigger = Number(fld(f, 'threshold').value) || 70;
+  const cap = Number(fld(f, 'keepTarget').value) || 50;
+  // minKeptMessages is the floor under the tail, so the line cannot be written without it: with 0 the tail is
+  // whatever the budget leaves, with N the tail is at least the newest N raw messages. Same coercion as
+  // saveSettings.
+  const kept = Number(fld(f, 'minKeptMessages').value) || 0;
+  // why: every number here is a share of n_ctx, so without one there is no budget to state. 0 is also the
+  // documented "probe the server" answer, so the line says which of the two it is rather than printing a zero
+  // budget. This is the one case where nothing runs at all: runCompact refuses on n_ctx <= 0 before it asks
+  // whether the call was manual (ReasonNCTXUnknown), so unlike the cap misconfiguration below there is no way
+  // to force it.
+  if (nctx <= 0) {
+    out.textContent = 'n_ctx 0 asks the server for the window: until it answers there is no budget and nothing compacts, manual included';
+    return;
+  }
+  const tail = trigger > cap ? pct(nctx, trigger - cap) : 0;
+  // why: a tail of 0 tokens is a legal answer, not a broken configuration, and the server makes the same cut for
+  // every trigger (compact.Select has no manual argument any more). With nothing left to keep, the cut that fits
+  // is "after the last entry" — head + summary and nothing else — unless minKeptMessages floors the tail, in
+  // which case the budget gives way and the newest N raw messages stay whatever they cost (spec §2.1). Saying
+  // that out loud matters more than the arithmetic, because the summary is capped at cap% while the trigger sits
+  // at trigger%: after such a compaction the next request can be over the trigger already, and it fires again.
+  // What can still refuse is a floor the browser cannot evaluate — minSummarizeTokens against the size of the
+  // region, or a minKeptMessages no legal cut can reach — so the line says where that answer lives instead of
+  // pretending to compute it.
+  if (tail === 0) {
+    out.textContent =
+      `trigger ${trigger}% is not above the summary cap ${cap}%: the tail budget is 0, so ` +
+      (kept > 0
+        ? `min kept messages ${kept} decides the tail — the newest ${kept} raw messages stay whatever they cost (inspect shows the number) and everything older is summarised. `
+        : 'a compaction keeps head + summary only. ') +
+      `The summary alone may be ${tok(pct(nctx, cap))} tokens against a ${tok(pct(nctx, trigger))}-token trigger, so it can fire again next turn`;
+    return;
+  }
+  out.textContent =
+    `fires above ${tok(pct(nctx, trigger))} tokens · the summary must fit ${tok(pct(nctx, cap))} · ` +
+    `the tail you keep gets ${tok(tail)} (${trigger}% − ${cap}% of n_ctx ${tok(nctx)})` +
+    // why "gets" becomes "at least": the floor is in messages and the browser has no per-message sizes, so the
+    // percentage is a lower bound the moment a floor exists — stating it as exact would be inventing a number.
+    (kept > 0 ? `, never fewer than the newest ${kept} raw messages` : '');
 }
 
 export async function saveSettings() {
@@ -105,6 +185,16 @@ export async function saveSettings() {
       keepTarget: Number(fld(f, 'keepTarget').value) || 50,
       summaryMax: Number(fld(f, 'summaryMax').value) || 70,
       maxAttempts: Number(fld(f, 'maxAttempts').value) || 3,
+      // `|| 0`, not a safer default: an empty box has to land on 0 (empty kept allowed, the server's own
+      // default), because quietly storing 1 here would switch the brake on in a session the person never asked
+      // to protect.
+      minKeptMessages: Number(fld(f, 'minKeptMessages').value) || 0,
+      // A floor, so 0 travels: clearing the box means "no floor", and quietly storing the shipped default of 4
+      // would put a floor back on a session that just asked for none.
+      minKeptUserTurns: Number(fld(f, 'minKeptUserTurns').value) || 0,
+      // This one has no 0 to travel (the server reads anything below 1 as the default), so an empty box is the
+      // default here as well.
+      minSummarizeTokens: Number(fld(f, 'minSummarizeTokens').value) || 2000,
     },
     // The whole assembler block goes back, checked values and all: `omitToolResultName` is a plain
     // bool on the server, so an absent field there cannot mean "off".
@@ -236,6 +326,12 @@ export function wireSettings() {
     // when auto is unticked hands the person back the rate the machine was actually paying.
     if (e.target.checked) box.value = String(liveAutoHz());
   };
+  // The arithmetic line has to answer while the fields are being edited, so it hangs off every field that sets
+  // it — and off `input` rather than `change`, because "4096" typed one digit at a time is worth reading as
+  // 4096 before the field is ever blurred.
+  for (const name of ['nCtx', 'threshold', 'keepTarget', 'minKeptMessages']) {
+    fld($('#settings-form'), name).oninput = () => compactMath($('#settings-form'));
+  }
   $('#settings-form').addEventListener('submit', (e) => {
     e.preventDefault();
     save();

@@ -72,7 +72,10 @@ async function showInspect() {
     ),
   );
   if (data.boundaryId) head.appendChild(el('div', '', `boundary ${data.boundaryId}${data.boundaryBroken ? ' (missing!)' : ''}`));
-  if (data.planReason) head.appendChild(el('div', '', `next compaction plan: ${data.planReason} (cut ${data.plan?.cut ?? 0})`));
+  // What the next compaction would do, planned by the server from the same entries it would send.
+  // Shown when it succeeds as well as when it refuses: "what would a compaction here cost me" and "why
+  // did nothing happen" are the same question, and this is the only place it can be asked first.
+  if (data.plan) head.appendChild(el('div', '', planLine(data.plan, rows.length)));
   if (data.tools?.length) head.appendChild(el('div', '', `tools: ${data.tools.join(', ')}`));
   body.appendChild(head);
 
@@ -126,4 +129,26 @@ async function showInspect() {
   body.appendChild(actions);
   body.appendChild(raw);
   body.appendChild(el('div', 'dim', 'dimmed rows are summarised away; italic tokens are byte/4 estimates'));
+}
+
+// planLine spells out the cut: how much of the path becomes a summary, what stays raw, and where the
+// boundary lands.
+//
+// why the fields are capitalised: compact.Plan carries no json tags, so /inspect serialises Go's own
+// field names — reading plan.cut or plan.keptTokens quietly gives undefined and the line prints zeros.
+//
+// why the numbers are only read when there is no reason: a refused plan is returned with just its
+// reason filled in, so its cut and its budget are unset zeros rather than measurements.
+function planLine(p, total) {
+  if (p.Reason) return `next compaction: ${p.Reason}`;
+  const boundary = p.Empty
+    ? 'no boundary, the whole path becomes the summary'
+    : `boundary ${p.BoundaryID}${p.Split ? ' (split inside a user turn)' : ''}`;
+  // why the contradiction is spelled out instead of smoothed over: the tail is the greater of the budget
+  // and min kept messages, so a plan may keep more than the budget two lines above reports, and the
+  // reader has to be told which of the two won (§2.1).
+  const over = p.KeptTokens > p.Budget ? ` — over the ${fmtN(p.Budget)}-token tail budget: min kept messages wins` : '';
+  return `next compaction: ${p.Replaced} of ${total} messages \u2192 ${fmtN(p.SummarizeTokens)} tokens of summary, ${fmtN(
+    p.KeptTokens,
+  )} kept raw (${p.KeptUserTurns} user turns), ${boundary}${over}`;
 }

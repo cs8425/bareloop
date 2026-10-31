@@ -126,9 +126,23 @@ compaction entry's meta, because the log line is not the durable record.
 
 The path is the truth and exactly one assembler decides what leaves the process. A trigger is
 `contextUsed > n_ctx × threshold%`, where `contextUsed` is the reported usage of the last completed turn
-plus a token count of everything appended since. The cut keeps the newest suffix that fits `keepTarget%`
-of the window, never inside a tool span and never before a tool result, and never fewer than
-`minKeptUserTurns` user turns. Everything above it is summarised by a request whose prefix is
+plus a token count of everything appended since. Two percentages of the window decide the cut:
+the kept tail has to fit `(threshold% - keepTarget%)` and the summary itself has to fit
+`keepTarget%` — they are two halves of one budget, not two independent settings. A tail of 0 is a legal
+answer, and `minKeptMessages` is the floor under it: the tail is `max(budget, the newest N messages)`,
+rounded outward to a legal boundary, so `threshold <= keepTarget` means "keep the newest N raw messages
+and summarise everything older" — with N = 0 that is head + summary only, and it happens automatically,
+not just on demand. `minKeptUserTurns` cannot veto such a cut (it constrains turn boundaries, and a
+cut floored by `minKeptMessages` has no turn boundary to constrain). A cut is reported as split when
+it is not a user-message span boundary: phase 2 of the search *moves* the cut rather than relabelling
+one, so a cut that still lands on a `user` message is an ordinary boundary even though phase 1 refused
+it. The two ways a compaction can refuse are kept apart because they point at different knobs — a
+whole path smaller than `minSummarizeTokens` names that parameter, while a path that is large enough
+but has no boundary satisfying the floors says that instead. One rule covers every parameter: a 0 or a
+negative on a percentage or on `minSummarizeTokens` falls back to its default, while 0 on either floor
+(`minKeptMessages`, `minKeptUserTurns`) means "no floor" and only negatives clamp to it. The cut never
+lands inside a tool span or before a tool result. Everything above it is summarised by a request
+whose prefix is
 byte-identical to the last payload actually sent, so the provider's prompt cache survives. The commit
 writes the boundary entry and moves the tip in one log record; the old branch stays intact, so any
 compaction can be undone by moving the tip back. Acceptance is size-based (with one retry and then a

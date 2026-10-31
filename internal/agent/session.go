@@ -719,6 +719,11 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		// An empty list is a change ("remove every server"); an absent key is not.
 		patch.MCP = old.MCP
 	}
+	// compact is the one block that replaces instead of merging field by field, and Params is why: it is a
+	// plain struct, so an absent key and a zero key are the same byte to the decoder, while 0 is a legal
+	// answer for two of its fields (minKeptMessages, minKeptUserTurns — "no floor"). A field-by-field merge
+	// could not express those 0s, so the block is either taken whole or not at all: nothing in it means
+	// "unchanged", anything in it is the whole new answer. README.md documents that where PATCH is.
 	if patch.Compact == (compact.Params{}) {
 		patch.Compact = old.Compact
 	}
@@ -1069,8 +1074,10 @@ func (s *Session) Inspect() *Inspection {
 	for _, t := range tools {
 		ins.Tools = append(ins.Tools, t.Name)
 	}
-	// The plan is computed from the very slice the assembler produced (§4).
-	plan, ok := compact.Select(built.Entries, sizes, ins.NCTX, cfg.Compact, true)
+	// The plan is computed from the very slice the assembler produced (§4). Select does not know
+	// which trigger would run it, so this is also the cut an automatic compaction makes: what it
+	// does not show is whether the trigger fires at all.
+	plan, ok := compact.Select(built.Entries, sizes, ins.NCTX, cfg.Compact)
 	if plan != nil {
 		ins.Plan = plan
 		if ok {

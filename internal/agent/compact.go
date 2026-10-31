@@ -30,7 +30,8 @@ type CompactResult struct {
 	Boundary string          `json:"boundary,omitempty"`
 	// Empty marks compact-everything: the boundary field is absent (spec §2.5).
 	Empty bool `json:"empty,omitempty"`
-	// Split marks a cut inside a user-message span (phase 2).
+	// Split marks a cut that is not a user-message span boundary (§2.3): the summary covers part of a
+	// turn, or the whole path when Empty.
 	Split         bool   `json:"split,omitempty"`
 	Replaced      int    `json:"replaced,omitempty"`
 	Summarized    int    `json:"summarizeTokens,omitempty"`
@@ -95,12 +96,12 @@ func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force b
 			return res
 		}
 	}
-	return s.doCompact(ctx, trig, manual, force, "")
+	return s.doCompact(ctx, trig, manual, "")
 }
 
 // CompactNow is trigger T3: the user pressed the button. Manual compaction bypasses the
-// trigger condition and the protective budget floor, never the safety floors (§1.1), and it
-// still runs the full acceptance gate.
+// trigger condition and the need for real usage, never the safety floors and never the cut
+// itself (§1.1), and it still runs the full acceptance gate.
 func (s *Session) CompactNow(ctx context.Context, instruction string) (CompactResult, error) {
 	res := CompactResult{Trigger: compact.TriggerManual, Manual: true}
 	if s.isGenerating() {
@@ -110,7 +111,7 @@ func (s *Session) CompactNow(ctx context.Context, instruction string) (CompactRe
 		return res, errors.New(string(compact.ReasonAlreadyActive))
 	}
 	defer s.compMu.Unlock()
-	r := s.runCompact(ctx, compact.TriggerManual, true, true, instruction)
+	r := s.runCompact(ctx, compact.TriggerManual, true, instruction)
 	return r, nil
 }
 
@@ -152,7 +153,7 @@ func (s *Session) leaveCompaction() {
 }
 
 // doCompact wraps runCompact with the lock.
-func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual, force bool, instruction string) CompactResult {
+func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string) CompactResult {
 	if !s.enterCompaction() {
 		r := CompactResult{Trigger: trig, Manual: manual}
 		r.Skipped = string(compact.ReasonAlreadyActive)
@@ -160,11 +161,12 @@ func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual, f
 		return r
 	}
 	defer s.leaveCompaction()
-	return s.runCompact(ctx, trig, manual, force, instruction)
+	return s.runCompact(ctx, trig, manual, instruction)
 }
 
-// runCompact is the whole compaction run: plan, summarise, gate, commit.
-func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual, force bool, instruction string) CompactResult {
+// runCompact is the whole compaction run: plan, summarise, gate, commit. manual decides only
+// whether real usage is required (§1.1); compact.Select chooses the same cut either way.
+func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string) CompactResult {
 	cfg := s.Config()
 	p := cfg.Compact
 	res := CompactResult{Trigger: trig, Manual: manual}
@@ -186,7 +188,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual, 
 		res.Skipped = string(compact.ReasonNoUsage)
 		return res
 	}
-	plan, ok := compact.Select(region, sizes, nctx, p, manual || force)
+	plan, ok := compact.Select(region, sizes, nctx, p)
 	if plan != nil {
 		res.Replaced = plan.Replaced
 		res.Summarized = plan.SummarizeTokens
@@ -203,6 +205,14 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual, 
 		return res
 	}
 	res.SummaryCap = p.SummaryCap(nctx)
+	if plan.KeptTokens > plan.Budget {
+		// The kept tail is bigger than the budget the user configured, and minKeptMessages is the only
+		// thing that can do that (§2.1). Say it out loud: a reader who compares this tail with threshold
+		// and keepTarget finds no configuration that explains it, and starts doubting the arithmetic
+		// instead of the floor they set.
+		s.logf("compaction (%s): kept tail %d tokens over its %d-token budget (minKeptMessages %d wins over the cap)",
+			trig, plan.KeptTokens, plan.Budget, p.MinKeptMessages)
+	}
 
 	// Decide the summary shape once, here, where the parameters are owned: the entry then records
 	// the mode that actually ran. Recording "prefix-stable" while the serial chain folded a
@@ -257,8 +267,12 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual, 
 			if p.Accepts(nctx, size) {
 				return s.commitCompaction(cfg, p, plan, text, size, summaryModel, res)
 			}
-			s.logf("compaction (%s): attempt %d produced %d tokens, cap is %d (%d%% of n_ctx)",
-				trig, attempt, size, res.SummaryCap, p.SummaryMaxPct)
+			// The cap is SummaryCap, i.e. keepTarget% of n_ctx, so the percentage printed beside it has
+			// to be KeepTargetPct. Printing SummaryMaxPct here (max_tokens of the summary call, a
+			// different number and a different setting) told a reader that an 8 192-token cap was "70% of
+			// n_ctx" on a session whose config says keepTarget 20.
+			s.logf("compaction (%s): attempt %d produced %d tokens, cap is %d (keepTarget %d%% of n_ctx)",
+				trig, attempt, size, res.SummaryCap, p.KeepTargetPct)
 			extra = fmt.Sprintf("your previous attempt was %d tokens and the cap is %d: compress further, drop detail instead of structure",
 				size, res.SummaryCap)
 		}

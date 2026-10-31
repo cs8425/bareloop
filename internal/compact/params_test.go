@@ -49,9 +49,10 @@ func TestBudgetIsTheDifferenceNotAReservation(t *testing.T) {
 	}
 }
 
-// TestThresholdNotAboveKeepTargetNeverBudgets anything: a user who asks to keep more than the
-// threshold gets a zero budget, which must mean "never compact automatically", not "compact to 0".
-func TestThresholdNotAboveKeepTargetNeverBudgetsAnything(t *testing.T) {
+// TestThresholdNotAboveKeepTargetBudgetsZero pins the arithmetic of a configuration the settings
+// dialog lets a user reach. A zero budget does NOT mean "never compact": it means the only cut
+// that fits replaces every recorded message (spec §2.1), and select_test.go pins what stops it.
+func TestThresholdNotAboveKeepTargetBudgetsZero(t *testing.T) {
 	for _, p := range []Params{{ThresholdPct: 50, KeepTargetPct: 50}, {ThresholdPct: 40, KeepTargetPct: 50}} {
 		if got := p.Budget(40960); got != 0 {
 			t.Errorf("threshold %d <= keepTarget %d: budget = %d, want 0", p.ThresholdPct, p.KeepTargetPct, got)
@@ -136,8 +137,9 @@ func TestDefaultsMatchTheDocumentedTable(t *testing.T) {
 	}
 }
 
-// TestNormaliseFillsBlanksAndKeepsChoices: zero values are "unset" and fall back to the defaults,
-// while a deliberate choice (including a deliberate 0 for minKeptMessages) survives.
+// TestNormaliseFillsBlanksAndKeepsChoices pins Normalise's two halves: a field whose 0 would be
+// destructive falls back to its default, while a field whose 0 is the answer — the two floors — keeps
+// it, and a negative on those clamps to 0 rather than to the shipped default.
 func TestNormaliseFillsBlanksAndKeepsChoices(t *testing.T) {
 	n := Params{}.Normalise()
 	if n.ThresholdPct != 70 || n.KeepTargetPct != 50 || n.MinSummarizeTokens != 2000 || n.SummaryMaxPct != 70 ||
@@ -146,6 +148,12 @@ func TestNormaliseFillsBlanksAndKeepsChoices(t *testing.T) {
 	}
 	if n.MinKeptMessages != 0 {
 		t.Fatalf("minKeptMessages default must stay 0 (compact everything allowed), got %d", n.MinKeptMessages)
+	}
+	// why its own case: the two floors are the only fields where 0 is a real answer, so a negative has to
+	// land on 0 — landing on the default would enforce a floor the config never asked for.
+	neg := Params{MinKeptUserTurns: -3, MinKeptMessages: -3}.Normalise()
+	if neg.MinKeptUserTurns != 0 || neg.MinKeptMessages != 0 {
+		t.Fatalf("negative floors must clamp to 0 (no floor), got %+v", neg)
 	}
 	kept := Params{ThresholdPct: 90, KeepTargetPct: 10, MinKeptUserTurns: 0, MinKeptMessages: 6,
 		MinSummarizeTokens: 1, SummaryMaxPct: 30, MaxAttempts: 1, SummaryMode: ModeTranscript, Marker: "X"}.Normalise()

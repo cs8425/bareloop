@@ -409,7 +409,11 @@ dialog form { display: flex; flex-direction: column; gap: 8px; }
    label and every control in the dialog together (D39). Measured cost - desktop dialog (640px) form
    1264 -> 1303px, and on a phone +1.2% on top of the 16px floor, with zero wrapped labels and zero clipped
    values, still zero at `:root` 20px: `_state/r39-tap-targets-draft.md`. */
-dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-2); color: var(--muted); }
+/* The name of a field and the sentence under it were one colour, one rung apart - `--muted` 13px over
+   `--muted` 12px - so the form read as a single grey mass with nothing saying which line you type against.
+   A label now takes the colour of the control it names (the rule below paints all of them `--fg`) and the
+   hint keeps the secondary rung: colour carries that difference, because a pixel of size never did. */
+dialog label { display: flex; flex-direction: column; gap: 3px; font-size: var(--t-2); color: var(--fg); }
 dialog input, dialog select, dialog textarea { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; }
 dialog textarea[name=mcp] { font: var(--t-2) var(--mono); } /* same rung as its own label; mono because JSON */
 /* minmax(0,1fr), not 1fr. An `fr` track may not shrink below the smallest size of what it holds, and the
@@ -428,12 +432,90 @@ dialog .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1f
    two rules take the dialog's sideways overflow to 0 in every one - the fields land between 188 and 315px
    wide - with nothing else spilling out of the box. */
 dialog form > *, dialog .grid > *, dialog input, dialog select, dialog textarea { min-width: 0; }
-dialog .grid .check { grid-column: span 3; flex-direction: row; align-items: center; }
+/* A `.check` row is a row wherever it is put. The redraw-rate switch sits below the grid, and the
+   `flex-direction: column` it inherited from `dialog label` stacked its box *above* the words belonging to
+   it. The only part of the old rule that was ever about the grid is `grid-column`, so that is all that stays
+   with the grid. 8px and not the label's 3px: 3px is the gap between a name and its field, and here it read
+   as one word. */
+dialog .check { flex-direction: row; align-items: center; gap: 8px; }
+dialog .grid .check { grid-column: span 3; }
 /* A select whose answers are whole words needs the row too: at one column of the 595px content box,
    "fallback — only when the tool returned no text" is a control you cannot read, let alone tap. */
 dialog .grid .span3 { grid-column: span 3; }
+/* --- a boolean row is a switch, not a tick box -------------------------------------------------------
+   The bug, not the taste: the UA box is 13x13 (measured at three font sizes in the phone block) inside a
+   19px row, and a tick box is the affordance for "press submit and maybe this happens". Every boolean row
+   here takes effect when the dialog closes and one of them switches a neighbouring field off, which is what
+   a switch says. The control is therefore drawn from scratch: the track is the input's own box, the knob is
+   its ::after. `appearance: none` also retires the phone block's 18px override for dialog checkboxes
+   (`dialog input[type=checkbox]` outranks `input[type=checkbox]`, and specificity outvotes the media block).
+   The track's edge is an inset shadow and not a border because ::after is placed against the padding box: a
+   1px border would leave the knob 1px off-centre and make the arithmetic below a lie. Geometry lives in four
+   properties because the knob is measured from the track - hardcode 14px inside a 20px track and whoever
+   widens the track paints the knob outside it. The hit target is the row, not the 34x20 track: the control
+   is wrapped in its <label>, so the words toggle it too, and the phone block keeps that row at 32px. */
+dialog input[type='checkbox'] {
+  --sw-w: 34px; /* track */
+  --sw-h: 20px;
+  --sw-k: 14px; /* knob */
+  --sw-pad: 3px; /* air between knob and track: --sw-h == --sw-k + 2 * --sw-pad */
+  appearance: none;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: var(--sw-w);
+  height: var(--sw-h);
+  margin: 0;
+  padding: 0; /* `dialog input` above says 5px 7px, and padding would shrink the box the knob is measured in */
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg3);
+  box-shadow: inset 0 0 0 1px var(--border);
+  position: relative;
+}
+dialog input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: var(--sw-pad);
+  left: var(--sw-pad);
+  width: var(--sw-k);
+  height: var(--sw-k);
+  border-radius: 50%;
+  background: var(--muted);
+}
+/* Both blues are the ones #btn-send already uses for a control that is filled in and live. */
+dialog input[type='checkbox']:checked { background: #234876; box-shadow: inset 0 0 0 1px #35639f; }
+dialog input[type='checkbox']:checked::after {
+  /* travel = track - knob - the air on both sides, so the knob stops exactly where it started. */
+  transform: translateX(calc(var(--sw-w) - var(--sw-k) - 2 * var(--sw-pad)));
+  background: #eaf2ff;
+}
+dialog input[type='checkbox']:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* `auto` hands the rate field over to itself, and until now "handed over" was painted exactly like "yours to
+   edit": the sheet's only disabled style was `button:disabled`, at this same .45. */
+dialog input:disabled, dialog select:disabled, dialog textarea:disabled { opacity: .45; }
+@media (prefers-reduced-motion: no-preference) {
+  dialog input[type='checkbox'] { transition: background 0.12s ease, box-shadow 0.12s ease; }
+  dialog input[type='checkbox']::after { transition: transform 0.12s ease, background 0.12s ease; }
+}
+/* --- the redraw-rate row: a field the width of its answer, plus the switch that owns it ---------------
+   "0 to 120" is three characters wide. A box the width of the dialog is a text field pretending to be a
+   number, and it is also what threw the spinner clear across the row from the digits it belongs to. The unit
+   sits outside the box because input type=number cannot hold one, and the field stays a `number` instead of
+   becoming a text field that wears a unit. */
+dialog .hz { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; }
+dialog .with-unit { display: flex; align-items: baseline; gap: 6px; }
+dialog .with-unit > span { color: var(--muted); } /* a unit is neither the value nor the answer */
+dialog .with-unit input { flex: 0 1 6rem; width: 6rem; }
+/* The spinner is two 1px-bordered boxes glued to the right edge of the field's own border. What goes is the widget,
+   not the type: with it hidden, Up on the focused field still stepped the value 20 -> 21 (measured in
+   Chrome), and min, max and step are still the element's own. */
+dialog input[type='number']::-webkit-inner-spin-button,
+dialog input[type='number']::-webkit-outer-spin-button { appearance: none; margin: 0; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
-dialog .hint { color: var(--muted); font-size: var(--t-1); margin: 0; }
+/* 75ch is the measure, not a width: at `--t-1` the dialog's own 595px content box runs these sentences to
+   100+ characters a line, and a reader whose eye has to find the left edge again two lines late stops
+   reading the explanation of a field they are already unsure about. */
+dialog .hint { color: var(--muted); font-size: var(--t-1); margin: 0; max-width: 75ch; }
 dialog p { margin: 0 0 4px; }
 /* Why the dialog is allowed to scroll: this row is the only way out of it, and it used to be a phone rule,
    which is how a 1353x1316 window got the bug. The settings form is 1282 tall, so at the default text size
@@ -639,10 +721,10 @@ button,
     font-family: var(--mono);
   }
   /* Nothing else in this block reaches a checkbox: `button { min-height: 40px }` is about buttons, and a
-     settings form is labels and boxes. The UA box is 13x13 and nothing makes it bigger - measured 13x13 at
+     settings form is labels and boxes. Outside a dialog the UA box is 13x13 and nothing makes it bigger - at
      font-size 12px, 16px and 30px with width/height auto - so this is not a side effect of some rung that
      could be fixed elsewhere: 18px is chosen here, and `width`/`height` are honoured (22px asked, 22px
-     painted). It is the row that misses the floor: `dialog .grid .check` measured 19px tall at 375px and
+     painted). A checkbox inside a dialog is not in this fight - it is a 34x20 switch drawn by the dialog block, whose selector outranks these two lines. What is left here is the row: `dialog .grid .check` measured 19px tall at 375px and
      only reached 24.4px at a 25% text scale - a floor has to be written, it does not scale into place. */
   input[type='checkbox'] {
     width: 18px;
@@ -652,7 +734,9 @@ button,
        of the difference. A control keeps its own size; the text is what wraps. */
     flex: 0 0 auto;
   }
-  dialog .grid .check {
+  dialog .check {
+    /* the row keeps a floor even though the switch in it is 34x20 on its own: the 32px is what a thumb is
+       aimed at, and the words beside the switch are part of the target. */
     min-height: 32px;
   }
   button,

@@ -145,9 +145,16 @@ Two things bite harder than a typo:
   running: stop it, edit, start. The UI dialog and `PATCH` are the live paths.
 
 `PATCH` follows one rule for every field: **the zero value means "keep what is stored"** - that is how an
-empty API key keeps the key, and why `compact: {}` means "unchanged". It also means you cannot clear a
-system prompt or switch `asm.sendReasoning` back to its unset state over the API; stop the server, edit
-`data/<id>/config.json` and start again for that.
+empty API key keeps the key. It also means you cannot clear a system prompt or switch `asm.sendReasoning`
+back to its unset state over the API; stop the server, edit `data/<id>/config.json` and start again for
+that.
+
+One block does not merge field by field: **`compact` is replaced whole.** The block is only treated as
+"unchanged" when it carries nothing at all (`compact: {}`); the moment it carries anything, that block *is*
+the new answer, and every key you left out comes back as its own default - `{"compact":{"auto":true}}` on a
+session with `threshold: 50` resets the threshold to 70, turns `inLoop` back on, and drops a stored
+`instruction`. **Read the config, change what you want, send the whole `compact` block back** - which is
+what the settings dialog does, and why its own comment says a field it did not draw is not guessed at.
 
 ### Leaving a value out
 
@@ -163,6 +170,9 @@ default:
 | `compact.auto` | absent = off (compaction after a turn) | `true` |
 | `compact.inLoop` | absent = **on** (compaction between turns) | `false` turns it off |
 | `compact.summaryMode` | absent = `prefix-stable` (one summary request; falls back to the serial chain when the region cannot fit one request) | `"iterative"` always uses the chain; `"map-reduce"` is reserved and currently runs the chain |
+| `compact.threshold` `keepTarget` `summaryMax` `minSummarizeTokens` | `0`, negative or absent = the default (70 / 50 / 70 / 2000) — 0 here would be a budget of nothing, which is not an answer anyone means | `> 0`: percentages of `n_ctx`, and a token count for `minSummarizeTokens` |
+| `compact.minKeptUserTurns` `minKeptMessages` | **`0` is a real answer = no floor**, and an omitted key decodes to that 0 — so the 4 that a *new* session starts with is not reachable by leaving the key out | `> 0` is the floor; a negative clamps to 0, never to the shipped default |
+| `compact.maxAttempts` | `0` or absent = 3 tries for one summary | `> 0` tries; **a negative keeps trying until the summary fits** |
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
 | `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
 | `structuredContent` | absent = **`auto`** (fold the tool's JSON in, but never twice) | `fallback` / `always` / `drop`, per server in `mcp[]` ([the four words](#structured-content-in-four-words)) |
@@ -288,11 +298,14 @@ handful of tokens.
 
 ### Compaction, in short
 
-A turn is folded away when `contextUsed > n_ctx × threshold%`: the newest suffix that fits `keepTarget%`
-of the window is kept (never inside a tool span, never fewer than `minKeptUserTurns` user turns) and
-everything above the cut becomes one summary message. The old branch stays in the log, so a compaction can
-be undone by moving the tip back. Failures fall open - the worst case is a session that keeps more context,
-never one that loses it ([details](docs/design.md#compaction-in-one-paragraph)).
+A turn is folded away when `contextUsed > n_ctx × threshold%`: everything before the earliest boundary
+that fits `(threshold% - keepTarget%)` of the window becomes one summary message. The kept tail is that
+budget or the newest `minKeptMessages` messages, whichever is greater, rounded outward so the cut never
+lands inside a tool span, and `minKeptUserTurns` — how many whole user turns it should prefer to hold —
+is held when a boundary can hold it and given up by moving the cut inside a turn when none can. The old
+branch stays in the log, so a compaction can be undone by moving the tip back. Failures fall open - the
+worst case is a session that keeps more context, never one that loses it
+([details](docs/design.md#compaction-in-one-paragraph)).
 
 ### Debugging what the model actually saw
 

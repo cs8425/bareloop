@@ -312,7 +312,11 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			if skip == "" {
 				skip = "no legal boundary"
 			}
-			return false, fmt.Errorf("request does not fit the model window (%d tokens) and compaction could not shrink it (%s): trim the input or lower compact.keepTarget",
+			// why: this branch means the compaction never ran (a committed one returns above), so the only
+			// advice worth printing is what stopped it. Naming compact.threshold would be naming the size of a
+			// kept tail that was never produced: the floors in §2.3 are what make a boundary illegal, and a
+			// minSummarizeTokens above the whole conversation is the one I have seen do it in person.
+			return false, fmt.Errorf("request does not fit the model window (%d tokens) and compaction could not shrink it (%s): trim the input, or lower what stopped it (minSummarizeTokens, minKeptMessages, minKeptUserTurns)",
 				window, skip)
 		}
 
