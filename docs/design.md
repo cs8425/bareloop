@@ -13,7 +13,7 @@ summarises it, that file is the authority.
 | path | what lives there |
 |---|---|
 | `internal/ir` | the entry tree: entries, kinds, roles, usage, the path from the tip, effective (post-compaction) entries |
-| `internal/store` | the append-only JSONL log: entries, the tip, patches, deletes, session metadata, replay |
+| `internal/store` | the append-only JSONL log: entries, the tip, patches, deletes, replay |
 | `internal/asm` | the **only** place that turns entries into a provider payload, plus per-message sizes |
 | `internal/llm` | one OpenAI-compatible provider with usage parsing for OpenAI, llama.cpp and Ollama |
 | `internal/mcp` | JSON-RPC 2.0, stdio and streamable-HTTP transports, both protocol eras |

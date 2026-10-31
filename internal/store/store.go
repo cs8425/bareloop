@@ -32,29 +32,25 @@ import (
 
 // Ops of a log record.
 const (
-	OpEntry   = "entry"   // append (or replace) one entry; Tip (if set) moves in the same line
-	OpTip     = "tip"     // move the path tip
-	OpPatch   = "patch"   // rewrite one entry in place (edit summary text, move boundary)
-	OpDelete  = "delete"  // remove one entry, re-attach its children to its parent
-	OpSession = "session" // session display metadata
+	OpEntry  = "entry"  // append (or replace) one entry; Tip (if set) moves in the same line
+	OpTip    = "tip"    // move the path tip
+	OpPatch  = "patch"  // rewrite one entry in place (edit summary text, move boundary)
+	OpDelete = "delete" // remove one entry, re-attach its children to its parent
 )
 
 // Record is one line of the log.
 type Record struct {
-	Op    string          `json:"op"`
-	Seq   int64           `json:"seq,omitempty"`
-	Entry *ir.Entry       `json:"entry,omitempty"`
-	Tip   string          `json:"tip,omitempty"`
-	ID    string          `json:"id,omitempty"`
-	Key   string          `json:"key,omitempty"`
-	Value json.RawMessage `json:"value,omitempty"`
+	Op    string    `json:"op"`
+	Seq   int64     `json:"seq,omitempty"`
+	Entry *ir.Entry `json:"entry,omitempty"`
+	Tip   string    `json:"tip,omitempty"`
+	ID    string    `json:"id,omitempty"`
 }
 
 // State is the result of replaying a log.
 type State struct {
 	Entries map[string]*ir.Entry
 	Tip     string
-	Meta    map[string]json.RawMessage
 	Seq     int64
 	// Adopted lists compaction entries that were off the path and got adopted (§3.10).
 	Adopted []string
@@ -183,13 +179,13 @@ func (l *Log) Replay() (*State, error) {
 	f, err := os.Open(l.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return &State{Entries: map[string]*ir.Entry{}, Meta: map[string]json.RawMessage{}}, nil
+			return &State{Entries: map[string]*ir.Entry{}}, nil
 		}
 		return nil, err
 	}
 	defer f.Close()
 
-	st := &State{Entries: map[string]*ir.Entry{}, Meta: map[string]json.RawMessage{}}
+	st := &State{Entries: map[string]*ir.Entry{}}
 	br := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := readLine(br)
@@ -270,10 +266,6 @@ func apply(st *State, r *Record) {
 		if st.Tip == r.ID {
 			st.Tip = newTip
 		}
-	case OpSession:
-		if r.Key != "" {
-			st.Meta[r.Key] = r.Value
-		}
 	}
 }
 
@@ -320,17 +312,6 @@ func newest(st *State) string {
 		}
 	}
 	return best
-}
-
-// SetSessionMeta records a session-level display key.
-func (l *Log) SetSessionMeta(key string, v any) error {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.write(&Record{Op: OpSession, Seq: l.seq, Key: key, Value: raw})
 }
 
 // readLine returns one '\n'-terminated line. The final line may lack its newline; in that

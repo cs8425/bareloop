@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -136,14 +135,6 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	if err != nil {
 		_ = log.Close()
 		return nil, fmt.Errorf("replay %s: %w", cfg.ID, err)
-	}
-	if cfg.Name == "" {
-		if raw, ok := st.Meta["name"]; ok {
-			var s string
-			if json.Unmarshal(raw, &s) == nil {
-				cfg.Name = s
-			}
-		}
 	}
 	prov, err := llm.New(cfg.LLM)
 	if err != nil {
@@ -581,12 +572,15 @@ func (s *Session) Entries() []*ir.Entry {
 	return out
 }
 
-// SetName renames the session.
+// SetName renames the session. The name lives in config.json and nowhere else: that file is
+// rewritten whole on every save, so a rename needs no log record and leaves no stale copy for
+// Replay to resurrect. The config snapshot is taken under the lock so the disk write is not.
 func (s *Session) SetName(name string) error {
 	s.mu.Lock()
 	s.cfg.Name = name
+	cfg := s.cfg
 	s.mu.Unlock()
-	if err := s.log.SetSessionMeta("name", name); err != nil {
+	if err := s.mgr.SaveConfig(cfg); err != nil {
 		return err
 	}
 	s.emitState()
@@ -780,9 +774,8 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 			s.emitState()
 		}()
 	}
-	if err := s.SetName(patch.Name); err != nil {
-		return err
-	}
+	// No SetName here: the merged patch — whose Name was filled from old.Name above — is exactly
+	// what SaveConfig just wrote, so the rename is already persisted.
 	s.emitState()
 	if patch.StructuredContent != "" || len(patch.MCP) > 0 {
 		s.logStructuredMode(patch)
