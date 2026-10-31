@@ -335,7 +335,7 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/health` | liveness |
 | GET | `/api/sessions` | every session with its status |
 | POST | `/api/sessions` | create a session (body: a config; `id` is required, lowercase, and becomes the directory name - 400 without it, 409 if the directory exists) |
-| GET | `/api/session/{id}` | config (without the API key), status, every entry sorted by id, pending ids |
+| GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |
 | DELETE | `/api/session/{id}` | close and delete the session |
 | POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now or queue |
@@ -355,6 +355,33 @@ otherwise the model answers in whatever it prefers
 | POST | `/api/session/{id}/tools` | `{server, disabledTools[], toolPrefix}` — set the per-session tool policy; `{}` reads it |
 | GET | `/api/session/{id}/events` | the event stream as SSE (fallback transport) |
 | GET | `/ws` | the event stream as a websocket (primary transport) |
+
+### Paging the transcript
+
+`GET /api/session/{id}` answers with the **path** — the entries that would be sent, oldest first — and
+nothing else. An entry on a branch nobody is standing on is not part of any path, so it stays in the log
+and in `/inspect` instead of crossing the wire to be thrown away.
+
+| parameter | what it asks for |
+|---|---|
+| *nothing* | the whole path — the default on purpose: the cost panel prices a whole session with one unparameterised call |
+| `?limit=40` | the newest page of at most 40 entries; 200 is the ceiling whatever you ask for, and `window.clamped` says when it was used |
+| `?limit=40&before=<id>` | the page before that one — `before` is exclusive and is normally the `oldestId` just received |
+| `?anchor=<id>` | a page centred on one entry, for a jump that lands far from both ends |
+| `?all=1` | the whole path by name, for inspecting and debugging |
+
+`before` and `anchor` cut the path whether or not a `limit` came with them, and an id that is not on the
+path is a 400 either way — answering such a request with the whole path would be guessing at it.
+
+`window` is always there: `oldestId`, `newestId`, `hasOlder`, `hasNewer`, `count`, `total`, `bytes`,
+`limit` (what you asked for; 0 means no ceiling was asked for), `maxLimit`, `clamped`, `truncated`.
+
+A page is a run of **whole turns**: it begins on a user message or on a compaction summary, so a tool
+call never sits on one page with its result on the next, and walking `before` back from the newest page
+reproduces the path with no gap and no overlap. The one exception is a single turn larger than the page
+it was asked into: it comes back whole and `truncated` is true, because two pages holding half a tool
+call each are two pages neither can draw. Combining `before` with `anchor`, or `all` with anything else,
+is a 400 — as is a `limit` that is not a positive integer, or an id that is not on the path.
 
 ### Websocket protocol
 

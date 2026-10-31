@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -125,33 +124,99 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) (*agent.Session
 	return sess, true
 }
 
+// handleGet is the transcript endpoint, and the only place a window is chosen.
+//
+// Without a limit it answers with the whole path, which is what it has always promised: the cost panel
+// makes one unparameterised call and prices the entire path from it, so a default page would quote a
+// part of a session as if it were the whole bill. What changed is that the answer is the *path* — the
+// sequence that gets sent and the sequence the transcript draws — instead of every entry in the log
+// including the branches nobody is on, which the browser used to receive and discard.
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.session(w, r)
 	if !ok {
 		return
 	}
+	o, err := pageQuery(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	page, err := ir.PageOf(sess.Path(), o)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	// Each entry is encoded once and handed on as raw bytes: encoding/json passes a json.RawMessage
+	// through unchanged, so adding up those lengths prices the page without encoding it twice.
+	entries := make([]json.RawMessage, 0, len(page.Entries))
+	size := 0
+	for _, e := range page.Entries {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			// An entry that will not encode is a broken log, not a bad request.
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		size += len(raw)
+		entries = append(entries, raw)
+	}
+	oldest, newest := "", ""
+	if len(page.Entries) > 0 {
+		oldest, newest = page.Entries[0].ID, page.Entries[len(page.Entries)-1].ID
+	}
 	cfg := sess.Config()
 	cfg.LLM.APIKey = "" // the key is never echoed back to the browser
-	entries := sess.Entries()
-	sortEntries(entries)
 	writeJSON(w, map[string]any{
 		"config":  cfg,
 		"status":  sess.Status(),
 		"entries": entries,
 		"pending": sess.PendingIDs(),
+		// window is always present, so the client has one code path for a page and for a whole path.
+		"window": map[string]any{
+			"oldestId":  oldest,
+			"newestId":  newest,
+			"hasOlder":  page.HasOlder,
+			"hasNewer":  page.HasNewer,
+			"count":     len(page.Entries),
+			"total":     page.Total,
+			"bytes":     size,
+			"limit":     page.Limit,
+			"maxLimit":  ir.MaxPageEntries,
+			"clamped":   page.Clamped,
+			"truncated": page.Truncated,
+		},
 	})
 }
 
-// sortEntries orders entries by their numeric id, which is the order they were appended.
-// store.Entries iterates a map, so without this the browser renders a shuffled transcript.
-func sortEntries(entries []*ir.Entry) {
-	sort.Slice(entries, func(i, j int) bool { return entryNum(entries[i].ID) < entryNum(entries[j].ID) })
-}
-
-// entryNum parses the per-session number of an entry id ("42" → 42, anything else → 0).
-func entryNum(id string) int64 {
-	n, _ := strconv.ParseInt(id, 10, 64)
-	return n
+// pageQuery reads the window parameters out of a request. What they mean — including which
+// combinations are refused and what the ceiling is — is decided in ir.PageOf, where one rule about
+// paging has one home and is testable without a server; this only turns strings into types and
+// refuses a limit that is not a number.
+func pageQuery(r *http.Request) (ir.PageOptions, error) {
+	q := r.URL.Query()
+	o := ir.PageOptions{}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return o, fmt.Errorf("limit must be a number, got %q", v)
+		}
+		// Zero and negatives mean "no limit" inside ir, and a browser control that lands on 0 should
+		// not silently ask for the whole session instead.
+		if n < 1 {
+			return o, fmt.Errorf("limit must be at least 1, or left out for the whole path, got %d", n)
+		}
+		o.Limit = n
+	}
+	switch v := q.Get("all"); v {
+	case "", "0", "false":
+	case "1", "true":
+		o.All = true
+	default:
+		return o, fmt.Errorf("all must be 1 or 0, got %q", v)
+	}
+	o.Before = q.Get("before")
+	o.Anchor = q.Get("anchor")
+	return o, nil
 }
 
 func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {

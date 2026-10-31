@@ -282,13 +282,14 @@ promised, and bareloop stores what it answered.
 `web/js/session.js` and its neighbours are plain ES modules; three behaviours are worth knowing because
 each of them was a bug first.
 
-- **Order comes from entry ids.** Entries are stored in a map and served by `GET /api/session/{id}`; the
-  handler sorts them by their numeric id and the UI sorts again, so a reload renders the same sequence
-  that was produced. `status.tip` marks the current path, and **only the path is drawn**: an entry that is
-  not on it belongs to a branch nobody can switch to yet, so it is not shown at all (it stays in the log).
-  Sorting by id means two branches would **interleave** in one vertical list anyway (an id is creation
-  order, not depth), which is the real reason there is no branch switcher: a tree cannot be drawn honestly
-  by appending to a list.
+- **Order is the path, not a sort.** `GET /api/session/{id}` answers with `Session.Path()` — the root-to-tip
+  sequence that would be sent — so the handler has nothing left to sort, and the entries of a branch nobody
+  is on never cross the wire to be dropped by the browser. The UI still sorts by id and still walks parents
+  from `status.tip` (`pathOf`) as a check that both readings agree, because a page is one slice of that
+  path. **Only the path is drawn**: an entry that is not on it belongs to a branch nobody can switch to
+  yet, so it is not shown at all (it stays in the log, and `GET /api/session/{id}/inspect` still lists
+  it). That is also the real reason there is no branch switcher: a tree cannot be drawn honestly by
+  appending to a list.
 - **The action row is copy / raw / run again / delete** - on a compaction entry, "run again" reads "re-make
   this summary" (see *Running the loop again*). `const BRANCH_UI = false` in
   `web/js/transcript.js` removes the tip-move button (see *Deferred*); `RESTART_UI = true` keeps "run again
