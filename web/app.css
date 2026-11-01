@@ -406,6 +406,14 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .note { color: var(--muted); font-size: var(--t-1); text-align: center; margin: 6px 0; }
 .compact-banner { border: 1px solid #4a3866; background: #1d1826; border-radius: 8px; padding: 7px 11px; margin-bottom: 10px; font-size: var(--t-2); }
 .compact-banner b { color: #c8aef0; }
+/* Closed, this card is one row and should be one row tall. The fold's own row measures 24px and the body's
+   9px of bottom padding would sit under it as empty banner - a card taller than its own sentence, which is
+   the thing this fold exists to stop (measured: 92px to 83px per card, 54px over the six of one session).
+   `:has` because the state belongs to the fold and the padding belongs to what contains it; a browser without
+   `:has` simply keeps the old 9px. */
+.body.compact:has(> .compact-fold:not([open])) {
+  padding-bottom: 0;
+}
 /* A `<pre>` breaks only at newlines, and both kinds of pre-formatted text a message can hold — a tool's
    output and a compaction summary — are full of lines far wider than a phone (measured: 2 250 px of
    summary in a 464 px column, which scrolled the whole transcript sideways). The bytes are untouched;

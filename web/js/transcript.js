@@ -397,13 +397,26 @@ function fillBody(node, body, e) {
   if (e.kind === 'compaction') {
     body.classList.add('compact');
     const c = e.compaction || {};
-    body.appendChild(
-      el('div', '', `summary of ${c.replaced ?? '?'} entries → ${fmtN(c.summarySize)} tokens · boundary ${c.boundaryId || '-'} · model ${c.model || '-'}`),
+    // The summary is the one entry of a transcript that is a document rather than a message: a thousand-odd
+    // tokens of prose dropped between two messages, printed every time the page is drawn. It arrives folded,
+    // in the same <details> a long tool result uses, because a closed <details> takes part in no layout at
+    // all and the row that stays behind says everything a reader needs to decide whether to open it.
+    const fold = el('details', 'tool-fold compact-fold');
+    const head = el(
+      'summary',
+      '',
+      `summary of ${c.replaced ?? '?'} entries → ${fmtN(c.summarySize)} tokens · boundary ${c.boundaryId || '-'} · model ${c.model || '-'}`,
     );
-    if (c.broken) body.appendChild(el('div', 'state-error', 'boundary missing: the cut fell on a tool message, so this summary is not spliced in'));
+    // The broken boundary is written into the row and not into the fold: it says this summary is not spliced
+    // into what gets sent, which is a fact about the next request and must not cost a click to learn.
+    if (c.broken) {
+      head.appendChild(el('div', 'state-error', 'boundary missing: the cut fell on a tool message, so this summary is not spliced in'));
+    }
+    fold.appendChild(head);
     const pre = el('pre');
     pre.textContent = e.content || '';
-    body.appendChild(pre);
+    fold.appendChild(pre);
+    body.appendChild(fold);
     node.classList.add('compact-banner');
     return;
   }
