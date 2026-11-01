@@ -40,6 +40,13 @@ export function connect() {
     return;
   }
   ws.onopen = () => {
+    // What this socket could have missed is the whole question. A socket that opens on the first try of
+    // a fresh tab can have missed nothing: main() read the session before calling connect(), and the
+    // snapshot it asks for below carries whatever the hub is still replaying from after that read. A
+    // socket that is back from a drop is a different story - the replay window is bounded, so the
+    // transcript on screen cannot be trusted and the session is re-read. wsAttempts counts the drops and
+    // is cleared here, which is why it is read on the line above the clear.
+    const backFromADrop = wsAttempts > 0;
     wsAttempts = 0;
     if (stopFallback) {
       stopFallback();
@@ -49,9 +56,7 @@ export function connect() {
     setConn(true, 'websocket', 'ws');
     ws.send(JSON.stringify({ type: 'subscribe', session: '' }));
     ws.send(JSON.stringify({ type: 'snapshot', session: state.id || '' }));
-    // A reconnect may have missed events the hub's replay window already dropped, so re-read the
-    // session rather than trusting that the transcript on screen is complete.
-    if (state.id) refresh().catch(() => {});
+    if (backFromADrop && state.id) refresh().catch(() => {});
   };
   ws.onmessage = (ev) => {
     let msg;
