@@ -205,6 +205,20 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 }
 #older.shown { display: inline-flex; }
 #older:disabled { opacity: .6; }
+/* The day divider sticks, so "what day am I reading" stays answered while you are in the middle of a
+   day — which is the only moment the question gets asked. It costs no script: the scroll container is
+   #log (see the overflow above), so `sticky` is a layout hint the browser already computes, whereas a
+   scroll listener that reads offsetTop would force a reflow of a transcript measured at over 200 000
+   pixels tall. Opaque background for the same reason: a sticky bar with a transparent background is a
+   strikethrough over the messages it is supposed to label. */
+.day {
+  position: sticky; top: 0; z-index: 3;
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 0 0 8px; padding: 3px 10px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  font-size: var(--t-0); color: var(--muted);
+}
+.day b { color: var(--fg); font-weight: 600; }
 .msg { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; background: var(--bg2); }
 .msg > header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: var(--t-0); color: var(--muted); } /* wrap, not overflow: two groups of numbers plus a long MCP tool name do not fit in 485px, and a header that pushes the transcript sideways is worse than a second line */
 .msg > header .who { color: var(--fg); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }

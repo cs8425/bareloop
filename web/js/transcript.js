@@ -68,6 +68,39 @@ function resumeFrom(e) {
   return { anchor: '', why: '' };
 }
 
+// dayKey is the local calendar day of a timestamp, written `2026-11-01`. Deliberately not a locale
+// format: the header of every entry already prints a 24-hour clock for the same reason (see entryNode),
+// and a divider that reads "Nov 1" on one machine and "1/11" on another is two different transcripts.
+const dayKey = (ts) => {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+// dayWord is the only relative date the transcript answers, because it is the only one that is free:
+// "yesterday" is a fact about the reader's clock, while "3 days ago" is a calculation nobody asked for
+// and would go stale the moment the tab stayed open overnight.
+const dayWord = (day) => {
+  if (!day) return '';
+  if (day === dayKey(Date.now())) return 'today';
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  return day === dayKey(yesterday.getTime()) ? 'yesterday' : '';
+};
+
+// A transcript is a page and a long one has no idea what day it is: sessions stay open for weeks, and
+// the per-entry clock undercounts the question people actually ask when they scroll a long way back
+// ("when did this start"). So one line per calendar day, drawn only where the day changes.
+const dayDivider = (day) => {
+  const line = el('div', 'day');
+  line.dataset.day = day;
+  const word = dayWord(day);
+  if (word) line.appendChild(el('b', '', word));
+  line.appendChild(el('span', 'eid', day));
+  line.title = `everything above was written on or before ${day}, everything below on a later day`;
+  return line;
+};
+
 export function entryNode(e) {
   let node = state.entries.get(e.id);
   if (node) return node;
@@ -119,7 +152,18 @@ export function entryNode(e) {
   node.appendChild(body);
 
   state.entries.set(e.id, node);
-  logEl().appendChild(node);
+  const box = logEl();
+  // The day is written on the node rather than tracked in a module variable, because the transcript gets
+  // emptied from three places and a cache would outlive the entries it described. Reading it back off the
+  // node that is currently last costs nothing (no layout, no query) and is automatically wrong-free:
+  // no last child means no previous day, which is exactly the rule that keeps a divider off the top of a
+  // fresh transcript, and an entry with no `ts` leaves an empty day that neither asks for a divider nor
+  // promises one to its neighbour.
+  const day = dayKey(e.ts);
+  node.dataset.day = day;
+  const prev = box.lastElementChild ? box.lastElementChild.dataset.day : '';
+  if (day && prev && prev !== day) box.appendChild(dayDivider(day));
+  box.appendChild(node);
   return node;
 }
 
