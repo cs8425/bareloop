@@ -43,7 +43,16 @@ body {
 #app.with-panel { grid-template-columns: 210px 1fr 380px; }
 
 /* sidebar */
-#side { background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+/* Why min-height is on this line: a grid item's minimum height is the minimum height of its content, and
+   a session list is one row taller per session. 13 sessions measured 1 082 px of sidebar against a 940 px
+   window, and `#app` clips at the window - so what got amputated was the bottom of the whole row,
+   `#composer` included (984-1082: the input box was entirely below the fold). `#session-list` already
+   asked to scroll and never once produced a scrollbar, because it was never handed a height to scroll
+   inside (996 of 996). With the floor removed the sidebar cannot grow the row any more: the list scrolls
+   (854 visible of 1 233) and the composer lands back at 940. This is the debt `#pending` paid from the
+   same direction - 266 queued messages squeezed `#log` down to 24 px - and it is the same rule: a
+   sibling does not get to decide how tall the transcript is. */
+#side { background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid var(--border); }
 #session-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; flex: 1; }
 #session-list li { padding: 7px 9px; border-radius: 6px; cursor: pointer; display: flex; gap: 6px; align-items: baseline; }
