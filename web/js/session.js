@@ -287,6 +287,18 @@ export function renderStatus(st) {
 
 // renderPending shows queued inputs: they are entries already in the log, so the list is a promise
 // that the loop will get to them.
+//
+// PENDING_SHOWN caps how many queued ids are listed. Two numbers set it: the badge above already
+// states the whole count, and a row of --t-1 measures 18 px, so eight rows plus the header stay
+// inside the height the panel is allowed to take (24vh) without reaching for its own scrollbar. The
+// head of the queue is the right end to show: pendingLocked walks the path root-to-tip, so the ids
+// arrive oldest-first (measured on a 266-entry queue: 0000030, 0000031, …), and those are the
+// entries the loop reads next.
+// What is not listed is counted out loud, because a panel showing 8 of 266 and saying 8 would be a
+// small lie about what is in front of the reader; 266 opaque ids were never readable anyway, and
+// putting them all in the DOM is how the queue once took the transcript to 0 px of its own.
+const PENDING_SHOWN = 8;
+
 export function renderPending() {
   const box = $('#pending');
   const list = $('#pending-list');
@@ -300,5 +312,8 @@ export function renderPending() {
   box.classList.remove('hidden');
   badge.classList.remove('hidden');
   badge.textContent = `pending: ${state.pending.length}`;
-  for (const id of state.pending) list.appendChild(el('li', '', id));
+  for (const id of state.pending.slice(0, PENDING_SHOWN)) list.appendChild(el('li', '', id));
+  if (state.pending.length > PENDING_SHOWN) {
+    list.appendChild(el('li', 'more', `+ ${fmtN(state.pending.length - PENDING_SHOWN)} more`));
+  }
 }

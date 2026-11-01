@@ -350,8 +350,15 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   .ctxbar { min-height: 32px; }
 }
 
+/* The queue is a promise about what the loop will do next, not a thing to read, and it must not be
+   the sibling that decides how tall the transcript is: 266 queued entries measured 4 820 px of <li>
+   and squeezed `#log` down to 24 px of its own (2026-10-31, panel unmodified). Only the list gets a
+   scrollbar, because the badge beside it states the total and that number is the one a reader needs
+   to keep on screen. `#requests` below is this file's precedent for a panel capping itself. */
 #pending { border-top: 1px solid var(--border); padding: 5px 12px; font-size: var(--t-1); color: var(--muted); background: #14181f; flex: 0 0 auto; }
-#pending ul { margin: 3px 0 0; padding-left: 18px; }
+#pending ul { margin: 3px 0 0; padding-left: 18px; max-height: 24vh; overflow-y: auto; }
+/* The tail of the queue is a count, not an item: it should not wear a bullet or an indent. */
+#pending li.more { list-style: none; margin-left: -18px; }
 
 #requests { flex: 0 0 auto; max-height: 34vh; overflow-y: auto; }
 #requests:empty { display: none; }
