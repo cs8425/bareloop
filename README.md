@@ -118,6 +118,11 @@ A session's `id` is its directory name under `data/`: lowercase `a-z 0-9 . _ -`,
 ([the rules and their reasons](docs/design.md#session-identity)). The `name` you see in the sidebar is
 separate and free-form, so spaces and non-ASCII text belong there.
 
+Every session directory holds `config.json`, `log.jsonl` - the log itself, one record per line, append-only,
+and the only file that has to survive - and `log.idx`, a derived index of where each record lies. The index
+is rebuilt whenever the log is read, and a log that cannot write one keeps taking writes without it
+([what is on disk, and why](docs/design.md#what-is-on-disk)).
+
 ## Configuration
 
 `config.example.json` documents every field. `defaults` is inherited by every session; each session stores

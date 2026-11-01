@@ -13,7 +13,7 @@ summarises it, that file is the authority.
 | path | what lives there |
 |---|---|
 | `internal/ir` | the entry tree: entries, kinds, roles, usage, the path from the tip, effective (post-compaction) entries |
-| `internal/store` | the append-only JSONL log: entries, the tip, patches, deletes, replay |
+| `internal/store` | the append-only JSONL log and the index beside it: entries, the tip, patches, deletes, replay, one row per record |
 | `internal/asm` | the **only** place that turns entries into a provider payload, plus per-message sizes |
 | `internal/llm` | one OpenAI-compatible provider with usage parsing for OpenAI, llama.cpp and Ollama |
 | `internal/mcp` | JSON-RPC 2.0, stdio and streamable-HTTP transports, both protocol eras |
@@ -58,6 +58,45 @@ id (`quiet-otter-1f3`) when the dialog opens, offers another on request, folds w
 lowercase, and makes one up if you clear the field - because the person pressing create asked for it, in
 front of them. The id is not the label you see either: `name` is free-form, so spaces and non-ASCII text
 belong there.
+
+## What is on disk
+
+A session is one directory of `data/`, and everything in it is one of three files:
+
+| file | who writes it | what it is |
+|---|---|---|
+| `config.json` | `PATCH`, and every start | the session's settings; its `"id"` field is a copy of the directory name |
+| `log.jsonl` | the loop, one line per record | the truth: `entry`, `tip`, `patch` and `delete` records, one hand-written JSON object per line |
+| `log.idx` | derived, at every read | one fixed 32-byte row per record of the log, in the same order: what it was, where it lies, how long it is |
+
+`log.jsonl` is the only one of the three that has to survive. It is append-only, one record per line, and a
+commit is one line: "create the entry" and "move the path tip" are the same write, so a crash leaves both or
+neither and a torn last line is ignored. A patch rewrites an entry by appending a newer record about the same
+id; a delete appends a record and re-parents at read time. Nothing is edited in place, which is why an old
+log still replays and why "what happened" is answerable from the file alone.
+
+`log.idx` is what turns "read the log" into "read the part you asked for". To show a session at all, the log
+used to be read from its first line and every entry kept in RAM. The rows are not a copy of the tree - a
+patch moves the offset and length of one row and touches nothing else, a delete leaves its row exactly where
+it was - which is what lets a row be appended in the same breath as the record it describes. Reading one
+entry, or one page of a transcript, is a read at an address the rows hand over. What a session's records add
+up to is in the header, so a session list does not have to fold a tree at all.
+
+An index is never an authority, and three rules keep it that way:
+
+- **A log write is never lost for want of an index row.** The record goes into `log.jsonl` first. If the row
+  cannot be written the index is dropped - once, out loud, and with the reason kept to be asked about - and
+  the log goes on taking writes.
+- **The rows are checked, and a disagreement is not argued with.** The header carries a SHA-256 of exactly
+  the log bytes the rows describe, and the rows read out of the file are compared with the rows just derived
+  from the log. What that costs is one line in the daemon log and a rebuild.
+- **Nothing trusts it yet.** Every read rebuilds the rows, because nothing in this build can prove the file
+  describes the log beside it. The digest is what will make that provable, and reading a page out of the
+  index instead of out of the log is the layer that gets to decide.
+
+One consequence is worth knowing before a log is edited by hand: a row names an entry by its id read as a
+number, so a `log.jsonl` whose ids were written by hand (`"root"`, `"leaf"`) still replays and still shows
+its transcript - it only never gets an index file.
 
 ## The context window
 

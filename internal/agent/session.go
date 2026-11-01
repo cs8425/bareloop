@@ -131,6 +131,12 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	if err != nil {
 		return nil, err
 	}
+	// An index problem is never a reason a session cannot open, so the only thing the log can tell this
+	// program is what went wrong with it - and that is worth one line, once, in the same shape as every other
+	// line about this session. It is set before the read, because the read is where an index is rebuilt.
+	log.SetLogf(func(format string, args ...any) {
+		mgr.logf("session "+id+": "+format, args...)
+	})
 	st, err := log.Replay()
 	if err != nil {
 		_ = log.Close()
