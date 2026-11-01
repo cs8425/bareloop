@@ -4,7 +4,7 @@
 //
 // A session directory used to hold one record file and nothing else: to answer "what is in this
 // session", or to show a session's transcript at all, the log had to be read from the first line to the
-// last, in full, and every entry of it kept in RAM. The index is what removes that: one fixed 32-byte
+// last, in full, and every entry of it kept in RAM. The index is what removes that: one fixed 24-byte
 // row per record of log.jsonl, in the same order as the log, saying what that record was and where it
 // lies - offset and length - so that the content of one entry, or of a page of them, is a ReadAt at a
 // known address instead of a scan.
@@ -15,6 +15,26 @@
 // rewrites another row, which is what lets a row be appended in the same breath as the record it
 // describes. The tree, with its parent pointers, is what folding the rows yields - the fold Replay has
 // always done, now written once and shared, and runnable without any content.
+//
+// # Why a row is 24 bytes
+//
+// A row is the only thing a session keeps about the whole of its history rather than about the page of it
+// it is reading, so its width is multiplied by every record of every open session and nothing else is.
+// Hence a row is the size of its fields and not the size the Go types of those fields would come to by
+// habit: an offset is 48 bits in two pieces rather than 64, because at this width two of the six bytes it
+// gets are bytes the layout had already, and ts is four bytes counting from indexEpoch instead of eight
+// counting from 1970.
+//
+// What the width does not buy is room. Every byte of a row of this version is a field, so the next fact
+// about a record is a new version of this file - and that is a cheap answer here, because an index is
+// derived: refusing a file this build does not recognise costs one rebuild from log.jsonl and one line in
+// the daemon log. Nothing is carried to keep an old index readable, and nothing under data/ is data.
+//
+// Nor is the width what bounds what a resident index costs. Rows are fixed-width so that reading a *range*
+// of them is arithmetic - row k begins at indexHeaderSize+k*indexRowSize - which is what lets a build that
+// cannot hold them all hold a window of them instead, or read them on demand and let the file system cache
+// the rest. That question belongs to indexState.rows and not to the format, and it is written up in
+// _state/r54-s2a-index.md.
 //
 // # Why the index cannot be trusted, and what that costs
 //
@@ -65,15 +85,33 @@ const (
 	indexFileName = "log.idx"
 
 	// indexRowSize is why no row is ever rewritten: an entry's whole history fits in one row, and a
-	// patch only has to move the fields that say where its latest record lies.
-	indexRowSize = 32
+	// patch only has to move the fields that say where its latest record lies. It is also the whole of what a
+	// resident index costs per record of an open session, which is why it is 24 and not the 32 those fields
+	// would be given by habit - see "Why a row is 24 bytes" above.
+	indexRowSize = 24
 
 	// The header gets a whole block. It is rewritten on every append, and a file system that cannot write
 	// 4096 bytes in one go is not one this log can be trusted on either - the log's own append relies on the
 	// same thing.
 	indexHeaderSize = 4096
-	indexVersion    = 1
-	indexTipMax     = 32 // bytes of the header's tip field
+
+	// indexVersion is bumped whenever a row starts to mean something else. It is not a compatibility
+	// promise in either direction: a file this build does not recognise is refused and rebuilt from the log,
+	// which is what stops a log.idx left behind by the previous build from being read with this build's row
+	// width - the one mistake a fixed-size row makes expensive instead of merely wrong.
+	indexVersion = 2
+	indexTipMax  = 32 // bytes of the header's tip field
+
+	// indexEpoch is what a row's four timestamp bytes count from: 2026-01-01T00:00:00Z, which gives a row
+	// sixty-eight years either way of it. It is a constant of the format rather than the smallest timestamp
+	// the log holds, because an index is written one row at a time and cannot know the minimum of the rows it
+	// has not read yet - and a base that arrived late would invalidate every row already written under it.
+	// It is a number and not a time.Date expression so that nothing about a row depends on a zone; the test
+	// that says it is the instant named here is TestTheEpochIsTheInstantTheFormatNames.
+	indexEpoch int64 = 1767225600
+
+	// maxRowOffset is the largest address a row's 48 bits can name, and rowIndex's bound for one.
+	maxRowOffset = 1<<48 - 1
 
 	// indexMagic names the file, so a truncated or misplaced file is refused rather than read as rows.
 	indexMagic = "BLIX"
@@ -97,8 +135,9 @@ var (
 // hand-written line of JSON on disk, so the format this package writes is still one line at a time; what
 // a second file format costs is paid for here and nowhere else.
 //
-// All fields little-endian. Field order is the on-disk layout, and bytes 8..11 are what stays reserved
-// for the next version:
+// All fields little-endian, in the order below. What is not listed is written zero: the block is four
+// thousand bytes and this build fills a hundred and forty-eight of them, which is where a version that
+// needs another header field takes one without anything already written moving.
 //
 //	  0 magic   "BLIX"
 //	  4 version  uint32
@@ -113,6 +152,11 @@ var (
 //	 92 tips    int64  rows that only move the tip
 //	100 skips   int64  rows this build cannot act on
 //	108 tip     32 B   the tip's id, 0-padded, empty if the log left it unset
+//	140 epoch   int64  what a row's four timestamp bytes count from; see indexEpoch
+//
+// epoch is not a field of the Go struct below, for the same reason magic and version are not: it is a fact
+// about the format and not about the log, and a file that counts from another instant is refused rather
+// than read as a log full of entries from the year 8000.
 //
 // ck is what lets a later build trust the rows without reading the log: it pins the first `cover` bytes,
 // and the rows describe exactly those bytes. A log whose first change is an append still hashes the
@@ -154,6 +198,7 @@ func (h header) encode(buf []byte) {
 	binary.LittleEndian.PutUint64(buf[92:100], uint64(h.tips))
 	binary.LittleEndian.PutUint64(buf[100:108], uint64(h.skips))
 	copy(buf[108:108+indexTipMax], h.tip) // 0-padded; a tip is an id, so it is always 7 bytes
+	binary.LittleEndian.PutUint64(buf[140:148], uint64(indexEpoch))
 	binary.LittleEndian.PutUint32(buf[8:12], crc32.ChecksumIEEE(buf[12:]))
 }
 
@@ -169,6 +214,12 @@ func decodeHeader(buf []byte) (header, error) {
 	}
 	if crc32.ChecksumIEEE(buf[12:]) != binary.LittleEndian.Uint32(buf[8:12]) {
 		return header{}, errors.New("store: log.idx header fails its own CRC")
+	}
+	// why the epoch is refused and not kept: rows whose timestamp bytes count from another instant are rows
+	// about another calendar, and every one of them would come back as a plausible, wrong time. The CRC is
+	// checked first, because a block that does not believe itself has no facts left to compare.
+	if e := int64(binary.LittleEndian.Uint64(buf[140:148])); e != indexEpoch {
+		return header{}, fmt.Errorf("%w: rows count from %d, this build counts from %d", errIndexVersion, e, indexEpoch)
 	}
 	return header{
 		cover:   int64(binary.LittleEndian.Uint64(buf[44:52])),
@@ -267,13 +318,19 @@ func isPatchRow(k rowKind) bool {
 	return k >= rowPatchUser && k <= rowPatchCompaction || k == rowPatchUnknown
 }
 
-// rowFlags is one byte of "and what else", of which there is one fact: a record that also moved the tip
-// onto its own entry. It is a flag because a row that carried a second id would need seven more bytes to
-// say what one bit says - and because the only writer of that case is AppendEntry, which tips the entry
-// it just wrote or nothing.
+// rowFlags is one byte of "and what else", of which there are two facts: a record that also moved the tip
+// onto its own entry, and a record whose timestamp this row cannot hold. Both are flags because a row is
+// cut to 24 bytes and neither has room of its own - a second id would cost seven bytes to say what one bit
+// says, and a timestamp that can mean "none" costs one bit where the alternative costs four bytes and an
+// instant to count from.
 type rowFlags uint8
 
-const tipSet rowFlags = 1 << 0
+const (
+	tipSet rowFlags = 1 << 0
+	// tsUnknown is a row with no timestamp to read: the record carried none, or one outside the sixty-eight
+	// years a row's four bytes reach. absTs is the only reader, and answers 0 for it.
+	tsUnknown rowFlags = 1 << 1
+)
 
 // row is one index row: one line of log.jsonl, and the entry it holds.
 //
@@ -287,20 +344,68 @@ const tipSet rowFlags = 1 << 0
 // what a page or a single-entry read wants. n excludes the record's newline, so off+n is the byte just
 // before the next line begins. A row of a line that held no record has no address at all.
 //
-// The fields are ordered by alignment rather than by the file's order, which lands the struct on exactly
-// indexRowSize bytes: the two bytes the format reserves at the end of a row are the two the compiler pads it
-// with (TestARowIsTheWidthTheIndexSeeksBy holds it to that). The order they are stored in is the encoder's
-// business, is fixed by the version of the file, and is not the order below - nothing in this package maps a
-// field to a byte offset by position, and a caller that wants to treat a []row as the body of log.idx is
-// holding a file whose format it has not read.
+// The order of the fields below is load-bearing in two different ways, and neither is obvious from reading
+// them. As declared they are in alignment order, and that order is what makes the struct the width of a row:
+// the compiler lays fields out in the order they are written, so the uint16 has to come after the five words
+// and not between them, or a row costs 28 bytes in RAM and 24 on disk (TestARowIsTheWidthTheIndexSeeksBy is
+// the line that turns that from a slow leak into a build failure). And they are deliberately *not* in the
+// order the file stores them in - that order is the encoder's, is fixed by the version of the file, and is
+// nothing a caller may rely on: nothing in this package maps a field to a byte offset by position, and a
+// caller that wants to treat a []row as the body of log.idx is holding a file whose format it has not read.
+//
+// A row of this version has no reserved byte left, so a new fact about a record is a new version of the file
+// and a rebuild from the log, which is what an index that costs nothing to lose is for.
 type row struct {
-	off    int64
-	ts     int64
+	// off and offHi are one 48-bit address in the six bytes a row of this version has for an address. 48 is
+	// not a ceiling anybody reaches, and it is not the row's only defence anyway: a row that points past the
+	// log it describes is refused when it is read whatever its width. offset and setOffset are the only two
+	// places allowed to say which half is which, because a swapped pair of halves round-trips every offset a
+	// log this size will ever produce (see TestALowHalfIsNotTheWholeAddress).
+	off    uint32
+	ts     int32 // seconds after indexEpoch, and nothing to read when tsUnknown is set: see absTs
 	target int32 // id of the entry the record is about: written, updated, deleted, or the new tip
 	parent int32 // id of the parent the record named, 0 for a root
 	n      uint32
+	offHi  uint16 // the high half of off, in the two bytes a row this wide has spare
 	kind   rowKind
 	flags  rowFlags
+}
+
+// offset is where the record starts in log.jsonl, both halves of the address back in one number.
+func (r row) offset() int64 { return int64(r.offHi)<<32 | int64(r.off) }
+
+// setOffset is the other half of offset. A row is never handed an offset it cannot hold: rowIndex refuses
+// one first, because a row that addresses nothing is missing the one thing a row is for.
+func (r *row) setOffset(off int64) { r.off, r.offHi = uint32(off), uint16(off>>32) }
+
+// absTs is the record's timestamp in the seconds time.Unix counts from 1970, and 0 when the row does not
+// hold one. That 0 is the same absence skEntry has always answered with, and it is why tsUnknown exists
+// rather than a stored zero: a record with no timestamp used to be read back as the first second of 1970,
+// which is a time and not the absence of one.
+func (r row) absTs() int64 {
+	if r.flags&tsUnknown != 0 {
+		return 0
+	}
+	return indexEpoch + int64(r.ts)
+}
+
+// rowTime is the row's four timestamp bytes, and the flag that says they are not to be read: seconds after
+// indexEpoch, of which a row reaches sixty-eight years either way.
+//
+// why a timestamp outside the range is flagged rather than refused, when an offset outside the range is
+// refused: a row without a usable timestamp still says what the record was and where it lies, so the fold
+// and the tree are whole either way and what is lost is a tick on a bar; and a record this store cannot put
+// a time on is a record the log can hold and the index cannot time, which is a reason to say so and not a
+// reason for the log to lose its index.
+func rowTime(t time.Time) (int32, rowFlags) {
+	if t.IsZero() {
+		return 0, tsUnknown
+	}
+	d := t.Unix() - indexEpoch
+	if d < math.MinInt32 || d > math.MaxInt32 {
+		return 0, tsUnknown
+	}
+	return int32(d), 0
 }
 
 // encode writes the row into buf, in the order the format names its fields - which is not the order of the
@@ -310,15 +415,18 @@ type row struct {
 // just zeroed, writeAll one row's slice of the body it just made), and a caller that handed over less would
 // panic in the runtime rather than write a row across the wrong bytes. A format this positional is not going
 // to be defensive about the one thing its own callers cannot get wrong quietly.
+//
+// v2, 24 bytes: kind, flags, target, parent, off, offHi, n, ts.
 func (r row) encode(buf []byte) {
 	buf[0] = byte(r.kind)
 	buf[1] = byte(r.flags)
 	binary.LittleEndian.PutUint32(buf[2:6], uint32(r.target))
 	binary.LittleEndian.PutUint32(buf[6:10], uint32(r.parent))
-	binary.LittleEndian.PutUint64(buf[10:18], uint64(r.off))
-	binary.LittleEndian.PutUint32(buf[18:22], r.n)
-	binary.LittleEndian.PutUint64(buf[22:30], uint64(r.ts))
-	// bytes 30..31 are reserved and written as zero
+	binary.LittleEndian.PutUint32(buf[10:14], r.off)
+	binary.LittleEndian.PutUint16(buf[14:16], r.offHi)
+	binary.LittleEndian.PutUint32(buf[16:20], r.n)
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(r.ts))
+	// Twenty-four bytes, and every one of them a field: a row of this version has nothing reserved.
 }
 
 func decodeRows(body []byte) []row {
@@ -330,9 +438,10 @@ func decodeRows(body []byte) []row {
 			flags:  rowFlags(b[1]),
 			target: int32(binary.LittleEndian.Uint32(b[2:6])),
 			parent: int32(binary.LittleEndian.Uint32(b[6:10])),
-			off:    int64(binary.LittleEndian.Uint64(b[10:18])),
-			n:      binary.LittleEndian.Uint32(b[18:22]),
-			ts:     int64(binary.LittleEndian.Uint64(b[22:30])),
+			off:    binary.LittleEndian.Uint32(b[10:14]),
+			offHi:  binary.LittleEndian.Uint16(b[14:16]),
+			n:      binary.LittleEndian.Uint32(b[16:20]),
+			ts:     int32(binary.LittleEndian.Uint32(b[20:24])),
 		})
 	}
 	return rows
@@ -426,6 +535,12 @@ func rowIndex(r Record, off int64, n int, as idReader) (out row, held *ir.Entry,
 	if n > math.MaxUint32 {
 		return row{}, nil, fmt.Errorf("a record of %d bytes is past what one index row can address", n)
 	}
+	// why refused here rather than caught later: everything else about a row can be wrong and merely mislead,
+	// and this is the one field that decides which record the row is about at all. 256 TB of log is what the
+	// 48 bits reach, and the check is here to make that a number rather than a rumour.
+	if off < 0 || off > maxRowOffset {
+		return row{}, nil, fmt.Errorf("a record at %d is past the address one index row can hold", off)
+	}
 	// why one helper for every id in the record: an id the reader cannot name is an id no row can be found
 	// by, and there is no useful third answer between "a number" and "an error".
 	idOf := func(what, s string) (int32, error) {
@@ -438,7 +553,8 @@ func rowIndex(r Record, off int64, n int, as idReader) (out row, held *ir.Entry,
 		}
 		return n, nil
 	}
-	out = row{kind: rowBad, off: off, n: uint32(n)}
+	out = row{kind: rowBad, n: uint32(n)}
+	out.setOffset(off)
 	switch r.Op {
 	case OpEntry, OpPatch:
 		e := r.Entry
@@ -449,7 +565,7 @@ func rowIndex(r Record, off int64, n int, as idReader) (out row, held *ir.Entry,
 			return out, nil, nil
 		}
 		out.kind = kindRow(r.Op, e.Kind)
-		out.ts = e.Ts.Unix()
+		out.ts, out.flags = rowTime(e.Ts)
 		if out.target, err = idOf("node id", e.ID); err != nil {
 			return row{}, nil, err
 		}
@@ -822,7 +938,7 @@ func (f *folder) content(i int) *ir.Entry {
 }
 
 func (f *folder) put(id int32, r row, i int) {
-	f.nodes[id] = &skNode{id: f.name(id), parent: r.parent, kind: r.kind, off: r.off, n: int(r.n), ts: r.ts, e: f.content(i)}
+	f.nodes[id] = &skNode{id: f.name(id), parent: r.parent, kind: r.kind, off: r.offset(), n: int(r.n), ts: r.absTs(), e: f.content(i)}
 }
 
 func (f *folder) patch(id int32, r row, i int) {
@@ -832,7 +948,7 @@ func (f *folder) patch(id int32, r row, i int) {
 		// tool's output be edited without moving the branch that grew below it.
 		parent = old.parent
 	}
-	f.nodes[id] = &skNode{id: f.name(id), parent: parent, kind: r.kind, off: r.off, n: int(r.n), ts: r.ts, e: f.content(i)}
+	f.nodes[id] = &skNode{id: f.name(id), parent: parent, kind: r.kind, off: r.offset(), n: int(r.n), ts: r.absTs(), e: f.content(i)}
 }
 
 func (f *folder) remove(id int32) {

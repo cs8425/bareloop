@@ -12,7 +12,7 @@
 //  2. adopt orphans  — Replay attaches a compaction entry that is off the path but whose
 //     parent is the path tip.
 //
-// The second file (log.idx): every line of the log also gets a fixed 32-byte row in log.idx beside it -
+// The second file (log.idx): every record of the log also gets a fixed 24-byte row in log.idx beside it -
 // what it was, where it lies, how long it is - so that one entry or one page of a transcript is a read at
 // a known address instead of a scan of the whole log. It is a derived file and stays one: log.jsonl is the
 // only truth, the rows are rebuilt whenever the log is read, and an index that cannot be written is

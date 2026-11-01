@@ -3,9 +3,12 @@ package store
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -367,6 +370,17 @@ func TestDecodeHeaderRefusesWhatItCannotTrust(t *testing.T) {
 	ver[4], ver[5], ver[6], ver[7] = 9, 0, 0, 0
 	if _, err := decodeHeader(ver[:]); !errors.Is(err, errIndexVersion) {
 		t.Errorf("version 9: %v, want errIndexVersion", err)
+	}
+
+	// Another instant to count the rows from, which would make every timestamp in the body another calendar.
+	// The block has to be written over again to reach that check at all: the epoch is inside what the CRC
+	// covers, and a header that does not believe itself is refused before it is asked what it counts from.
+	var epoch [indexHeaderSize]byte
+	copy(epoch[:], buf[:])
+	binary.LittleEndian.PutUint64(epoch[140:148], uint64(indexEpoch+1))
+	binary.LittleEndian.PutUint32(epoch[8:12], crc32.ChecksumIEEE(epoch[12:]))
+	if _, err := decodeHeader(epoch[:]); !errors.Is(err, errIndexVersion) {
+		t.Errorf("rows counting from another instant: %v, want errIndexVersion", err)
 	}
 }
 
@@ -852,8 +866,11 @@ func sortedStrings(in []string) []string {
 // package is indexHeaderSize+n*indexRowSize, and the same rows are held in RAM one per record of every session
 // that is open. Those two facts only agree while the struct is exactly the row the file holds - and the round
 // trip through encode and decodeRows is what says the order of the fields in Go is not the order on disk,
-// which is the other half of what this pins. A future field has to be a field the format has room for, and
-// this is the line that says so before a seek starts landing in the middle of a row.
+// which is the other half of what this pins.
+//
+// A row of this version has no byte that is not a field, so unlike the version before it this test has no
+// reserved bytes to assert are zero: what keeps a future field out of a row is indexVersion, and the width
+// asserted here is the number that a new version has to be weighed against.
 func TestARowIsTheWidthTheIndexSeeksBy(t *testing.T) {
 	// why unsafe and not reflect: this is the compiler's own arithmetic on the struct, and a constant.
 	if got := unsafe.Sizeof(row{}); got != indexRowSize {
@@ -861,23 +878,19 @@ func TestARowIsTheWidthTheIndexSeeksBy(t *testing.T) {
 			got, indexRowSize)
 	}
 	// Every field at a value that would notice a swapped offset - including the negative number a hand-written
-	// id gets, and a length whose top byte is set.
+	// id gets, a length whose top byte is set, an address past the four billion one half cannot name, and a
+	// time before the epoch the row counts from.
 	r := row{
 		kind:   rowPatchCompaction,
 		flags:  tipSet,
 		target: -3,
 		parent: 1234567,
-		off:    4096 + indexRowSize*99999,
 		n:      0xffffff00,
-		ts:     1 << 40,
+		ts:     -(1 << 30),
 	}
+	r.setOffset(1<<40 + 7)
 	var buf [indexRowSize]byte
 	r.encode(buf[:])
-	// why the reserved bytes are checked here and not in a format test: they are zero because every writer of
-	// a row hands over a buffer it zeroed first, and nothing else in the package writes them at all.
-	if buf[30] != 0 || buf[31] != 0 {
-		t.Errorf("bytes 30 and 31 of a row came out %d and %d; those are the reserved ones", buf[30], buf[31])
-	}
 	back := decodeRows(buf[:])
 	if len(back) != 1 {
 		t.Fatalf("%d rows decoded from one row's bytes", len(back))
@@ -885,12 +898,130 @@ func TestARowIsTheWidthTheIndexSeeksBy(t *testing.T) {
 	if back[0] != r {
 		t.Errorf("a row that went through the file came back as %+v, not %+v", back[0], r)
 	}
-	// And two rows in one body start where the other ended, which is all a seek claims to know.
+
+	// And two rows in one body start where the other ended, which is all a seek claims to know. The width is
+	// not a power of two any more, but 4096 and 24 share a factor of 8, so every row still begins on an
+	// address that is a multiple of 8 - which nothing in this package depends on, and nothing should have to
+	// check.
 	pair := make([]byte, 2*indexRowSize)
 	r.encode(pair)
-	second := row{kind: rowTip, target: 7, off: 1}
+	second := row{kind: rowTip, target: 7}
+	second.setOffset(1)
 	second.encode(pair[indexRowSize:])
 	if two := decodeRows(pair); len(two) != 2 || two[0] != r || two[1] != second {
 		t.Errorf("two rows in a body came back as %+v", two)
+	}
+}
+
+// TestALowHalfIsNotTheWholeAddress is about the one mistake a field split in two makes without complaint:
+// swapped halves still round-trip every offset a log is likely to reach, because under four gigabytes the two
+// halves differ only in a zero. So the offsets here are not.
+func TestALowHalfIsNotTheWholeAddress(t *testing.T) {
+	for _, off := range []int64{0, 1, 1 << 31, 1 << 32, 1<<32 + 1, 1 << 47, maxRowOffset} {
+		var r row
+		r.setOffset(off)
+		if r.offHi != uint16(off>>32) || r.off != uint32(off) {
+			t.Errorf("offset %d was split into %d and %d, which is not low then high", off, r.off, r.offHi)
+		}
+		if got := r.offset(); got != off {
+			t.Errorf("offset %d came back from the two halves as %d", off, got)
+		}
+		var buf [indexRowSize]byte
+		r.encode(buf[:])
+		if got := decodeRows(buf[:]); got[0].offset() != off {
+			t.Errorf("offset %d came back from the file as %d", off, got[0].offset())
+		}
+	}
+	// And one past what the 48 bits hold is refused where the row is made, rather than written as a row that
+	// points at the start of the log again.
+	if _, _, err := rowIndex(Record{Op: OpTip, Tip: "0000001"}, maxRowOffset+1, 10, numberedIDs); err == nil {
+		t.Error("an offset past the address one row holds was accepted")
+	}
+}
+
+// TestTheEpochIsTheInstantTheFormatNames holds the number the format is written with to the instant it is
+// meant to be. It is a number and not a time.Date call so that nothing about a row depends on a zone, and a
+// number is exactly what no reader can check by looking at it.
+func TestTheEpochIsTheInstantTheFormatNames(t *testing.T) {
+	if want := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Unix(); indexEpoch != want {
+		t.Errorf("indexEpoch is %d, which is %s, and 2026-01-01T00:00:00Z is %d", indexEpoch,
+			time.Unix(indexEpoch, 0).UTC(), want)
+	}
+	// Both ends of the sixty-eight years, because the comment on indexEpoch says what four bytes reach and a
+	// comment is not a check. At either end the time still has to come back; a second past either is flagged
+	// rather than wrapped, which is the difference between losing a tick and inventing one.
+	for _, end := range []int64{math.MinInt32, math.MaxInt32} {
+		ts := time.Unix(indexEpoch+end, 0).UTC()
+		stored, flags := rowTime(ts)
+		if flags != 0 {
+			t.Errorf("%s is at the edge of what a row holds and came back flagged unknown", ts)
+			continue
+		}
+		if got := (row{ts: stored}).absTs(); got != ts.Unix() {
+			t.Errorf("%s went through a row and came back %d", ts, got)
+		}
+	}
+	for _, end := range []int64{math.MinInt32 - 1, math.MaxInt32 + 1} {
+		ts := time.Unix(indexEpoch+end, 0).UTC()
+		if _, flags := rowTime(ts); flags != tsUnknown {
+			t.Errorf("%s is past what a row's four bytes hold and came back with flags %d, want tsUnknown", ts, flags)
+		}
+	}
+}
+
+// TestATimestampARowCannotHoldIsMissingAndNotWrong is the trade the four-byte timestamp makes, and the
+// regression the row used to have written for: a record whose own timestamp is missing, or older or newer
+// than the sixty-eight years a row reaches, loses that timestamp and nothing else. The row, the tree, the
+// index file and every other entry's time are kept - which is only worth spelling out because reading back
+// whatever Unix says about a zero time put the first second of 1970 in a row as though it had been meant.
+func TestATimestampARowCannotHoldIsMissingAndNotWrong(t *testing.T) {
+	l, _ := openTestLog(t)
+	replay(t, l) // the first read, so the records below are indexed as they arrive and not only by a scan
+
+	// Written as records and not through AppendEntry on purpose: that is the one path that stamps a time onto
+	// an entry that had none, and a missing timestamp only reaches a row from a log written without it.
+	recs := []Record{
+		{Op: OpEntry, Seq: 1, Entry: &ir.Entry{ID: "0000001", Kind: ir.KindUser, Role: "user", Content: "no timestamp", Ts: time.Time{}}, Tip: "0000001"},
+		{Op: OpEntry, Seq: 2, Entry: &ir.Entry{ID: "0000002", Kind: ir.KindAssistant, Role: "assistant", ParentID: "0000001", Content: "from 1901", Ts: time.Date(1901, 6, 1, 0, 0, 0, 0, time.UTC)}, Tip: "0000002"},
+		{Op: OpEntry, Seq: 3, Entry: &ir.Entry{ID: "0000003", Kind: ir.KindTool, Role: "tool", ParentID: "0000002", Content: "in range", Ts: at(9)}, Tip: "0000003"},
+	}
+	for i := range recs {
+		if err := l.write(&recs[i]); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	if err := l.IndexError(); err != nil {
+		t.Fatalf("a timestamp outside the row cost the index: %v", err)
+	}
+
+	// The row written at append time and the row the log describes on the way back have to be the same row:
+	// rowTime is called from both, and two answers about one record is what rowDiff exists to notice.
+	appended := append([]row{}, l.ix.rows...)
+	replay(t, l)
+	if why := rowDiff(appended, l.ix.rows); why != "" {
+		t.Errorf("the row appended is not the row the log says: %s", why)
+	}
+	sk := l.Skeleton()
+	if sk == nil {
+		t.Fatal("the index was given up on over a timestamp")
+	}
+	if got := sk.Records(); got != 3 {
+		t.Errorf("Records: %d, want 3, because a timestamp the format cannot hold is not an entry the log lost", got)
+	}
+	for _, id := range []string{"0000001", "0000002"} {
+		s, ok := sk.Entry(id)
+		if !ok {
+			t.Fatalf("%s is not in the skeleton", id)
+		}
+		if !s.Ts.IsZero() {
+			t.Errorf("%s came back timed at %s; a row that cannot hold a time says so by having none, which is not a date", id, s.Ts)
+		}
+	}
+	s, ok := sk.Entry("0000003")
+	if !ok {
+		t.Fatal("the entry inside the range is not in the skeleton")
+	}
+	if !s.Ts.Equal(at(9)) {
+		t.Errorf("0000003: %s, want %s", s.Ts, at(9))
 	}
 }

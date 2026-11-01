@@ -67,7 +67,7 @@ A session is one directory of `data/`, and everything in it is one of three file
 |---|---|---|
 | `config.json` | `PATCH`, and every start | the session's settings; its `"id"` field is a copy of the directory name |
 | `log.jsonl` | the loop, one line per record | the truth: `entry`, `tip`, `patch` and `delete` records, one hand-written JSON object per line |
-| `log.idx` | derived, at every read | one fixed 32-byte row per record of the log, in the same order: what it was, where it lies, how long it is |
+| `log.idx` | derived, at every read | one fixed 24-byte row per record of the log, in the same order: what it was, where it lies, how long it is, when it was |
 
 `log.jsonl` is the only one of the three that has to survive. It is append-only, one record per line, and a
 commit is one line: "create the entry" and "move the path tip" are the same write, so a crash leaves both or
