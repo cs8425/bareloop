@@ -566,18 +566,6 @@ func (s *Session) reload() error {
 	return nil
 }
 
-// Entries returns the whole tree (debug UI).
-func (s *Session) Entries() []*ir.Entry {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*ir.Entry, 0, len(s.st.Entries))
-	for _, e := range s.st.Entries {
-		cp := *e
-		out = append(out, &cp)
-	}
-	return out
-}
-
 // SetName renames the session. The name lives in config.json and nowhere else: that file is
 // rewritten whole on every save, so a rename needs no log record and leaves no stale copy for
 // Replay to resurrect. The config snapshot is taken under the lock so the disk write is not.

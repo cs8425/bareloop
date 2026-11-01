@@ -79,8 +79,9 @@ log still replays and why "what happened" is answerable from the file alone.
 used to be read from its first line and every entry kept in RAM. The rows are not a copy of the tree - a
 patch moves the offset and length of one row and touches nothing else, a delete leaves its row exactly where
 it was - which is what lets a row be appended in the same breath as the record it describes. Reading one
-entry, or one page of a transcript, is a read at an address the rows hand over. What a session's records add
-up to is in the header, so a session list does not have to fold a tree at all.
+entry, or one page of a transcript, is a read at an address the rows hand over. Listing sessions costs one
+pass over the rows and none over the log: a session that nothing has opened still has its numbers, because
+they are the cheapest thing the rows say.
 
 An index is never an authority, and three rules keep it that way:
 
@@ -90,9 +91,12 @@ An index is never an authority, and three rules keep it that way:
 - **The rows are checked, and a disagreement is not argued with.** The header carries a SHA-256 of exactly
   the log bytes the rows describe, and the rows read out of the file are compared with the rows just derived
   from the log. What that costs is one line in the daemon log and a rebuild.
-- **Nothing trusts it yet.** Every read rebuilds the rows, because nothing in this build can prove the file
-  describes the log beside it. The digest is what will make that provable, and reading a page out of the
-  index instead of out of the log is the layer that gets to decide.
+- **Nothing rebuilt from it is trusted for long.** Every read of a log derives the rows again and compares
+  them with the file's, so a session that is opened has its index contradicted or confirmed in the same
+  breath. The one place the file is read as an answer is the list of sessions, which asks only what a session
+  adds up to - a number beside a session nobody has opened, where a wrong answer is answered by opening it.
+  What is still never read out of an index is a transcript: believing an address far enough to fetch an entry
+  means believing the digest, and that is a decision the reader of a page gets to make.
 
 One consequence is worth knowing before a log is edited by hand: a row names an entry by its id read as a
 number, so a `log.jsonl` whose ids were written by hand (`"root"`, `"leaf"`) still replays and still shows

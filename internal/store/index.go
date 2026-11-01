@@ -74,6 +74,7 @@ import (
 	"hash/crc32"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -627,8 +628,8 @@ func (l *Log) openIndex() (*indexState, error) {
 // readIndex is the read side of log.idx: the header and the rows it claims, with every shape check that
 // has to happen before a row is trusted. A failed check is an error, never a partial answer.
 //
-// It has no caller yet, and is the first thing S2-b will have one of: a rebuild is only worth avoiding if
-// something can read the result.
+// Log.Read is its one caller: what a row is trusted for so far is answering what a session adds up to,
+// which is the smallest claim a file can be asked to keep and the only one this build has checked.
 func readIndex(f *os.File) (header, []row, error) {
 	var hb [indexHeaderSize]byte
 	if _, err := f.ReadAt(hb[:], 0); err != nil {
@@ -654,6 +655,117 @@ func readIndex(f *os.File) (header, []row, error) {
 		}
 	}
 	return h, decodeRows(body), nil
+}
+
+// Info is what a session adds up to, as its index says - with log.jsonl not read at all.
+//
+// It exists because every one of these numbers used to be answerable only from a tree, and a tree exists
+// only once the whole log has been read. The sidebar asks them of a dozen sessions at once, and a session
+// it merely lists had been read as thoroughly as one it is showing the transcript of.
+type Info struct {
+	// LogBytes is what log.jsonl costs the disk right now, torn tail included. It is not the number of
+	// bytes the rows describe: a tail no read has reached yet costs the disk its bytes and costs Rows
+	// nothing, which is the honest shape of a session whose last line was torn by a crash.
+	LogBytes int64
+	// Rows is the records the index covers. One row per record, whatever the record was: an entry, a
+	// patch of one, a move of the tip, a delete. Patches and deletes do not add an entry, and a record
+	// this build cannot act on is still a record - Skipped counts those, and they are ordinary traffic
+	// in a session written by an older build, not damage.
+	Rows    int64
+	Skipped int64
+	// Entries is every entry the log leaves standing, branches included. Depth is how many of them the
+	// path from the root to Tip passes through, and the two numbers are only equal on a session that
+	// never branched.
+	Entries int
+	Depth   int
+	// Tip is the leaf the session stands on: the entry the last tip record named, or the newest entry in
+	// a log that never moved its tip.
+	Tip string
+}
+
+// Inspect answers what the session inside dir adds up to, from that session's log.idx, without reading
+// log.jsonl - which is the point: a daemon that lists a hundred sessions and opens none of them answers
+// from a hundred small index files instead of from the whole transcript of each.
+//
+// It is the one place in this build that believes an index file. Everywhere else log.idx is derived and
+// contradicted: Replay reads the log, folds rows of its own, compares them with the file's (rowDiff),
+// says so out loud, and writes the file over. Believing is possible here because of what is being asked
+// and not trusted: a summary of a session nobody has opened, where the answer to an error is to read the
+// log instead - so every way the file can lie about itself is refused first. The magic, the version, the
+// timestamp epoch, and the header's own CRC are decodeHeader's; a row count the body cannot hold is
+// readIndex's; and the one check that needs the log's size and not its bytes is inspectRows, because rows
+// describing bytes the log does not have is a file about a log that is not this one.
+//
+// What survives all of that is a file this build wrote, and the one thing still not checked is its
+// sha256 - which cannot be taken without reading the log, the thing this function exists to avoid. A file
+// this build wrote describing a *different* log of the same shape is therefore believed, and is caught at
+// the next Replay of that session. That is the trade, and it is only ever paid by a number in a list of
+// sessions nobody has opened yet: the transcript of a session is never read from here.
+func Inspect(dir string) (Info, error) {
+	size, err := logSize(dir)
+	if err != nil {
+		return Info{}, err
+	}
+	// why an index that is not there is an error and not an empty Info: a session with no log.idx is a
+	// session this build has never read, and every number in Info would be a zero the caller cannot tell
+	// apart from a session of nothing.
+	f, err := os.Open(filepath.Join(dir, indexFileName))
+	if err != nil {
+		return Info{}, err
+	}
+	defer f.Close()
+	h, rows, err := readIndex(f)
+	if err != nil {
+		return Info{}, err
+	}
+	return inspectRows(rows, h.cover, size)
+}
+
+// Read is Inspect for a log this process has open. When that log has been read, its rows are already in
+// memory, they are ahead of anything the file holds, and the index file is not opened at all.
+func (l *Log) Read() (Info, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ix == nil {
+		return Inspect(l.dir)
+	}
+	size, err := logSize(l.dir)
+	if err != nil {
+		return Info{}, err
+	}
+	// why the rows in memory are the ones to answer with: they are what the log has been through since the
+	// file was last read, and a record appended a moment ago is in them and not yet in the file.
+	return inspectRows(l.ix.rows, l.ix.h.cover, size)
+}
+
+// inspectRows is the one fold the read side does, and the last place that decides whether the numbers are
+// worth returning.
+func inspectRows(rows []row, covered, size int64) (Info, error) {
+	if covered > size {
+		// why the fold is not worth a number: every row of it would be an address past the end of the log,
+		// so the tree could be right and the transcript still could not be read from it.
+		return Info{}, fmt.Errorf("%w: the rows describe %d bytes and log.jsonl holds %d", errIndexBadShape, covered, size)
+	}
+	sk := foldRows(rows, nil, nil).skeleton()
+	return Info{
+		LogBytes: size,
+		Rows:     int64(len(rows)),
+		Skipped:  sk.Skipped(),
+		Entries:  sk.Size(),
+		Depth:    sk.Depth(),
+		Tip:      sk.Tip(),
+	}, nil
+}
+
+// logSize is what a session's log costs the disk right now. It is asked of the file rather than taken from
+// the size a log handle is appending at, because the question is about the disk and not about a process:
+// a torn tail belongs in the answer.
+func logSize(dir string) (int64, error) {
+	fi, err := os.Stat(filepath.Join(dir, "log.jsonl"))
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
 }
 
 // indexState is one session's log.idx: the rows written so far, the file they live in, and the running
@@ -1123,6 +1235,33 @@ func (sk *Skeleton) Parent(id string) string {
 		return ""
 	}
 	return sk.name(sk.nodes[n].parent)
+}
+
+// Size is how many entries the log leaves standing, every branch included. Depth is the same tree along
+// the one path the session stands on, and the two part company the moment a session branches.
+func (sk *Skeleton) Size() int { return len(sk.nodes) }
+
+// Depth is how many entries the path from the root to Tip passes through. It is the sidebar's idea of how
+// long a conversation was, and it is counted without turning an id into a string, because a dozen sessions
+// listed is a thousand entries walked for their shape alone.
+//
+// The walk is bounded at the size of the tree, which is the most the path can hold whatever the parent
+// chain says: a log written by hand can name two entries the parents of each other, and ir.Path puts the
+// same bound on the walk it makes over the same tree.
+func (sk *Skeleton) Depth() int {
+	// why byID is entered once and never again: the tip is kept as the id the log wrote it, and from here on
+	// the walk stays in id numbers - which is the whole point of counting a path without formatting an id
+	// per step. A tip that is not in the tree walks nothing.
+	node, ok := sk.nodes[sk.byID[sk.tip]]
+	var d int
+	for ok && d < len(sk.nodes) {
+		d++
+		if node.parent == 0 {
+			break // the root: nothing above it is left to count
+		}
+		node, ok = sk.nodes[node.parent]
+	}
+	return d
 }
 
 // Live is every live entry's id, unsorted.

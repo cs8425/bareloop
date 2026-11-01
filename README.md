@@ -121,7 +121,8 @@ separate and free-form, so spaces and non-ASCII text belong there.
 Every session directory holds `config.json`, `log.jsonl` - the log itself, one record per line, append-only,
 and the only file that has to survive - and `log.idx`, a derived index of where each record lies. The index
 is rebuilt whenever the log is read, and a log that cannot write one keeps taking writes without it
-([what is on disk, and why](docs/design.md#what-is-on-disk)).
+([what is on disk, and why](docs/design.md#what-is-on-disk)). It is also what answers the session list, so a
+session nothing has opened still appears in it with its numbers.
 
 ## Configuration
 
@@ -338,7 +339,7 @@ otherwise the model answers in whatever it prefers
 | method | path | what it does |
 |---|---|---|
 | GET | `/api/health` | liveness |
-| GET | `/api/sessions` | every session with its status |
+| GET | `/api/sessions` | every session with its status, and what each one adds up to - how many entries its path holds, how many records its log holds, and what that log costs the disk. Answered from the index: listing sessions reads no transcript, and a session with no index is listed without those numbers rather than with zeroes |
 | POST | `/api/sessions` | create a session (body: a config; `id` is required, lowercase, and becomes the directory name - 400 without it, 409 if the directory exists) |
 | GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |

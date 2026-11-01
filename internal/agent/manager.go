@@ -14,6 +14,7 @@ import (
 
 	"bareloop/internal/asm"
 	"bareloop/internal/compact"
+	"bareloop/internal/store"
 )
 
 // Manager owns every session: each session is one directory under root holding its append-only
@@ -133,14 +134,27 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 
 func (m *Manager) dir(id string) string { return filepath.Join(m.root, id) }
 
-// List returns the known sessions (running ones first-hand, plus on-disk ones not opened yet).
+// List returns the known sessions (running ones first-hand, plus on-disk ones not opened yet). Reading the
+// list reads no transcript: an open session answers from the rows of its index in memory and a closed one
+// from the same rows on disk.
+//
+// Why the manager's lock is let go before a single row is made: making one asks a session for its numbers,
+// and the answer waits behind whatever that session is doing. The lock is only ever needed to copy the map,
+// and holding it across the walk would let one busy session hold up every request that needs the map at all.
+// What it costs is that a session opened while the walk of the directories is running can be listed as
+// closed, and the next listing says otherwise.
 func (m *Manager) List() []Summary {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	seen := map[string]bool{}
-	var out []Summary
+	open := make([]*Session, 0, len(m.sessions))
+	seen := make(map[string]bool, len(m.sessions))
 	for id, s := range m.sessions {
 		seen[id] = true
+		open = append(open, s)
+	}
+	m.mu.Unlock()
+
+	out := make([]Summary, 0, len(open))
+	for _, s := range open {
 		out = append(out, s.summary())
 	}
 	entries, err := os.ReadDir(m.root)
@@ -155,39 +169,78 @@ func (m *Manager) List() []Summary {
 			if _, err := os.Stat(filepath.Join(m.root, de.Name(), "log.jsonl")); err != nil {
 				continue
 			}
-			out = append(out, Summary{ID: de.Name(), Closed: true})
+			out = append(out, m.diskSummary(de.Name()))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// Summary is one row of the session list.
+// Summary is one row of the session list, and every number in it comes from two files rather than from a
+// conversation: config.json for what the session is called, log.idx for what it adds up to. Neither is a
+// reason to read a transcript, which is what lets a session nothing has opened still have a row.
 type Summary struct {
-	ID      string `json:"id"`
-	Name    string `json:"name,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Phase   string `json:"phase,omitempty"`
-	Closed  bool   `json:"closed,omitempty"`
-	Entries int    `json:"entries"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	// Model is the session's own config, and empty for a session whose config this build cannot read.
+	Model  string `json:"model,omitempty"`
+	Phase  string `json:"phase,omitempty"`
+	Closed bool   `json:"closed,omitempty"`
+	// Path is how many entries the conversation is - the ones on the path the session stands on - and Log
+	// how many records it took to get there. The two are only equal on a session that has never been
+	// edited, rewound, or compacted, because a patch and a delete are records that add nothing. All three
+	// numbers are omitted rather than zeroed when the session has no index to ask, because a zero is a
+	// claim about an empty session and a missing figure is a claim about nothing.
+	Path int   `json:"path,omitempty"`
+	Log  int64 `json:"log,omitempty"`
+	// Bytes is what the log costs the disk. Skipped is the records the index has a row for and this build
+	// cannot act on: an ordinary fact of a session an older build wrote, and nothing to warn about.
+	Bytes   int64  `json:"bytes,omitempty"`
+	Skipped int64  `json:"skipped,omitempty"`
 	Tip     string `json:"tip,omitempty"`
 }
 
+// fill is the one place Info becomes a row, so a session that is open and a session that is only a
+// directory cannot drift apart over what a number means.
+func (s *Summary) fill(info store.Info) {
+	s.Path, s.Log, s.Bytes, s.Skipped, s.Tip = info.Depth, info.Rows, info.LogBytes, info.Skipped, info.Tip
+}
+
+// diskSummary is the row of a session this process has not opened, made from the files that do not need it
+// to be open. A config that will not read or an index that will not be believed costs the row its numbers
+// and not the row: a directory with a log in it is a session in the list whatever its files say about
+// themselves.
+func (m *Manager) diskSummary(id string) Summary {
+	out := Summary{ID: id, Closed: true}
+	if cfg, err := m.loadConfig(id); err == nil {
+		out.Name, out.Model = cfg.Name, cfg.LLM.Model
+	}
+	if info, err := store.Inspect(m.dir(id)); err == nil {
+		out.fill(info)
+	}
+	return out
+}
+
+// summary is this session's row. Its numbers come from its log handle - the rows in memory once the log
+// has been read, its index file before that - and only the phase has to be asked of the session, being the
+// one number on the row no file can tell.
 func (s *Session) summary() Summary {
 	cfg := s.Config()
-	return Summary{ID: s.ID, Name: cfg.Name, Model: cfg.LLM.Model, Phase: phaseToString(s.phaseNow()), Entries: len(s.Entries()), Tip: s.tipNow()}
+	out := Summary{ID: s.ID, Name: cfg.Name, Model: cfg.LLM.Model, Phase: phaseToString(s.phaseNow())}
+	info, err := s.log.Read()
+	if err != nil {
+		// why the row is still worth a line: its name and its phase are true, and a session with no
+		// log.idx - one never read, or one whose index was given up on - has no numbers to be wrong about.
+		return out
+	}
+	out.fill(info)
+	return out
 }
 
 func (s *Session) phaseNow() phase {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.phase
-}
-
-func (s *Session) tipNow() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.st.Tip
 }
 
 // Get returns an open session or opens it from disk.

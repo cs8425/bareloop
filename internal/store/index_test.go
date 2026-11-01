@@ -22,10 +22,12 @@ import (
 )
 
 // The tests in this file are the first ones ever written for the store, and they were written for the
-// index: a derived file that nothing reads yet is a file whose only proof is that it agrees with the log.
-// So most of them say the same thing three ways - the tree Replay returns, the rows the index holds, and
-// the bytes of log.jsonl at the address a row gives - and one of them is a differential test against the
-// fold the index replaced.
+// index: a derived file is only ever as good as that it agrees with the log. So most of them say the same
+// thing three ways - the tree Replay returns, the rows the index holds, and the bytes of log.jsonl at the
+// address a row gives - and one of them is a differential test against the fold the index replaced.
+//
+// The index has one reader so far, the session list, which is why the comparisons below end at the numbers
+// a session is listed with: what nothing has been asked for is not tested for it.
 
 func openTestLog(t *testing.T) (*Log, string) {
 	t.Helper()
