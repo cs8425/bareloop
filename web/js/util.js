@@ -17,6 +17,14 @@ export const logEl = () => $('#log');
 // 1234 -> "1.2k": token counts are read at a glance, so precision past two digits is noise.
 export const fmtN = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n ?? 0));
 
+// A size in the unit you would say out loud. The byte floor never rounds to "0 KB": a page that
+// fetched something and reports nothing is a rounding artefact no reader can tell from a real zero,
+// and this number is quoted next to "how much of the session is on screen".
+export const fmtBytes = (n) => {
+  const b = n || 0;
+  return b < 1024 ? `${b} B` : b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // MIN_UNCACHED: below this many *new* tokens in one request, its prefill speed is not a measurement.

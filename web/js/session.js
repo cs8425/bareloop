@@ -1,12 +1,12 @@
 // Session-level reads and renders: the transcript of the current session, the sidebar list, the
 // status badges and the pending queue. This is the module that talks to the server about *sessions*;
 // the transcript module only draws what it is given.
-import { $, el, fmtN, logEl, clamp, pathOf, sortByNum } from './util.js';
+import { $, el, fmtN, fmtBytes, logEl, clamp, pathOf, sortByNum } from './util.js';
 import { state } from './state.js';
 import { api, get } from './api.js';
 import { EV_SESSION, emit } from './bus.js';
 import { confirmBox, note } from './ui.js';
-import { resetScroll, scrollDown } from './scroll.js';
+import { isPinned, resetScroll, scrollDown } from './scroll.js';
 import { closeNav } from './nav.js';
 import { entryNode, linkToolResults } from './transcript.js';
 import { syncComposer } from './composer.js';
@@ -30,12 +30,97 @@ export function writeHash(id, replace = false) {
   return true;
 }
 
+// PAGE is what one read of the transcript asks for, and what every "older" press adds to it. Two
+// numbers decided it: a whole path of this project's own test session serialises to 1.9 MB, and the
+// cost of laying out a transcript grows with what is on it (a forced reflow measured 0.14 ms at 221
+// characters of content and 52.88 ms once the same element had reached 214 000 pixels of height). A
+// session is opened to read the newest part of it, so that is what the first request asks for.
+const PAGE = 40;
+
+// The chip that offers to read further back waits near the top of the transcript, because that is the
+// only place where reading backwards happens. At the bottom the newest message is already there.
+const REVEAL_PX = 200;
+
+// pageQuery is the window this tab is showing, as a query string. The window always ends at the tip —
+// reading backwards grows it at the older end — so the transcript never sees half a turn, and the
+// parent walk in pathOf always starts from an entry that is present. Once the tab is holding more than
+// a page may carry there is no page left to ask for, and asking for one would mean agreeing to forget
+// the older entries already on screen: the whole path is asked for by name instead, which is never more
+// than the unpaged read this endpoint made on every refresh before it could page. The cost panel is the
+// other reader of this endpoint and it wants the whole path — it prices every request on the path — so
+// `stats.js` keeps calling `get('')` unparameterised, and the default of a request with no query string
+// staying "no page" is what makes that keep working.
+function pageQuery() {
+  const size = state.win ? state.win.size : PAGE;
+  const max = state.win?.max || 0;
+  return max && size > max ? '?all=1' : `?limit=${size}`;
+}
+
+// One page on its way at a time: a second press must not grow the window before the first one has
+// landed, or the window grows twice for one response.
+let loadingOlder = false;
+
+// renderOlder writes the chip's own label: how much of the path is on screen, of how much, and what it
+// cost to fetch. Every number is the server's, not the client's guess — including `count`, which is what
+// came back rather than what was asked for: a tab that asked for 80 entries of a 66-entry path has 66 on
+// screen, and printing the number it asked for would be a small lie about what is in front of the reader.
+function renderOlder() {
+  const chip = $('#older');
+  if (!chip) return;
+  const w = state.win;
+  if (!w) {
+    chip.classList.remove('shown');
+    return;
+  }
+  chip.textContent = `↑ older · ${fmtN(w.count)} of ${fmtN(w.total)}`;
+  chip.title =
+    `the transcript is a page: ${fmtN(w.count)} of ${fmtN(w.total)} entries on the path are on screen, about ${fmtBytes(w.bytes)} to fetch.\n` +
+    `click to read ${fmtN(PAGE)} more — the page grows at the older end and what you are looking at does not move.`;
+  chip.disabled = loadingOlder;
+  revealOlder();
+}
+
+// revealOlder shows the chip when there is something older AND the top of the transcript is on screen.
+function revealOlder() {
+  const chip = $('#older');
+  if (!chip) return;
+  chip.classList.toggle('shown', !!state.win?.hasOlder && logEl().scrollTop <= REVEAL_PX);
+}
+
+// loadOlder grows the page rather than fetching a separate older slice: one request, one render path,
+// and the window stays contiguous with the tip. What it pays for that is re-fetching what is already on
+// screen — which is what every refresh did unconditionally before the endpoint could page.
+async function loadOlder() {
+  if (loadingOlder || !state.win?.hasOlder) return;
+  loadingOlder = true;
+  state.win.size += PAGE;
+  renderOlder();
+  try {
+    await refresh();
+  } catch {
+    state.win.size -= PAGE; // the page that did not arrive was never added to the window
+  } finally {
+    loadingOlder = false;
+    renderOlder();
+  }
+}
+
+// wireOlderRow is called once from app.js: the chip and the scroll position that reveals it.
+export function wireOlderRow() {
+  const chip = $('#older');
+  if (!chip) return;
+  chip.onclick = () => loadOlder();
+  logEl().addEventListener('scroll', revealOlder, { passive: true });
+}
+
 // refresh re-reads the session and rebuilds the transcript. Streams that are still running survive:
 // their nodes are re-appended below the committed entries, so a refresh in the middle of an answer
 // does not blank the answer.
 export async function refresh() {
   if (!state.id) return;
-  const data = await get('');
+  const box = logEl();
+  const asked = state.win ? state.win.size : PAGE;
+  const data = await get(pageQuery());
   // Both config writers (settings dialog, tools drawer) PATCH a whole config built on top of
   // state.cfg, so a copy older than the last save silently undoes it — a price edited in the dialog
   // bounced back by the next tool toggle. This GET already carries the session's config, which makes
@@ -44,8 +129,15 @@ export async function refresh() {
   state.cfg = data.config ?? null;
   // An empty transcript means "fresh load or session switch": that always lands on the newest
   // message, even if the viewport was left reading something older.
-  const wasEmpty = !logEl().children.length;
-  logEl().textContent = '';
+  const wasEmpty = !box.children.length;
+  // A rebuild replaces every pixel of the transcript, so afterwards the viewport has to be pointed back
+  // at the same place in the conversation. Distance from the bottom is the one number that survives a
+  // change in height: the window only ever grows at the older end, so holding that distance holds the
+  // entry the reader was looking at — the whole difference between “more arrived above” and “the page
+  // jumped”. A fresh transcript and a reader following the tip have nothing to hold: for those the
+  // bottom is the right place, and it is scrollDown() below that puts it there.
+  const keep = wasEmpty || isPinned() ? null : box.scrollHeight - box.scrollTop;
+  box.textContent = '';
   state.entries.clear();
   state.tools.clear();
   state.toolResults.clear();
@@ -61,12 +153,31 @@ export async function refresh() {
   // Every card this pass created is now old enough to be told how its call ended, because the tool entries
   // that answer them were drawn after the messages that asked.
   linkToolResults();
-  for (const [, s] of state.streams) logEl().appendChild(s.node);
+  for (const [, s] of state.streams) box.appendChild(s.node);
   state.status = data.status;
   renderStatus(data.status);
   state.pending = data.pending || [];
   renderPending();
+  const w = data.window || {};
+  // `size` is what this tab asked for and keeps between reads; the rest is what the server says came
+  // back. An answer with no `window` at all (an older server) leaves the chip out of the UI entirely,
+  // because `hasOlder` can only ever be false — no promise is made about paging that cannot be kept.
+  state.win = {
+    size: asked,
+    count: w.count || 0,
+    oldest: w.oldestId || '',
+    hasOlder: !!w.hasOlder,
+    total: w.total || 0,
+    bytes: w.bytes || 0,
+    max: w.maxLimit || 0,
+  };
   scrollDown(wasEmpty);
+  // Reading backwards: the newest message stays exactly as far below the viewport as it was, which is
+  // the whole difference between "more arrived above" and "the page jumped".
+  if (keep !== null) box.scrollTop = box.scrollHeight - keep;
+  // Last, because the chip decides whether to appear by asking where the top of the transcript is, and
+  // the viewport has to be back where the reader left it before that question means anything.
+  renderOlder();
 }
 
 export async function loadSessions() {
@@ -113,6 +224,7 @@ export async function selectSession(id) {
   writeHash(id); // the address bar follows the view, so a reload or a shared link comes back here
   state.id = id;
   state.cfg = null; // the cached config described the session we are leaving; refresh() below fills in this one's
+  state.win = null; // and so does the page it asked for: a new session starts at its newest message
   // Anything that had the previous session open (the tool drawer) is told before the new one renders,
   // so a panel can never end up showing one session underneath another one's name.
   emit(EV_SESSION, id);

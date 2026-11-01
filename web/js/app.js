@@ -35,7 +35,7 @@ import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
 import { flushStreams } from './transcript.js';
-import { loadSessions, selectSession, refresh, idFromHash, writeHash } from './session.js';
+import { loadSessions, selectSession, refresh, idFromHash, writeHash, wireOlderRow } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
 import { bootIcons } from './icons.js';
@@ -170,6 +170,9 @@ function wire() {
   // around the glyph that replaces them.
   bootIcons();
   wireScroll();
+  // The "older" chip is wired after the scroll wiring because it hangs a second listener on the same
+  // scroller: one owns following the tip, this one owns reading backwards.
+  wireOlderRow();
   wireNav();
   wireComposer();
   wireSettings();

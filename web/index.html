@@ -49,6 +49,11 @@
           <button id="jump" type="button" class="hidden" title="the transcript stopped following you — click to jump to the newest message">
             <span data-icon="down"></span> latest
           </button>
+          <!-- The transcript is a page of the path, not the path (js/session.js asks for a page), so this
+               is the way back. It is a floating chip for the same reason "latest" is: it belongs to wherever
+               you are in the transcript, and a permanent row above it would be chrome on every screen. It
+               writes its own label, because the label is three numbers it knows and the markup does not. -->
+          <button id="older" type="button"></button>
         </div>
         <div id="requests"></div>
 

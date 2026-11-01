@@ -191,6 +191,20 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   position: absolute; right: 16px; bottom: 12px; z-index: 4;
   border-color: var(--accent); box-shadow: 0 3px 12px rgba(0, 0, 0, .55); background: var(--bg3);
 }
+/* The other end of the same scroller. `older` is what you press when the transcript is a page and you
+   have read to the top of it, so it sits at the top — and, like `latest`, it floats over the transcript
+   instead of taking a row of its own: it is only wanted at one place in a long document, and a strip
+   permanently above the transcript is chrome on every screen that has nothing older to read.
+   #older.shown rather than #older.hidden: an id selector outranks the `.hidden` class rule, so a
+   "hidden by default, shown by JS" element has to be *added* by class and never taken away by it. */
+#older {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 4;
+  display: none; align-items: center; gap: 6px;
+  background: var(--bg3); box-shadow: 0 3px 12px rgba(0, 0, 0, .55);
+  font-size: var(--t-1); white-space: nowrap; max-width: calc(100% - 32px);
+}
+#older.shown { display: inline-flex; }
+#older:disabled { opacity: .6; }
 .msg { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; background: var(--bg2); }
 .msg > header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: var(--t-0); color: var(--muted); } /* wrap, not overflow: two groups of numbers plus a long MCP tool name do not fit in 485px, and a header that pushes the transcript sideways is worse than a second line */
 .msg > header .who { color: var(--fg); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
