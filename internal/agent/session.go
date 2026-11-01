@@ -581,6 +581,20 @@ func (s *Session) SetName(name string) error {
 	return nil
 }
 
+// SetFlags is this session's pin and archive pair, written the way SetName writes a name: the snapshot is
+// taken under the lock and the disk write is not, and applyFlags is the one door the pair goes through.
+//
+// There is no emitState at the end, whatever SetName does: a `state` event carries the status, and neither
+// flag is in it. The session list is the thing that shows these two, and it is re-read by whoever asked -
+// an event that had nothing new in it would only be a second way for the two to disagree.
+func (s *Session) SetFlags(pinned, archived *bool) error {
+	s.mu.Lock()
+	applyFlags(&s.cfg, pinned, archived)
+	cfg := s.cfg
+	s.mu.Unlock()
+	return s.mgr.SaveConfig(cfg)
+}
+
 // Path returns the current root->tip path (the sequence that gets sent).
 func (s *Session) Path() []*ir.Entry {
 	path := s.path()
@@ -633,6 +647,10 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	}
 	old := s.cfg
 	patch.ID = old.ID
+	// The two list flags are the body's to read and never to write: a settings save PATCHes the whole
+	// config it cached, and a cached copy taken before somebody pinned this session would unpin it by
+	// saying nothing at all. POST /api/session/{id}/flags is the only writer of them.
+	patch.Pinned, patch.Archived = old.Pinned, old.Archived
 	// The API never echoes the key back, so an empty credential block means "keep".
 	if strings.TrimSpace(patch.LLM.BaseURL) == "" {
 		patch.LLM.BaseURL = old.LLM.BaseURL

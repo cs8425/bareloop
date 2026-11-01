@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"bareloop/internal/asm"
 	"bareloop/internal/compact"
@@ -172,6 +173,9 @@ func (m *Manager) List() []Summary {
 			out = append(out, m.diskSummary(de.Name()))
 		}
 	}
+	// The order is by id: the only order two listings of the same directories agree on without asking a
+	// session anything, and the one a caller can page against. What a reader shows first - pinned, or the
+	// newest lastTs - is that reader's decision, made with the fields this fills in.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
@@ -198,12 +202,28 @@ type Summary struct {
 	Bytes   int64  `json:"bytes,omitempty"`
 	Skipped int64  `json:"skipped,omitempty"`
 	Tip     string `json:"tip,omitempty"`
+	// Pinned and Archived are where this session sits in a list (see Config). The daemon stores them and
+	// nothing else: what a pinned session is worth is the reader's decision, and every reader gets the
+	// same pair to decide with.
+	Pinned   bool `json:"pinned,omitempty"`
+	Archived bool `json:"archived,omitempty"`
+	// LastTs is when the newest entry of this session happened - not when its log was last written, and
+	// not when this process last opened it. A pointer because a session whose index has no time to read
+	// is missing a figure rather than standing at the epoch, and encoding/json's omitempty cannot say
+	// that about a struct: no lastTs in the response means nobody claimed one.
+	LastTs *time.Time `json:"lastTs,omitempty"`
 }
 
 // fill is the one place Info becomes a row, so a session that is open and a session that is only a
 // directory cannot drift apart over what a number means.
 func (s *Summary) fill(info store.Info) {
 	s.Path, s.Log, s.Bytes, s.Skipped, s.Tip = info.Depth, info.Rows, info.LogBytes, info.Skipped, info.Tip
+	// why a zero time is dropped instead of carried: an index with no entry timestamp is a session that
+	// cannot be timed, and a 1970 in the response is a date some reader will sort by and draw.
+	if !info.LastTs.IsZero() {
+		ts := info.LastTs
+		s.LastTs = &ts
+	}
 }
 
 // diskSummary is the row of a session this process has not opened, made from the files that do not need it
@@ -214,6 +234,10 @@ func (m *Manager) diskSummary(id string) Summary {
 	out := Summary{ID: id, Closed: true}
 	if cfg, err := m.loadConfig(id); err == nil {
 		out.Name, out.Model = cfg.Name, cfg.LLM.Model
+		// The two list flags come along even though the session is shut: where it sits in a list is a
+		// fact of its config.json, and a closed session that lost its pin when the daemon restarted
+		// would be a pin with a secret dependency on this process having opened it.
+		out.Pinned, out.Archived = cfg.Pinned, cfg.Archived
 	}
 	if info, err := store.Inspect(m.dir(id)); err == nil {
 		out.fill(info)
@@ -227,6 +251,10 @@ func (m *Manager) diskSummary(id string) Summary {
 func (s *Session) summary() Summary {
 	cfg := s.Config()
 	out := Summary{ID: s.ID, Name: cfg.Name, Model: cfg.LLM.Model, Phase: phaseToString(s.phaseNow())}
+	// Where a session sits in a list is its config's business: open or shut, this row and the one
+	// diskSummary makes from config.json have to say the same thing, or a pin would depend on this
+	// process happening to have the session open.
+	out.Pinned, out.Archived = cfg.Pinned, cfg.Archived
 	info, err := s.log.Read()
 	if err != nil {
 		// why the row is still worth a line: its name and its phase are true, and a session with no
@@ -360,6 +388,56 @@ func (m *Manager) loadConfig(id string) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// SetFlags is the whole cost of pinning or archiving a session: two booleans in its config.json.
+//
+// Why a route of its own and not two more fields of PATCH /api/session/{id}: that route answers {id} by
+// opening the session, and opening one reads its whole log - so pinning a session this process has never
+// opened would replay a transcript to change four bytes of a file. The manager can answer that question
+// from config.json alone. A session already open is the case that must not be answered that way: its
+// in-memory config is the authority, and a file written behind its back is one SaveConfig away from being
+// undone.
+//
+// A nil is "no opinion about this flag". applyFlags is where the pair is decided, and it is the only door.
+func (m *Manager) SetFlags(id string, pinned, archived *bool) error {
+	m.mu.Lock()
+	s := m.sessions[id]
+	m.mu.Unlock()
+	if s != nil {
+		return s.SetFlags(pinned, archived)
+	}
+	cfg, err := m.loadConfig(id)
+	if err != nil {
+		return err
+	}
+	applyFlags(&cfg, pinned, archived)
+	return m.saveConfig(cfg)
+}
+
+// applyFlags writes the two list flags, and it is the only place that writes them: "pinned and archived
+// are never both true" is the kind of invariant that only holds while there is one door through which
+// either of them is set.
+//
+// When what arrives would make the pair (true, true), the flag that was just asked for wins and the other
+// one goes. That request is not a contradiction to litigate - it is how "put this one away" and "keep this
+// one where I can see it" are said - and a row of the session list can only be drawn in one place.
+func applyFlags(cfg *Config, pinned, archived *bool) {
+	if pinned != nil {
+		cfg.Pinned = *pinned
+	}
+	if archived != nil {
+		cfg.Archived = *archived
+	}
+	if cfg.Pinned && cfg.Archived {
+		// which of the two was just said is all this needs: a pair that is already (true, true) cannot be
+		// stored, because every writer of it comes through here.
+		if pinned != nil && *pinned {
+			cfg.Archived = false
+		} else {
+			cfg.Pinned = false
+		}
+	}
 }
 
 // open returns the session of the directory id, opening it when needed. id is always the directory

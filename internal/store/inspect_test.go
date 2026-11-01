@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"bareloop/internal/ir"
 )
@@ -179,5 +180,66 @@ func TestAParentChainThatCyclesIsWalkedOnceAround(t *testing.T) {
 	// The same bound ir.Path uses, so the two walks of one tree cannot disagree about how deep it is.
 	if got, want := len(ir.Path(st.Entries, st.Tip)), sk.Size(); got != want {
 		t.Errorf("ir.Path walks %d entries, the skeleton bounds itself at %d", got, want)
+	}
+}
+
+// TestNewestTimeAsksTheEntryRowsAndNobodyElse is the kind filter of newestTs written out. A row spends four
+// of its 24 bytes on a timestamp, and they are filled from the entry the record wrote or patched; a tip
+// move, a delete, and a record this build cannot act on have no entry to take a time from, so their rows
+// leave ts zero *and* tsUnknown clear - absTs hands them back the epoch. newestTs therefore has to be told
+// which rows to ask, and the answer is not "the newest row".
+func TestNewestTimeAsksTheEntryRowsAndNobodyElse(t *testing.T) {
+	// why 100 instead of a date: a row stores seconds after indexEpoch, and this is that arithmetic.
+	want := time.Unix(indexEpoch+100, 0).UTC()
+	if got := newestTs([]row{{kind: rowUser, ts: 100}, {kind: rowTip}, {kind: rowDelete}, {kind: rowBad}}); !got.Equal(want) {
+		t.Errorf("newestTs: %s, want the user row's %s - the tip, delete and bad rows beside it have no timestamp to give", got.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	// A patch row is asked too: it carries the timestamp of the entry it restated, which is the entry's
+	// own and not the moment the patch was written (Log.Patch writes the caller's entry unchanged).
+	if got := newestTs([]row{{kind: rowPatchTool, ts: 5}, {kind: rowCompaction, ts: 7}}); !got.Equal(time.Unix(indexEpoch+7, 0).UTC()) {
+		t.Errorf("newestTs: %s, want the compaction row's 7 over the patch's 5", got.Format(time.RFC3339))
+	}
+	// A log of nothing but tip moves and deletes has no timestamp to tell anybody. Handing back the epoch
+	// would be the lie this test exists for: it is a date, and the log never claimed one.
+	if got := newestTs([]row{{kind: rowNone}, {kind: rowTip}, {kind: rowDelete}, {kind: rowBad}}); !got.IsZero() {
+		t.Errorf("newestTs: %s, want the zero time for a log that holds no entry", got.Format(time.RFC3339))
+	}
+	// tsUnknown is a row saying out loud that it has no time, which is a different claim from a row of
+	// zeroes - and both have to end at the zero time, by different routes.
+	if got := newestTs([]row{{kind: rowAssistant, flags: tsUnknown}}); !got.IsZero() {
+		t.Errorf("newestTs: %s, want the zero time for the one row there is and it carries no timestamp", got.Format(time.RFC3339))
+	}
+}
+
+// TestANewestEntrySurvivesTheTipMoving is the session list's sorting question asked of a real log: what
+// gets printed beside a session is when its newest message happened, and a tip moving back underneath it -
+// a rewind, a time travel - is not the conversation having something new to say.
+func TestANewestEntrySurvivesTheTipMoving(t *testing.T) {
+	l, dir := openTestLog(t)
+	a := put(t, l, ir.KindUser, "", "one", true, at(5))
+	put(t, l, ir.KindAssistant, a.ID, "two", true, at(9))
+	// The newest record in the log is now this tip move, and it is not an entry.
+	if err := l.SetTip(a.ID); err != nil {
+		t.Fatalf("SetTip: %v", err)
+	}
+	replay(t, l)
+	warm, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !warm.LastTs.Equal(at(9)) {
+		t.Errorf("LastTs: %s, want the assistant entry's %s and not the tip move that came after it", warm.LastTs.Format(time.RFC3339), at(9).Format(time.RFC3339))
+	}
+	// The file says what the memory said, which is what a session listed without being opened is betting
+	// on; TestWhatTheIndexSaysIsWhatTheLogSays is the one that holds the two structs together as a whole.
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cold, err := Inspect(dir)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !cold.LastTs.Equal(warm.LastTs) {
+		t.Errorf("the file says LastTs %s and reading the log said %s", cold.LastTs.Format(time.RFC3339), warm.LastTs.Format(time.RFC3339))
 	}
 }

@@ -681,6 +681,11 @@ type Info struct {
 	// Tip is the leaf the session stands on: the entry the last tip record named, or the newest entry in
 	// a log that never moved its tip.
 	Tip string
+	// LastTs is the newest timestamp an entry of this log carries - when this conversation last had
+	// something to say, which is what a list of sessions is sorted by. It is an entry's timestamp and not
+	// a record's: newestTs says both halves of why. Zero when no row has a time to read, which is a
+	// session this build cannot time at all rather than one from the epoch.
+	LastTs time.Time
 }
 
 // Inspect answers what the session inside dir adds up to, from that session's log.idx, without reading
@@ -754,7 +759,56 @@ func inspectRows(rows []row, covered, size int64) (Info, error) {
 		Entries:  sk.Size(),
 		Depth:    sk.Depth(),
 		Tip:      sk.Tip(),
+		LastTs:   newestTs(rows),
 	}, nil
+}
+
+// newestTs is the newest timestamp the entry rows of rows carry, and the zero time when none of them
+// carries one.
+//
+// Why only entry rows: a row's four timestamp bytes are filled from the entry the record wrote or
+// patched (see rowIndex), and a tip move, a delete, or a record this build cannot act on has no entry to
+// take a time from - their rows leave ts zero *without* setting tsUnknown, so absTs answers the epoch for
+// them. Asking those rows when the session last spoke would hand back 1970 and call it a date.
+//
+// Why a patch does not move this: Log.Patch writes the caller's entry as given and the agent patches
+// content without restamping it, so a patch row carries the patched entry's own time. This figure is
+// therefore "when the newest entry of this log happened", which is the sentence the sidebar prints, and
+// not "when the file was last written": rewinding a conversation leaves the entries behind as old as
+// they were, and this says so instead of pretending the session is fresh.
+func newestTs(rows []row) time.Time {
+	var best int64
+	for _, r := range rows {
+		if !entryRow(r.kind) {
+			continue
+		}
+		if ts := r.absTs(); ts > best {
+			best = ts
+		}
+	}
+	if best == 0 {
+		// why zero stays zero and is not replaced: absTs answers 0 for a row with nothing to time, and a
+		// time invented out of a row that has none is a date the log never claimed.
+		return time.Time{}
+	}
+	// Unix+UTC is how the skeleton already turns a row's seconds back into a time (see (*skNode).skEntry),
+	// and the session listing depends on the two paths agreeing:
+	// TestWhatTheIndexSaysIsWhatTheLogSays compares a cold Info with a warm one, field for field.
+	return time.Unix(best, 0).UTC()
+}
+
+// entryRow is whether a row is the record of an entry - written or patched - which is the only kind of
+// record whose row has an entry to carry a timestamp. It is the union of the kinds Skeleton.Entries and
+// Skeleton.Patches count, written out as a set rather than as arithmetic on the kind: the kinds are
+// ordered the way the encoder stores them, and rowBad sits between the two groups precisely so a range
+// test would be a lie.
+func entryRow(k rowKind) bool {
+	switch k {
+	case rowEntryUnknown, rowUser, rowAssistant, rowTool, rowCompaction,
+		rowPatchUnknown, rowPatchUser, rowPatchAssistant, rowPatchTool, rowPatchCompaction:
+		return true
+	}
+	return false
 }
 
 // logSize is what a session's log costs the disk right now. It is asked of the file rather than taken from

@@ -275,4 +275,17 @@ type Config struct {
 	// never rewritten, which is the point: it is how a bad choice gets undone without hand-editing
 	// data/<id>/log.jsonl.
 	StructuredContent string `json:"structuredContent,omitempty"`
+
+	// Pinned and Archived are where this session sits in a list, and the only two fields here that say
+	// nothing about what gets sent to the model: pinned keeps it above the rest, archived takes it out of
+	// the way. They live in config.json beside Name because they are a fact about the session and not a
+	// fact about the browser looking at it - a second client, or the same person on another machine, sees
+	// the same list. Two of them and not one state word because "not pinned" and "archived" are
+	// different answers to different questions.
+	//
+	// They are mutually exclusive (Manager.SetFlags clears the other half), and nothing here is ever
+	// merged from a PATCH body: UpdateConfig carries the stored pair over, because a whole-config PATCH
+	// that never mentioned them must not be able to unpin a session by accident.
+	Pinned   bool `json:"pinned,omitempty"`
+	Archived bool `json:"archived,omitempty"`
 }

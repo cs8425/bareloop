@@ -64,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/session/{id}/entry/delete", s.handleDeleteEntry)
 	mux.HandleFunc("POST /api/session/{id}/tip", s.handleTip)
 	mux.HandleFunc("POST /api/session/{id}/reload", s.handleReload)
+	mux.HandleFunc("POST /api/session/{id}/flags", s.handleFlags)
 	mux.HandleFunc("GET /api/session/{id}/events", s.handleSSE)
 	mux.HandleFunc("GET /ws", s.handleWS)
 
@@ -248,6 +249,51 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.DropSession(id)
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// flagsRequest is the body of POST /api/session/{id}/flags. Either flag on its own is a complete request,
+// and a field the body does not carry is a field nobody mentioned - which is why these are pointers and
+// not booleans: a false in the body is an order, and its absence is not.
+type flagsRequest struct {
+	Pinned   *bool `json:"pinned"`
+	Archived *bool `json:"archived"`
+}
+
+// handleFlags is the one writer of the two list flags, and the only route here that acts on a session
+// without opening it: pinning is four bytes of config.json, and opening is reading a transcript.
+func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
+	var q flagsRequest
+	if err := decodeJSON(r, &q); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if q.Pinned == nil && q.Archived == nil {
+		writeErr(w, http.StatusBadRequest, errors.New("say at least one of pinned, archived"))
+		return
+	}
+	// why refused here rather than left to the merge: one body that asks to be both has not decided what it
+	// wants, and guessing which half to drop is how a list starts disagreeing with the person reading it.
+	// Archiving a session that is already pinned is a different thing - a change of mind - and that one
+	// Manager.SetFlags resolves by dropping the other half.
+	if q.Pinned != nil && q.Archived != nil && *q.Pinned && *q.Archived {
+		writeErr(w, http.StatusBadRequest, errors.New("a session is either pinned or archived, and this asked for both"))
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.mgr.SetFlags(id, q.Pinned, q.Archived); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	// The answer is the row itself, made from the same two files GET /api/sessions reads: a caller can
+	// repaint one line without asking twice, and the row says closed:true for a session this route just
+	// pinned, which is the whole point of the route.
+	for _, sum := range s.mgr.List() {
+		if sum.ID == id {
+			writeJSON(w, map[string]any{"ok": true, "session": sum})
+			return
+		}
+	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
