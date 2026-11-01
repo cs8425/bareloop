@@ -369,16 +369,23 @@ were bugs first.
   bottom of the transcript, and the bottom of a parked page is a page boundary: one arriving entry puts
   tonight's answer in the middle of a conversation from last week, and the rule that re-reads when the tip has
   moved would then drag the view to the tip a frame later. So while parked those events are counted and
-  dropped, and the count is what the bottom chip's tooltip says — a page being ignored looks perfectly calm
-  otherwise. Asking for a page by its anchor is also what makes a reconnect land where the reader left it. Two
-  things end the parking by themselves: the chip, and Escape, whose promise is "take me to the newest message"
-  and therefore means a page jump here. A tip that moves *backwards* is the one case the parked page cannot
-  stay on, because the entry it was anchored to may have stopped existing: that goes back to the tip, with a
-  toast saying why.
+  dropped, and the count is written into the bottom chip's tooltip the moment it changes: a page being ignored
+  looks perfectly calm otherwise, and a parked page is exactly the one that never refreshes to say so. Asking
+  for a page by its anchor is also what makes a reconnect land where the reader left it. Three things end the
+  parking by themselves: the chip; dragging the transcript down to its bottom while the chip is holding
+  something back (at the tip that gesture is how you say "follow the tail again", and a parked reader is owed
+  the same gesture — but only on a page that already reaches the tip, since elsewhere the bottom of the screen
+  is not the end of the conversation); and Escape, whose promise is "take me to the newest message" and
+  therefore means a page jump here. A tip that moves *backwards* is the one case the parked page cannot stay
+  on, because the entry it was anchored to may have stopped existing: that goes back to the tip, with a toast
+  saying why.
 - **Following is opt-out, and the composer never loses.** The transcript scrolls with the output only
   while you are at the bottom; scrolling up (or wheeling up) unpins immediately and a floating
   `↓ latest` counts what you missed. A wall of tokens must never steal the viewport from the composer,
-  because that is where stop and interrupt live. `#log` is the only scrolling container
+  because that is where stop and interrupt live. Sending a message re-pins for the same reason —
+  "show me the answer" — except from a parked page, where it would be a keystroke that turns into two
+  hundred thousand pixels of travel: there the message is simply sent, the loop queues it, and getting back
+  to the newest message stays a gesture the reader makes. `#log` is the only scrolling container
   (`min-height: 0` on the flex items is what keeps the document itself from scrolling).
 
 Below 860px the UI is one column: the session list becomes a drawer (☰, closed by the scrim, by picking a

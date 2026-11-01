@@ -78,10 +78,11 @@ not there says so and puts the current one back into the address bar.
 ## Using it
 
 The transcript is the log: what you see is what is stored. In the composer **Enter** sends, **Shift+Enter**
-adds a line, and you can **paste or drop images** (and files) next to your text. While a run is going,
-**stop** keeps what was produced and **interrupt** aborts the current generation and sends what you just
-typed instead; a message sent mid-run is queued and injected at the next turn boundary. Scrolling up
-unpins the view from the streaming output, and `↓ latest` takes you back.
+adds a line, and you can **paste or drop images** (and files) next to your text. While a run is going **Enter
+still just sends**: the message joins the path as *pending* and is injected at the next turn boundary. **stop**
+keeps what was produced, and **interrupt** - the bolt, and the only gesture that reaches it - aborts the
+generation in progress and starts the loop again on what you just typed. Scrolling up unpins the view from the
+streaming output, and `↓ latest` takes you back.
 
 Per session you can:
 

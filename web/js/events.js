@@ -6,7 +6,7 @@ import { note, toast } from './ui.js';
 import { scrollDown } from './scroll.js';
 import { entryNode, requestCard, streamDelta, toolCard } from './transcript.js';
 import { renderTools, syncToolsPanel } from './tools.js';
-import { loadSessions, refresh, renderPending, renderStatus, returnToTip } from './session.js';
+import { loadSessions, refresh, renderNewer, renderPending, renderStatus, returnToTip } from './session.js';
 
 // Everything on this list answers "what is happening now" by drawing at the bottom of #log, and that
 // sentence only means something while the bottom of #log is the newest message. A jump parks the
@@ -28,6 +28,10 @@ export function handleEvent(ev) {
   }
   if (isParked() && LIVE_AT_THE_TAIL.includes(ev.type)) {
     state.win.stale = (state.win.stale || 0) + 1;
+    // Counting is not telling: this chip is the only place those words live, and nothing else rewrites it
+    // while parked — a parked page is exactly the one that does not refresh. So the tally would sit there
+    // computed, and a transcript being quietly ignored would still look perfectly calm.
+    renderNewer();
     return;
   }
   switch (ev.type) {

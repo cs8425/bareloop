@@ -6,7 +6,7 @@ import { isParked, state } from './state.js';
 import { api, get } from './api.js';
 import { EV_SESSION, emit } from './bus.js';
 import { confirmBox, note } from './ui.js';
-import { isPinned, markPinned, resetScroll, scrollDown } from './scroll.js';
+import { atTheBottom, isPinned, markPinned, resetScroll, scrollDown } from './scroll.js';
 import { closeNav } from './nav.js';
 import { entryNode, linkToolResults } from './transcript.js';
 import { syncComposer } from './composer.js';
@@ -109,7 +109,12 @@ function renderOlder() {
 // renderNewer is the way back from a parked page, and nothing shows it when the transcript is not
 // parked: at the tip there is nothing newer than the newest message, so a chip for it would be chrome on
 // every screen that has nothing to go back from.
-function renderNewer() {
+//
+// It is exported for one reason: the parked gate in events.js counts what it refused to draw, and this is
+// the only place those words are written. Nothing else rewrites the chip while parked — a parked page is
+// precisely the one that does not refresh — so without this call the count is computed and never shown.
+// Calling it is cheap: two text nodes, one attribute, and no layout read.
+export function renderNewer() {
   const chip = $('#newer');
   if (!chip) return;
   const w = state.win;
@@ -223,13 +228,41 @@ export async function jumpTo(id) {
   await refresh();
 }
 
-// wirePaging is called once from app.js: the two chips, and the scroll position that reveals the top one.
+// pullToTip is the gesture the parked page otherwise takes away. At the tip, dragging the transcript down
+// to its bottom is how you say "follow the tail again"; parked, that gesture used to do nothing at all, so
+// a reader who had just sent a message from a parked page and wanted to see it had to notice a chip in the
+// corner. Answer it where the gesture is: a page that already reaches the newest message (hasNewer is
+// false) plus something this screen refused to draw (stale > 0) means the bottom of this transcript is a
+// page boundary with news behind it, and pulling to it is the reader asking for the news.
+//
+// `hasNewer` is the reason a mid-conversation page is left alone: there the bottom is not the end of the
+// conversation, and sliding a page forward every time a thumb slips to the bottom of the screen is not what
+// the gesture means. Every check before atTheBottom() is a property read, because this runs on scroll.
+function pullToTip() {
+  if (loadingOlder || !isParked()) return; // why: a page already on its way answers the same question
+  const w = state.win;
+  if (w.hasNewer || !w.stale) return;
+  if (!atTheBottom()) return;
+  returnToTip().catch(() => {});
+}
+
+// wirePaging is called once from app.js: the two chips, and the scroll position that answers both of the
+// questions they are about — is the older end on screen, and has the reader come back for the newest part.
 export function wirePaging() {
   const older = $('#older');
   if (older) older.onclick = () => loadOlder();
   const newer = $('#newer');
   if (newer) newer.onclick = () => loadNewer();
-  if (older) logEl().addEventListener('scroll', revealOlder, { passive: true });
+  // One listener, and no guard on the chips existing: each half already answers "no chip, nothing to say",
+  // and the pull-to-tip half is about the transcript, not about either chip.
+  logEl().addEventListener(
+    'scroll',
+    () => {
+      revealOlder();
+      pullToTip();
+    },
+    { passive: true },
+  );
 }
 
 // refresh re-reads the session and rebuilds the transcript. Streams that are still running survive:

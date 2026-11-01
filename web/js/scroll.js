@@ -20,6 +20,11 @@ const distanceFromBottom = (box) => box.scrollHeight - box.scrollTop - box.clien
 
 export const isPinned = () => pinned;
 
+// atTheBottom answers "is the bottom of the transcript on screen" for someone else's decision, without
+// exposing the pinned flag itself: a caller that wants to know whether the reader is at the end should not
+// get to rewrite what following the end means. This reads the layout, so call it behind a cheap guard.
+export const atTheBottom = () => distanceFromBottom(logEl()) <= PIN_PX;
+
 // markPinned re-arms the follow without moving anything: an action the user just took (sending a
 // message) means the next tokens are wanted, but scrolling now would race the server's first delta.
 export const markPinned = () => {

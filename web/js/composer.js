@@ -1,12 +1,14 @@
 // The composer: the textarea, its attachments, and the three buttons that talk to the loop.
 //
-// On a keyboard, Enter sends, Shift+Enter is a newline, and Enter while a run is live *interrupts* and
-// sends instead — the interrupt endpoint writes the message and aborts the current call, so the turn is
-// redirected rather than queued behind an answer nobody wants any more.
+// On a keyboard, Enter sends and Shift+Enter is a newline — the same keystroke whether a run is live or
+// not, because the endpoint already knows the difference: a message sent mid-run is appended to the path and
+// injected at the next turn boundary, so Enter keeps meaning "say this" and never quietly aborts work in
+// progress. Aborting is a separate gesture with a separate button: the bolt is the only way to reach
+// /interrupt, which is what stops generation and starts the loop again on what you just typed.
 //
 // On glass, Enter is a newline and the round button beside the box sends. See `enterSends` below.
 import { $, el } from './util.js';
-import { state } from './state.js';
+import { isParked, state } from './state.js';
 import { call } from './api.js';
 import { note } from './ui.js';
 import { markPinned, scrollDown } from './scroll.js';
@@ -152,22 +154,31 @@ function clearDraft() {
   renderAttachments();
 }
 
+// send and interruptSend move the view only when the transcript is following the tail. A parked reader is
+// reading a page that is not the end of the conversation, and sending a message from there is not a request
+// to be taken somewhere else: the server queues the message and injects it at the next turn boundary, while
+// the page in front of them stays exactly where they left it. Coming back is their gesture — the "newer"
+// chip, dragging the transcript to its bottom, or Escape — and measuring it was the reason this was written
+// down: the unforced version moved the viewport 205 870 pixels to the bottom of the parked page, which is
+// the closest thing this UI has to a message that vanished.
 async function send() {
   const body = draft();
   if (!body || !state.id) return;
   clearDraft();
-  markPinned(); // sending a message means "show me the answer", before the server has anything to show
+  const parked = isParked(); // why: parked is "I am reading somewhere else", not "follow the tail"
+  if (!parked) markPinned(); // sending a message means "show me the answer", before the server has anything to show
   await call('/send', body);
-  scrollDown(true);
+  if (!parked) scrollDown(true); // why: forced, and force is what an explicit press of the button means here
 }
 
 async function interruptSend() {
   const body = draft();
   if (!body || !state.id) return;
   clearDraft();
-  markPinned();
+  const parked = isParked(); // why: the bolt aborts a generation; it does not get to move the reader
+  if (!parked) markPinned();
   await call('/interrupt', body);
-  scrollDown(true);
+  if (!parked) scrollDown(true);
 }
 
 async function stop() {
@@ -213,8 +224,9 @@ export function wireComposer() {
     if (!enterSends()) return; // why: on glass (or when told `off`) Enter means newline, so fall through
     // to the browser and let it insert one; the button beside the box is the send gesture there.
     e.preventDefault();
-    if (state.status?.phase === 'running') interruptSend();
-    else send();
+    send(); // one keystroke, one meaning, in every phase: mid-run the endpoint appends the message and the
+    // loop picks it up at the next turn boundary. Aborting the generation in progress is the bolt's job —
+    // a keystroke that quietly threw away half an answer was never what "send" was for.
   });
   input().addEventListener('paste', (e) => {
     const items = [...(e.clipboardData?.items || [])].filter((i) => i.type.startsWith('image/'));
