@@ -307,6 +307,16 @@ each of them was a bug first.
   address bar: the URL never claims something the page is not showing. `session.js` owns the hash and nothing
   else touches it, which is also why the `hashchange` listener cannot fight `selectSession` - writing an equal
   hash does nothing, so the listener just sees the id it has already selected and stops.
+- **The transcript is a page, and it grows backwards.** `session.js` asks for 40 entries on every read: on
+  one measured 66-entry session that is 681 KB and 82 251 px of transcript instead of the whole path's 1.9 MB
+  and 213 211 px. Reading backwards is a floating `↑ older · 40 of 66` at the top of the transcript, the only
+  place it is ever wanted, and it counts what came back (`window.count`) rather than what was asked for,
+  because a page is whole turns and can arrive smaller. Pressing it grows the window at the **older end**
+  instead of fetching a separate older slice: still one render path, the page still ends at the tip, and
+  `pathOf` still starts from an entry that is on screen. Growing must not move what you are reading, so the
+  distance from the bottom is remembered before the transcript is cleared and pointed back afterwards.
+  Once the window is bigger than the server's `maxLimit` the client asks for `?all=1` by name, because a page
+  cannot grow past a ceiling without forgetting entries that are already on screen.
 - **Following is opt-out, and the composer never loses.** The transcript scrolls with the output only
   while you are at the bottom; scrolling up (or wheeling up) unpins immediately and a floating
   `↓ latest` counts what you missed. A wall of tokens must never steal the viewport from the composer,
