@@ -359,6 +359,7 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/session/{id}/payload` | the exact body of the next request: `{system, messages, tools}` |
 | GET | `/api/session/{id}/tools` | every server and every tool, with `enabled`, `estTokens`, `uses`, `prefix`, `schema` (its parameters), `renamedFrom` and `pendingChanges` |
 | POST | `/api/session/{id}/tools` | `{server, disabledTools[], toolPrefix}` — set the per-session tool policy; `{}` reads it |
+| GET | `/api/session/{id}/turns` | one row per turn of the path — the id to jump to, its `kind`, its `ts` and the first line of its text — with `total`, and `hasOlder` when the ceiling meant older turns did not come back; `?limit=` takes fewer, from the newest end |
 | GET | `/api/session/{id}/events` | the event stream as SSE (fallback transport) |
 | GET | `/ws` | the event stream as a websocket (primary transport) |
 
@@ -390,6 +391,15 @@ it was asked into: it comes back whole and `truncated` is true, because two page
 call each are two pages neither can draw. Combining `before` with `anchor`, or `all` with anything else,
 is a 400 — as is a `limit` that is not a positive integer, an `anchor` with no `limit`, or an id that is
 not on the path.
+
+`GET /api/session/{id}/turns` reads the same path at the resolution of a ruler instead of a page: one row
+per turn (`id`, `kind`, `ts`, `snippet` — the first line of that entry, capped at 120 runes and marked
+with an ellipsis where it was cut) and no content at all, 500 turns per answer. The ids it offers are
+exactly the positions a page is allowed to begin at, which is what makes them worth jumping to: every row
+is an `anchor` for the pager, so a jump cannot land between a tool call and its result. Asking for 500
+turns of a longer session is not an error — the newest 500 come back, `clamped` is true and `hasOlder`
+says the path goes on before the first row. `before`, `anchor` and `all` are 400s here, because a turn
+list that skipped a stretch of the path without saying so is worse than one that refuses.
 
 ### Websocket protocol
 

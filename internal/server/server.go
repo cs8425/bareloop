@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/session/{id}/inspect", s.handleInspect)
 	mux.HandleFunc("GET /api/session/{id}/payload", s.handlePayload)
 	mux.HandleFunc("GET /api/session/{id}/tools", s.handleTools)
+	mux.HandleFunc("GET /api/session/{id}/turns", s.handleTurns)
 	mux.HandleFunc("POST /api/session/{id}/tools", s.handleToolsSet)
 	mux.HandleFunc("POST /api/session/{id}/send", s.handleSend)
 	mux.HandleFunc("POST /api/session/{id}/interrupt", s.handleInterrupt)
@@ -535,6 +536,66 @@ func (s *Server) handlePayload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, sess.Payload())
+}
+
+// handleTurns answers the shape of a transcript without its content: one row per turn of the path,
+// oldest first, taken from the newest end when they do not all fit.
+//
+// It exists because the alternative is reading the whole transcript to find your way around it. A
+// client that wants to offer "jump back to that question from three days ago" needs a few hundred ids
+// and first lines; getting them out of GET /api/session/{id} carries every word of the answers along,
+// which is the same reason that endpoint learned to page.
+func (s *Server) handleTurns(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	limit, err := turnLimit(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	list := ir.TurnsOf(sess.Path(), limit)
+	writeJSON(w, map[string]any{
+		"turns":    list.Turns,
+		"count":    len(list.Turns),
+		"total":    list.Total,
+		"hasOlder": list.HasOlder,
+		// The transcript's own words, so a client learns one vocabulary: limit is the ceiling in force,
+		// maxLimit the largest it will ever apply, clamped the request that ran into it.
+		"limit":    list.Limit,
+		"maxLimit": ir.MaxTurnRows,
+		"clamped":  list.Clamped,
+	})
+}
+
+// turnLimit reads the one parameter this endpoint has. What the transcript endpoint takes by name are
+// refused here rather than ignored: a client that sends before= or anchor= is asking for a slice of
+// turns this endpoint cannot give, and answering with the newest turns anyway is how a ruler ends up
+// drawing the start of a path it has only seen the end of.
+func turnLimit(r *http.Request) (int, error) {
+	q := r.URL.Query()
+	for _, name := range []string{"before", "anchor", "all"} {
+		// An empty value reads as absent, which is what this server already does with those fields: a
+		// client that always serialises them all is not asking for anything.
+		if v := q.Get(name); v != "" {
+			return 0, fmt.Errorf("turns does not take %s=%q: it lists whole turns from the newest end", name, v)
+		}
+	}
+	v := q.Get("limit")
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("limit must be a number, got %q", v)
+	}
+	// Zero and negatives mean "no limit" inside ir, and a browser control that lands on 0 should not
+	// silently ask for the whole session instead.
+	if n < 1 {
+		return 0, fmt.Errorf("limit must be at least 1, or left out for as many as the ceiling allows, got %d", n)
+	}
+	return n, nil
 }
 
 // ---------------------------------------------------------------- SSE (fallback transport)
