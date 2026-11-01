@@ -13,8 +13,17 @@
       <aside id="side">
         <div class="side-head">
           <b>bareloop</b>
-          <button id="new-session" type="button" class="icon-btn" title="new session" aria-label="new session"><span data-icon="plus"></span></button>
+          <span class="side-acts">
+            <!-- The collapse belongs to the sidebar rather than to the top bar: it is the sidebar asking for
+                 its column back. Below the breakpoint there is no column to give, so app.css hides it. -->
+            <button id="collapse" type="button" class="icon-btn" title="collapse the session sidebar" aria-label="collapse the session sidebar"><span data-icon="chevron"></span></button>
+            <button id="new-session" type="button" class="icon-btn" title="new session" aria-label="new session"><span data-icon="plus"></span></button>
+          </span>
         </div>
+        <!-- Outside the <ul> on purpose: the list is rebuilt by every state event, and a field inside it
+             would lose the text being typed. It filters by id, name and model - the three figures a reader
+             of this list actually knows. -->
+        <input id="session-filter" type="text" placeholder="filter sessions" aria-label="filter the session list" title='filter by id, name or model · "/" from anywhere' spellcheck="false" autocomplete="off" />
         <ul id="session-list"></ul>
         <div class="side-foot">
           <span id="conn" class="dot"></span>

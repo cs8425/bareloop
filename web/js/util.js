@@ -25,6 +25,42 @@ export const fmtBytes = (n) => {
   return b < 1024 ? `${b} B` : b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+// How long ago is still "just now", and for how long a minute is the finest unit worth printing. A session
+// list is scanned, not read: a minute-resolution figure that turns into "46m" is what tells you which of
+// eleven rows you were last looking at.
+const NOW_S = 60;
+const MINUTE_S = 60 * NOW_S;
+const HOUR_S = 60 * MINUTE_S;
+const DAY_S = 24 * HOUR_S;
+
+// fmtAgo is a session's age in the one unit that fits in a sidebar: `now`, `46m`, `3h`, `12d`. Past a day
+// it gives up on being an age and gives the date ("10/3"), because "91d" would be a number a reader has to
+// subtract from today to learn anything. The reference is `Date.now()`, so it is a wall-clock age and not
+// the age of this tab's last load; null, an unparseable string and a timestamp in the future all come back
+// empty — the last one because the clock of the daemon and the clock of this browser are not the same clock,
+// and "-3m" next to a session is a claim about a time machine.
+//
+// It is deliberately not live: nothing re-renders the list to watch a minute go by, so the figure is "how
+// old this was when the list was read". The full timestamp is in the row's title, which is the other half.
+export const fmtAgo = (iso) => {
+  if (!iso) return '';
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return '';
+  const s = Math.round((Date.now() - then) / 1000);
+  if (s < 0) return '';
+  if (s < NOW_S) return 'now';
+  if (s < MINUTE_S) return `${Math.round(s / 60)}m`;
+  // Floor, not round, from here up: "24h" next to a session that has been sitting for a day is the sort of
+  // rounding that makes two rows in one list disagree about what a day is.
+  if (s < HOUR_S) return `${Math.floor(s / MINUTE_S)}h`;
+  if (s < DAY_S) return `${Math.floor(s / HOUR_S)}d`;
+  // The date, in the browser's own calendar: this figure is a hint about which row to click, and the month
+  // and day are what a reader has of a session they have not opened since spring.
+  const d = new Date(then);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+};
+
 export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // MIN_UNCACHED: below this many *new* tokens in one request, its prefill speed is not a measurement.

@@ -29,6 +29,17 @@ const PATHS = {
   menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   down: '<path d="m19 12-7 7-7-7"/><path d="M12 5v14"/>',
+  // A pin is drawn standing up (head at the top, point at the bottom) because it is hung above a row of
+  // sessions, not stuck into a board at an angle: at 14px an angled push-pin reads as a smudge.
+  pin:
+    '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1v2h1V4a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1v4h1V6h1z"/>',
+  archive:
+    '<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  unarchive:
+    '<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><path d="M12 16v-4"/><path d="m9 14 3-3 3 3"/>',
+  // One chevron, and the state is carried by rotating it (see `li.grp[data-open]` in app.css): pointing
+  // right means "there is a group here that is not drawn", pointing down means it is.
+  chevron: '<path d="m9 6 6 6-6 6"/>',
 };
 
 // icon returns a standalone <svg>. It is not `aria-hidden` only when given no name to label it with:

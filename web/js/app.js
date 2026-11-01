@@ -27,7 +27,7 @@ import { isParked, state } from './state.js';
 import { EV_REFRESH, EV_SESSIONS, on } from './bus.js';
 import { fail, note, promptBox } from './ui.js';
 import { isPinned, scrollDown, wireScroll } from './scroll.js';
-import { closeNav, navIsOpen, wireNav } from './nav.js';
+import { bootNav, closeNav, isCollapsed, isMobile, navIsOpen, setNav } from './nav.js';
 import { api } from './api.js';
 import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
@@ -35,7 +35,7 @@ import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
 import { flushStreams } from './transcript.js';
-import { loadSessions, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging } from './session.js';
+import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
 import { bootIcons } from './icons.js';
@@ -149,6 +149,10 @@ function wireNewSession() {
 // phone drawer, then "stop reading history, take me to the newest message".
 function wireKeys() {
   window.addEventListener('keydown', (e) => {
+    if (e.key === '/') {
+      focusFilter(e);
+      return;
+    }
     if (e.key !== 'Escape') return;
     if (document.querySelector('dialog[open]')) return;
     if (navIsOpen()) {
@@ -168,6 +172,24 @@ function wireKeys() {
   });
 }
 
+// `/` is the list asking to be searched: it puts the caret in the filter without making anybody hunt for a
+// small input, and it works from anywhere on the page. An open dialog or a field that types text keeps its
+// `/` — a path, a URL and a CJK candidate list are all more literal than a shortcut.
+function focusFilter(e) {
+  if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.closest?.('dialog,input,textarea,select,[contenteditable]')) return;
+  const box = $('#session-filter');
+  if (!box) return;
+  e.preventDefault();
+  // "On screen" is a different question in the two shapes: a column that is not collapsed, or a drawer that
+  // is open. Focus goes to a visible input only — focusing the hidden one reads as a lost keystroke.
+  // A collapsed desktop gets the panel instead, and opening the panel focuses the filter itself (nav.js).
+  if (isMobile() ? navIsOpen() : !isCollapsed()) {
+    box.focus();
+    box.select();
+  } else setNav(true);
+}
+
 function wire() {
   // Icons first: the markup carries `data-icon` placeholders, and every button is measured and styled
   // around the glyph that replaces them.
@@ -176,7 +198,11 @@ function wire() {
   // The paging chips are wired after the scroll wiring because they hang a second listener on the same
   // scroller: one owns following the tip, these own reading backwards and forwards.
   wirePaging();
-  wireNav();
+  // bootNav before anything that paints the sidebar: it is the one class that says whether 210px of this
+  // window belongs to the session list, and applying it after the first paint is a layout jump on every
+  // reload of a collapsed window.
+  bootNav();
+  wireSessions();
   wireComposer();
   wireSettings();
   wirePanel();
@@ -192,7 +218,7 @@ function wire() {
   });
   $('#btn-compact').onclick = compactNow;
   on(EV_REFRESH, () => refresh().catch(() => {}));
-  on(EV_SESSIONS, () => loadSessions().catch(() => {}));
+  on(EV_SESSIONS, () => loadSoon());
   // A hash change is somebody asking to look at another session: the back button, the forward button, or an
   // edited address bar. An id the list does not know is answered by reading the list once more - the session
   // may be brand new or just deleted - and then by putting the session actually on screen back into the URL.
@@ -224,8 +250,14 @@ async function main() {
   // A hash that names nothing is corrected by the selection below, so the address bar always ends up
   // describing what is on the screen.
   const linked = idFromHash();
+  // "The first session that is worth opening" is a live one: not shut, and not archived either — putting a
+  // conversation the reader took out of the list back on screen on every reload is the fold disagreeing with
+  // the ask. Only when nothing else is available does an archived session get opened, because the alternative
+  // is telling a reader who has eleven sessions that there is nothing yet.
   const initial =
-    state.sessions.find((s) => s.id === linked)?.id || state.sessions.find((s) => !s.closed)?.id;
+    state.sessions.find((s) => s.id === linked)?.id ||
+    state.sessions.find((s) => !s.closed && !s.archived)?.id ||
+    state.sessions.find((s) => !s.closed)?.id;
   if (initial) await selectSession(initial);
   else {
     note('no session yet — create one');

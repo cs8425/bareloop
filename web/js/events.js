@@ -6,7 +6,7 @@ import { note, toast } from './ui.js';
 import { scrollDown } from './scroll.js';
 import { entryNode, requestCard, streamDelta, toolCard } from './transcript.js';
 import { renderTools, syncToolsPanel } from './tools.js';
-import { loadSessions, refresh, renderNewer, renderPending, renderStatus, returnToTip } from './session.js';
+import { loadSoon, refresh, renderNewer, renderPending, renderStatus, returnToTip } from './session.js';
 
 // Everything on this list answers "what is happening now" by drawing at the bottom of #log, and that
 // sentence only means something while the bottom of #log is the newest message. A jump parks the
@@ -23,7 +23,7 @@ export function handleEvent(ev) {
   if (ev.seq !== undefined) state.seq = Math.max(state.seq, ev.seq || 0);
   if (ev.session && state.id && ev.session !== state.id) {
     // Another session produced this: the only thing on screen that cares is the sidebar.
-    if (ev.type === 'state' || ev.type === 'entry') loadSessions();
+    if (ev.type === 'state' || ev.type === 'entry') loadSoon();
     return;
   }
   if (isParked() && LIVE_AT_THE_TAIL.includes(ev.type)) {
@@ -51,7 +51,9 @@ export function handleEvent(ev) {
       const prevTip = state.status?.tip;
       state.status = ev.state;
       renderStatus(ev.state);
-      loadSessions();
+      // Coalesced for the same reason the other sessions' events are: a running session pushes a state event
+      // per tick, and the sidebar's numbers are a snapshot rather than a stream.
+      loadSoon();
       // A tip that moved backwards is a time travel or a deleted entry: what is on screen is no longer
       // the path, and no single event can fix that. A tip that moved forwards to an entry nobody is
       // holding means the path changed somewhere this tab did not watch — another tab sent a message.

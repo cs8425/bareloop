@@ -39,8 +39,13 @@ body {
   font: var(--t-3)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans CJK TC", sans-serif;
   overflow: hidden; /* only #log scrolls: the composer and its stop/interrupt buttons stay on screen */
 }
-#app { display: grid; grid-template-columns: 210px 1fr; height: 100vh; overflow: hidden; }
-#app.with-panel { grid-template-columns: 210px 1fr 380px; }
+/* The sidebar's column, in one number. A custom property and not three grid templates, because three rules
+   name that column (`#app`, `#app.with-panel`, and the wider panel of the tools and cost tables): a collapse
+   that had to redefine every one of them is one forgotten rule away from a window that shows a transcript
+   with no way to reach the sessions. `0px` rather than `0` where it is collapsed, which a track list reads
+   as a flexible track. */
+#app { --side-w: 210px; display: grid; grid-template-columns: var(--side-w) 1fr; height: 100vh; overflow: hidden; }
+#app.with-panel { grid-template-columns: var(--side-w) 1fr 380px; }
 
 /* sidebar */
 /* Why min-height is on this line: a grid item's minimum height is the minimum height of its content, and
@@ -52,20 +57,94 @@ body {
    (854 visible of 1 233) and the composer lands back at 940. This is the debt `#pending` paid from the
    same direction - 266 queued messages squeezed `#log` down to 24 px - and it is the same rule: a
    sibling does not get to decide how tall the transcript is. */
-#side { background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+#side { background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; grid-column: 1; }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid var(--border); }
 #session-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; flex: 1; }
-#session-list li { padding: 7px 9px; border-radius: 6px; cursor: pointer; display: flex; gap: 6px; align-items: baseline; }
-#session-list li:hover { background: var(--bg3); }
+/* One row per session, two lines of it, and neither line allowed to break.
+   These rows used to measure 50 to 102px apiece (984px of list, thirteen of them): three `<span>`s squeezed
+   into a 210px flex row, none of them allowed by default to be smaller than their own content, so an id like
+   `00-mellow-maple-s4g` gave up and split over two lines. Three rules fix that and each one is half of the
+   story: a box that may be smaller than what is inside it (`min-width:0`), text that is cut instead of broken
+   (`nowrap` and an ellipsis), and the whole truth one hover away (`title`, set where the row is built). The
+   same thirteen rows measure 37 to 40px now - 493px, which is what a 940px window can show without asking
+   for a scrollbar at all. */
+#session-list li { position: relative; padding: 4px 8px; border-radius: 6px; cursor: pointer; line-height: 1.35; }
+#session-list li:not(.grp):not(.none):hover { background: var(--bg3); }
 #session-list li.active { background: #223049; }
-#session-list li .sid { color: var(--muted); font: var(--t-0) var(--mono); }
+#session-list li.active .nm { color: var(--accent); }
+#session-list .row { display: flex; align-items: baseline; gap: 7px; }
+#session-list .col { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#session-list .nm { font-size: var(--t-1); }
+/* The age is the one figure in the row that is different for every session and the same length each time,
+   which is what makes it worth the right-hand column. It goes mono so two rows of them line up. */
+#session-list .ago { flex: 0 0 auto; margin-left: auto; font: var(--t-0) var(--mono); color: var(--muted); }
+#session-list .sub { font: var(--t-0) var(--mono); color: var(--muted); }
+/* The `font:` shorthand above resets `line-height` to `normal`, and `normal` is a promise about whichever
+   font ends up drawing: one glyph the mono stack does not carry comes back from a fallback face with a
+   taller box — measured, the row that printed a `ⓘ` was 40px against 37px for its neighbours, and every
+   other row in the list is 37. So the two mono lines say what their line box is and do not let a glyph
+   decide it. */
+#session-list .ago,
+#session-list .sub { line-height: 1.2; }
+#session-list .pinmark { flex: 0 0 auto; width: 11px; height: 11px; color: var(--accent); }
+/* The phase dot, sized down from the 9px `.dot` this app already has: the name it sits beside is 12px, and
+   the one difference this dot carries is running / compacting / idle / shut. Closed is the same grey as idle
+   and gets its dimming from the Archived group instead - a dot that fades twice reads as a rendering
+   artefact. */
+#session-list .dot { width: 7px; height: 7px; border-radius: 50%; background: #556072; }
+#session-list .dot.running { background: var(--accent); }
+#session-list .dot.compacting { background: var(--warn); }
+#session-list .dot.off, #session-list .dot.closed { background: #3f4756; }
+#session-list li.dim { opacity: .55; }
+#session-list li.dim:hover, #session-list li.dim.active { opacity: 1; }
+/* A group's label. It is a button where opening it would show something and a label everywhere else, and
+   that is the whole difference between "3 of them, hidden until you ask" and "3 of them, none of which say
+   anything about `zz`". The chevron is the state: right means not drawn, down means drawn. */
+#session-list li.grp { padding: 0; background: none; cursor: default; }
+#session-list li.grp button, #session-list li.grp .glabel { display: flex; align-items: center; gap: 5px; width: 100%; padding: 8px 8px 2px; background: none; border: 0; color: var(--muted); font: var(--t-0) var(--mono); text-transform: uppercase; letter-spacing: .05em; text-align: left; }
+#session-list li.grp button:hover { color: var(--fg); }
+#session-list li.grp .ico { width: 13px; height: 13px; flex: 0 0 auto; }
+#session-list li.grp[data-open='false'] .ico { transform: rotate(-90deg); }
+#session-list li.grp .cnt { opacity: .7; }
+/* The heading of a group that does not fold carries the same chevron as the one that does, so that the four
+   labels start their words in one column; it is decoration and it is hidden, not left out. */
+#session-list li.grp .glabel .ico { visibility: hidden; }
+#session-list .none { padding: 8px; color: var(--muted); font-size: var(--t-1); cursor: default; }
+/* The row's actions, over the tail of the text and not beside it: a control that takes its own width moves
+   the name it sits next to, and a name that moves sideways under the cursor is how a click lands on the
+   session two rows down. The backdrop is what keeps them readable over the text they cover. */
+#session-list .acts { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); display: none; gap: 1px; background: var(--bg3); border-radius: 5px; }
+#session-list li:hover .acts, #session-list li:focus-within .acts { display: flex; }
+#session-list li.active .acts { background: #223049; }
+#session-list .act { display: inline-grid; place-items: center; width: 25px; height: 23px; padding: 0; background: none; border: 0; color: var(--muted); }
+#session-list .act .ico { width: 14px; height: 14px; }
+#session-list .act:hover { color: var(--fg); }
+#session-list .act.pin[aria-pressed='true'] { color: var(--accent); }
+#session-list .act.del:hover { color: var(--err); border-color: #7a3630; }
+/* With no hover there is nothing to reveal the actions with, so on glass they live in the row all the time
+   and the age is what pays for them: it is the one figure in the row a thumb cannot use anyway (its whole
+   content is a hover tooltip), and this is the same trade `.msg .act` makes - 34×32, the floor this project
+   already keys on hover rather than on width. `static` puts the buttons back in the flow so they sit after
+   the text instead of over it, and `flex: 0 0 auto` is the `#topbar > .icon-btn` lesson: a flex row is
+   allowed to squeeze a button down to nothing, and a 15px glyph in a 12px box is not a control. */
+@media (hover: none) {
+  #session-list .acts { position: static; transform: none; display: flex; flex: 0 0 auto; margin-left: auto; background: none; }
+  #session-list .ago { display: none; }
+  #session-list .act { width: 34px; height: 32px; }
+  #session-list .act .ico { width: 15px; height: 15px; }
+}
 .side-foot { display: flex; align-items: center; gap: 7px; padding: 9px; border-top: 1px solid var(--border); color: var(--muted); font-size: var(--t-1); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--err); }
 
 /* main */
-#main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+/* Both children of #app name the track they belong to rather than relying on auto-placement, and the reason
+   is a blank window: a collapsed sidebar becomes `position:fixed`, an out-of-flow grid child stops taking
+   part in auto-placement, and the next in-flow child — the transcript — fell into the 0px column that had
+   just been meant for the sidebar (measured: #main 0x940, nothing painted at all). Naming the tracks is what
+   lets a collapse take away the sidebar's room and only that. */
+#main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; grid-column: 2; }
 #topbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg2); flex: 0 0 auto; }
 #topbar .spacer { flex: 1; }
 .ghost-input { background: transparent; border: 1px solid transparent; color: var(--fg); font-size: var(--t-4); font-weight: 600; padding: 4px 6px; border-radius: 5px; min-width: 220px; }
@@ -626,6 +705,68 @@ dialog.modal { max-width: 420px; }
   to { opacity: 1; transform: none; }
 }
 
+.side-acts { display: flex; gap: 2px; }
+/* The filter lives outside the `<ul>` it filters, so rebuilding the list cannot eat what is being typed -
+   and it is 34px because a field a finger is meant to hit is a control, which is the same floor the tool
+   filter and the composer got. `flex: 0 0 auto` is the sentence #pending paid for: this row is not the one
+   that gets squeezed by the list under it, and the list is the thing that scrolls. */
+#session-filter {
+  flex: 0 0 auto;
+  margin: 7px 7px 1px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+#session-filter:focus { outline: none; border-color: var(--accent); }
+#session-filter::placeholder { color: var(--muted); }
+
+/* ── the collapsed sidebar ───────────────────────────────────────────────────────────────
+   The reader gives the transcript the sidebar's column and the list comes back from under ☰ as a panel -
+   the same gesture the phone drawer already had, in the one shape a desktop window does not lose 210px of
+   transcript to. Two classes say everything: `nav-collapsed` on <body> is "no column is reserved", and
+   `nav-open` is "the list is out". Both are written by web/js/nav.js, which keeps them off a narrow
+   window, where app.css has already made the sidebar a drawer and a collapse would be two drawers. */
+body.nav-collapsed #app { --side-w: 0px; }
+/* ☰ is the only way back into the list, so it is on screen exactly when the sidebar is not: the rule that
+   hides it on a desktop window (`#menu, #scrim { display: none }`) is beaten here and nowhere else. */
+body.nav-collapsed #menu { display: inline-grid; }
+body.nav-collapsed #scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  /* Less than the phone scrim's 0.55: this is a dropdown that dismisses on a click outside, not a sheet
+     that has taken the screen over, and a transcript you cannot read while the list is open is a reason to
+     close the list rather than a reason to trust it. */
+  background: rgba(0, 0, 0, 0.4);
+}
+/* display comes from `nav-open` and nothing else: `#scrim` keeps class="hidden" while the panel is closed,
+   and a rule this specific would otherwise win that argument and lay a wash over the whole window. */
+body.nav-collapsed.nav-open #scrim { display: block; }
+body.nav-collapsed #side.drawer {
+  position: fixed;
+  z-index: 31;
+  top: 0;
+  left: 0;
+  width: min(300px, 90vw);
+  /* 70dvh and not the full height: the panel belongs to the top-left corner it grew out of, and a box that
+     reaches the bottom of the window is a drawer that forgot it was not on a phone. `dvh` for the same
+     reason #app uses it - on a mobile browser `vh` is the largest possible viewport. */
+  height: min(70dvh, 560px);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-radius: 0 0 10px 0;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  /* hidden rather than display:none, and that is a measurement and not a preference: an element taken out
+     of the layout loses the scroll position of everything inside it, so a closed panel would put a 100-row
+     list back at the top every time it was opened. Nothing in it can be clicked or tabbed to while it is
+     invisible, which is the other half of what display:none would have bought. */
+  visibility: hidden;
+  pointer-events: none;
+}
+body.nav-collapsed.nav-open #side.drawer { visibility: visible; pointer-events: auto; }
+
 /* ── mobile ──────────────────────────────────────────────────────────────────────────────
    dvh, not vh: on a mobile browser `100vh` is the height of the *largest* possible viewport,
    so the bottom of the app — the composer, i.e. send and stop — hides behind the URL bar. */
@@ -648,10 +789,21 @@ button,
   #app.with-panel {
     grid-template-columns: 1fr;
   }
+  /* One track now, so the transcript goes back to the first one: left at column 2 it would be placed in an
+     implicit auto-sized track beside a `1fr` one, and `1fr` claims everything the auto track is left over
+     from — which is not a width anybody asked for. */
+  #main {
+    grid-column: 1;
+  }
   #menu {
     display: inline-block;
     flex: 0 0 auto;
     min-width: 42px;
+  }
+  /* Nothing to collapse on a window that never reserved a column: there the drawer is the layout and not a
+     preference, and this button would be a second ☰ doing the opposite of the first one. */
+  #collapse {
+    display: none;
   }
   #scrim {
     display: block;
@@ -886,10 +1038,11 @@ button,
 }
 
 /* A parameter table and a cost table both need room for their third column, so the panel is wider in
-   these two modes. */
+   these two modes. The first track is `--side-w` and not a second 210px: this rule replaces the whole grid,
+   and a hardcoded copy of the sidebar width would ask 210px back from a window that had just collapsed it. */
 #app.with-panel.tools,
 #app.with-panel.stats {
-  grid-template-columns: 210px 1fr minmax(430px, 44vw);
+  grid-template-columns: var(--side-w) 1fr minmax(430px, 44vw);
 }
 
 #panel-body .tsum {

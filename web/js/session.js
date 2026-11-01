@@ -1,13 +1,14 @@
 // Session-level reads and renders: the transcript of the current session, the sidebar list, the
 // status badges and the pending queue. This is the module that talks to the server about *sessions*;
 // the transcript module only draws what it is given.
-import { $, el, fmtN, fmtBytes, logEl, clamp, pathOf, sortByNum } from './util.js';
+import { $, el, fmtN, fmtBytes, fmtAgo, logEl, clamp, pathOf, sortByNum } from './util.js';
 import { isParked, state } from './state.js';
 import { api, get } from './api.js';
 import { EV_SESSION, emit } from './bus.js';
 import { confirmBox, note } from './ui.js';
 import { atTheBottom, isPinned, markPinned, resetScroll, scrollDown } from './scroll.js';
-import { closeNav } from './nav.js';
+import { closeNav, navIsOpen } from './nav.js';
+import { icon } from './icons.js';
 import { entryNode, linkToolResults } from './transcript.js';
 import { syncComposer } from './composer.js';
 
@@ -366,55 +367,444 @@ export async function refresh() {
   renderPaging();
 }
 
-export async function loadSessions() {
+// --------------------------------------------------------------------------- the list of sessions
+//
+// The list is a view of GET /api/sessions, and it adds exactly one thing to what the server said: where a
+// row is drawn. Four groups, in this order, and a row belongs to one of them -
+//
+//   Pinned     somebody asked to keep it in reach
+//   Running    its phase is running or compacting
+//   Sessions   everything else
+//   Archived   somebody asked to stop seeing it, and it starts out folded away
+//
+// `groupOf` is the one place that decides, and it asks what the reader asked before it asks what the session
+// is doing: archiving a running session has to move it out of the way or it archived nothing. The two asks
+// can never both be true of one session, and the daemon is what makes that so (see agent.applyFlags) - the
+// cost is that pinning a session and then archiving it spends the pin, which is visible in the row that
+// moved, and it is paid once instead of leaving four rules reaching for the same row.
+//
+// Inside a group the newest `lastTs` is on top, a session with no time to read sits at the bottom, and the
+// id breaks every tie. Not for tidiness: an order that moves between two listings of an unchanged directory
+// is a list that jumps sideways under a cursor reaching for the third row.
+//
+// One caveat is a server fact rather than a rendering one, and it is worth knowing before trusting a dot:
+// only the session this tab is subscribed to pushes its phase, so the dots and the Running group describe
+// each session as of the last time this list was read. A live view of sessions nobody is watching wants an
+// event stream of its own.
+
+// GROUPS is the order and the words. Nothing else about a group is data: which rows are in it is `groupOf`,
+// and whether it is drawn is decided by `listPlan`.
+const GROUPS = [
+  { key: 'pinned', title: 'Pinned' },
+  { key: 'running', title: 'Running' },
+  { key: 'other', title: 'Sessions' },
+  { key: 'archived', title: 'Archived' },
+];
+
+function groupOf(s) {
+  // why archived first: it is the only one of the four the reader asked for, and an archived session with a
+  // live phase showing up under "Running" would be the fold failing to fold.
+  if (s.archived) return 'archived';
+  // and pinned before the phase, because a pinned session that started running is the same session the
+  // reader put at the top of the list on purpose.
+  if (s.pinned) return 'pinned';
+  if (s.phase === 'running' || s.phase === 'compacting') return 'running';
+  return 'other';
+}
+
+// The Archived fold. It is a preference of this window and so it lives in memory rather than in storage -
+// `bareloop.navCollapsed` remembers a viewport and this remembers one group of one list, and neither is a
+// fact about a session. `forced` is what the two rules below auto-opened it for, so a reader who folds the
+// group away again is not overridden by the next event one second later: the rule fires once per reason.
+let archivedOpen = false;
+let archivedForced = '';
+
+// hitOne is the filter, and the one question it answers is whether a reader who typed this word would want
+// this session in the answer. Id, name and model are the three figures somebody reading a list of sessions
+// actually knows; the transcript is not searched, which is a different tool with a server behind it.
+const hitOne = (s, filter) => !filter || `${s.id} ${s.name || ''} ${s.model || ''}`.toLowerCase().includes(filter);
+
+// listPlan is the plan for <ul>'s children: a flat array, in the order they will be appended, of `{grp}`
+// labels and `{row}` sessions. Flat because the diff below is positional: the DOM has children, not groups.
+function listPlan(sessions, filter) {
+  const newest = (a, b) => {
+    // 0 for "nobody claimed a time", which sorts below every timestamp and stays at the bottom of the group
+    // rather than in the company of last month.
+    const at = a.lastTs ? Date.parse(a.lastTs) : 0;
+    const bt = b.lastTs ? Date.parse(b.lastTs) : 0;
+    return bt - at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  };
+  const want = [];
+  for (const g of GROUPS) {
+    const all = sessions.filter((s) => groupOf(s) === g.key);
+    if (!all.length) continue; // an empty group costs the list nothing, including a label
+    const rows = all.filter((s) => hitOne(s, filter)).sort(newest);
+    const collapsed = g.key === 'archived' && !archivedOpen;
+    // The count says one of three things and never more than one: ` (3)` hidden away, ` (3)` all of them
+    // drawn, ` (1/3)` the filter is hiding two. Reading the group label is how you find out the filter did
+    // not simply find nothing.
+    const count = collapsed || rows.length === all.length ? `${all.length}` : `${rows.length}/${all.length}`;
+    // `hint` and not `note`: ui.js exports a function called note, and shadowing an import inside the one
+    // helper that may later want to complain out loud is a bug with a five-year fuse.
+    let hint;
+    if (collapsed) {
+      hint = `${all.length} archived ${all.length === 1 ? 'session' : 'sessions'}, hidden - click to show them`;
+    } else if (rows.length < all.length) {
+      hint = `${all.length - rows.length} of ${all.length} do not say “${filter}” anywhere`;
+      if (g.key === 'archived') hint += ' - click to fold them away again';
+    } else if (g.key === 'archived') {
+      hint = 'click to fold them away again';
+    }
+    want.push({ kind: 'grp', key: g.key, name: g.title, count, title: `${g.title} (${count})`, hint, collapsed });
+    if (!collapsed) for (const s of rows) want.push({ kind: 'row', s });
+  }
+  // A list with no rows says why, because the three reasons look identical from here and are not the same
+  // news: nothing matches the word in the box, everything is folded away, or there is no session yet.
+  if (!want.some((w) => w.kind === 'row')) {
+    const folded = want.some((w) => w.kind === 'grp' && w.collapsed);
+    want.push({
+      kind: 'none',
+      title: filter
+        ? `no session says “${filter}”`
+        : folded
+          ? 'every session is archived - click Archived above'
+          : 'no session yet - the + above makes one',
+    });
+  }
+  return want;
+}
+
+// sameRow is whether two copies of one session would be drawn the same. Every figure the row is built out of
+// is in here and nothing that is not: the list is fetched afresh on every call, so the objects are never the
+// same object twice, while what can be the same is the eleven things a row says. Add a figure to a row and
+// this comparison has to be told, or that figure quietly stops updating.
+function sameRow(a, b) {
+  return (
+    !!a && !!b &&
+    a.id === b.id &&
+    a.name === b.name &&
+    a.model === b.model &&
+    a.phase === b.phase &&
+    !!a.closed === !!b.closed &&
+    a.path === b.path &&
+    a.log === b.log &&
+    a.bytes === b.bytes &&
+    a.skipped === b.skipped &&
+    a.tip === b.tip &&
+    !!a.pinned === !!b.pinned &&
+    !!a.archived === !!b.archived &&
+    a.lastTs === b.lastTs
+  );
+}
+
+// rowTitle is the whole truth about a session in the space of a tooltip: the row itself only has room for a
+// name, an age and three numbers, and everything the row shortened is here in full.
+function rowTitle(s) {
+  const line = [];
+  line.push(s.id);
+  if (s.model) line.push(s.model);
+  // Two counts that answer different questions: "path" is how many entries the conversation is, "log" how
+  // many records it took to write them. They part company as soon as anything is edited, rewound or
+  // compacted, because a patch and a delete are records that add no entry.
+  line.push(s.bytes ? `path ${fmtN(s.path)} entries · log ${fmtN(s.log)} records` : 'no index yet: nothing is claimed about its size');
+  if (s.bytes) line.push(`log.jsonl is ~${fmtBytes(s.bytes)}`);
+  if (s.tip) line.push(`standing on entry ${s.tip}`);
+  if (s.closed) line.push('shut: opening it reads its log again');
+  // The one figure the row prints in shorthand, printed in full. It is the newest entry's own timestamp and
+  // not the log's mtime: a rewind leaves the entries as old as they were, and this says so.
+  line.push(s.lastTs ? `newest entry ${new Date(s.lastTs).toLocaleString()}` : 'newest entry: this log has no timestamp to read');
+  if (s.pinned) line.push('pinned');
+  if (s.archived) line.push('archived');
+  if (s.skipped) {
+    // Ordinary traffic in a session an older build wrote: the index has a row for those records and this
+    // build has no name for what they ask for. They are counted and left alone, which is not damage.
+    line.push(`${fmtN(s.skipped)} record${s.skipped === 1 ? '' : 's'} the index has a row for and this build cannot act on - an op it has no name for, from a build older than this one. They stay in the log, and nothing about the session is broken by them.`);
+  }
+  return line.join('\n');
+}
+
+// rowNode draws one session. Two lines, neither of which is allowed to wrap: the row used to be three spans
+// in a 210px flex row, and an id like `00-mellow-maple-s4g` answered by splitting itself over two lines -
+// thirteen rows came to 984px of list, 50 to 102px apiece. The fix is in app.css (`min-width:0`, `nowrap`,
+// an ellipsis); what is drawn here is what that leaves room for.
+function rowNode(s) {
+  const li = el('li', `${s.id === state.id ? 'active ' : ''}${s.archived ? 'dim' : ''}`.trim());
+  li.title = rowTitle(s);
+  li.tabIndex = 0; // the row is the way to a session, so it is in the tab order; the buttons in it are stops of their own
+  li.onclick = () => selectSession(s.id);
+  li.onkeydown = (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault(); // space is a page scroll otherwise, and this row is not the page
+    selectSession(s.id);
+  };
+
+  const top = el('div', 'row');
+  const dot = el('span', `dot ${s.closed ? 'closed' : s.phase || 'off'}`);
+  dot.setAttribute('aria-hidden', 'true');
+  dot.title = s.closed ? 'shut' : s.phase || 'idle';
+  top.appendChild(dot);
+  if (s.pinned) {
+    // A pinned row has to stay a pinned row when the actions move off it (that is what a hover reveal does
+    // to a mark), so the pin is drawn rather than being one of the buttons' states.
+    const mark = icon('pin', 'pinmark ico');
+    mark.setAttribute('title', 'pinned');
+    top.appendChild(mark);
+  }
+  // The name, or the id when there is no name: an id is a directory name and a poor thing to scan a list of,
+  // which is why `name` exists at all.
+  const nm = el('span', 'col nm', s.name || s.id);
+  if (s.name) nm.title = `${s.name}\n${s.id}`;
+  top.appendChild(nm);
+  const ago = el('span', 'ago', fmtAgo(s.lastTs));
+  ago.textContent = ago.textContent || '–'; // no time to read is a dash, and never a guess at one
+  top.appendChild(ago);
+  li.appendChild(top);
+
+  const sub = el('div', 'sub col', s.bytes ? `${fmtN(s.path)} path · ${fmtN(s.log)} log · ${fmtBytes(s.bytes)}` : `${s.closed ? 'shut' : s.phase || 'idle'} · –`);
+  // The skipped count is spelled with letters and not a symbol because this line is set in the mono stack
+  // and a symbol outside it inherits a fallback face with a taller line box (see the `line-height` on
+  // `.sub`). What the marker means is written out in full in the row's title.
+  if (s.skipped) sub.textContent += ` · ${fmtN(s.skipped)} old`;
+  li.appendChild(sub);
+
+  li.appendChild(actions(s));
+  return li;
+}
+
+// actions are the three things a reader does to a session rather than with it. They are absolutely
+// positioned over the tail of the row and appear on hover, because the alternative is a row of three buttons
+// permanently stealing the 80px that a session's name is written with - and on glass, where nothing hovers,
+// app.css puts them back in the flow and takes the age away instead.
+function actions(s) {
+  const box = el('span', 'acts');
+  const btn = (name, glyph, on) => {
+    const b = el('button', `act ${name}`);
+    b.type = 'button';
+    b.appendChild(icon(glyph, 'ico'));
+    b.title = b.ariaLabel = typeof on === 'string' ? on : '';
+    return b;
+  };
+  const pin = btn('pin', 'pin', s.pinned ? 'unpin this session' : 'keep this session above the rest');
+  pin.setAttribute('aria-pressed', s.pinned ? 'true' : 'false');
+  pin.onclick = (e) => {
+    e.stopPropagation();
+    setFlag(s, { pinned: !s.pinned });
+  };
+  // One button, and its word is the row's state, because "archive" and "unarchive" are one question and it
+  // is rude to answer it with an icon a reader has to hover to disambiguate.
+  const arc = btn('arc', s.archived ? 'unarchive' : 'archive', s.archived ? 'put this session back in the list' : 'take this session out of the list');
+  arc.onclick = (e) => {
+    e.stopPropagation();
+    setFlag(s, { archived: !s.archived });
+  };
+  const del = btn('del', 'trash', 'delete this session and its log');
+  del.onclick = async (e) => {
+    e.stopPropagation();
+    const yes = await confirmBox(`delete session ${s.id}?`, {
+      title: 'delete session',
+      detail: 'Its directory under the data directory goes with it: config, history, every branch. This one is not reversible.',
+      ok: 'delete',
+      danger: true,
+    });
+    if (!yes) return;
+    await api(`/api/session/${s.id}`, { method: 'DELETE' }).catch((err) => note(err.message, 'error'));
+    if (state.id === s.id) {
+      state.id = null;
+      state.cfg = null; // the cached config described the session that has just been deleted
+      writeHash(''); // a conversation that has been deleted must not stay in the address bar
+      logEl().textContent = '';
+    }
+    loadSessions();
+  };
+  box.append(pin, arc, del);
+  return box;
+}
+
+// setFlag is the POST, the note when it fails, and the reload that shows what just moved. The answer is
+// refused rather than believed: the group a row belongs to is decided here from the flags the list gave,
+// and redrawing one row from a body this module has not read is how a list starts telling a story the
+// daemon never agreed to. One extra GET, once per click.
+async function setFlag(s, flags) {
+  try {
+    await api(`/api/session/${encodeURIComponent(s.id)}/flags`, { body: flags });
+  } catch (err) {
+    note(err.message, 'error');
+    return;
+  }
+  loadSessions();
+}
+
+// loadSoon is the coalesced path, for callers that are an event rather than a click. One running session
+// pushes a `state` event per tick, and each of them used to be a GET /api/sessions followed by every row in
+// the sidebar rebuilt - a list that is a snapshot, not a stream, so the requests after the first were
+// duplicates rather than news.
+//
+// Trailing-edge only, and that is the choice rather than an oversight: answering the first event of a burst
+// immediately is what makes a burst cost two requests instead of one, and a quarter of a second is not a
+// delay anybody attributes to a number in the sidebar. `loadSessions` stays the immediate call for the cases
+// where a reader is already looking at the answer (a click on a row, a session created or deleted).
+let soonTimer = null;
+export function loadSoon() {
+  if (soonTimer) return;
+  soonTimer = setTimeout(() => {
+    soonTimer = null;
+    loadSessions();
+  }, 250);
+}
+
+// What the last call drew, so the next one can tell whether it has any work to do.
+let lastWant = [];
+
+export async function loadSessions(opts = {}) {
   const data = await api('/api/sessions').catch(() => null);
   if (!data) return;
   state.sessions = data.sessions || [];
-  const list = $('#session-list');
-  list.textContent = '';
-  for (const s of state.sessions) {
-    const li = el('li', s.id === state.id ? 'active' : '');
-    li.appendChild(el('span', 'sid', s.id));
-    li.appendChild(el('span', '', s.name || s.model || ''));
-    // Two counts, and they answer different questions: "path" is how many entries the conversation is, and
-    // "log" how many records it took to write them. They part company as soon as anything is edited,
-    // rewound, or compacted, because a patch and a delete are records that add no entry. The last figure is
-    // what the log costs the disk, which is the only one of the three that never lies about a session whose
-    // index is missing - and when it is missing, nothing is claimed about the other two: a zero would read
-    // as an empty session.
-    const stats = el('span', 'sid', s.bytes ? `${s.phase || 'closed'} · path ${fmtN(s.path)} · log ${fmtN(s.log)} · ~${fmtBytes(s.bytes)}` : `${s.phase || 'closed'} · –`);
-    if (s.skipped) {
-      // Ordinary traffic in a session an older build wrote: the index has a row for those records and this
-      // build has no name for what they ask for. They are counted and left alone, which is not damage.
-      stats.textContent += ` · ${fmtN(s.skipped)} ⓘ`;
-      stats.title = `${fmtN(s.skipped)} record${s.skipped === 1 ? '' : 's'} the index has a row for and this build cannot act on: an op it has no name for, from a build older than this one. They stay in the log, and nothing about the session is broken by them.`;
-    }
-    li.appendChild(stats);
-    li.onclick = () => selectSession(s.id);
-    const rm = el('button', 'ghost', '×');
-    rm.title = 'delete this session and its log';
-    rm.style.marginLeft = 'auto';
-    rm.onclick = async (e) => {
-      e.stopPropagation();
-      const yes = await confirmBox(`delete session ${s.id}?`, {
-        title: 'delete session',
-        detail: 'Its directory under the data directory goes with it: config, history, every branch. This one is not reversible.',
-        ok: 'delete',
-        danger: true,
-      });
-      if (!yes) return;
-      await api(`/api/session/${s.id}`, { method: 'DELETE' }).catch((err) => note(err.message, 'error'));
-      if (state.id === s.id) {
-        state.id = null;
-        state.cfg = null; // the cached config described the session that has just been deleted
-        writeHash(''); // a conversation that has been deleted must not stay in the address bar
-        logEl().textContent = '';
-      }
-      loadSessions();
-    };
-    li.appendChild(rm);
-    list.appendChild(li);
+  const raw = ($('#session-filter')?.value || '').trim();
+  const filter = raw.toLowerCase();
+  // Two reasons the fold opens itself, and neither is a preference: the conversation on screen is inside it
+  // (a transcript with no row of its own in the list is a session nobody can find again), and a filter that
+  // only the hidden rows can answer (a fold hiding the only match is a search that returns nothing on
+  // purpose). Once per reason is the whole point - the rule is "do not trap the reader", not "a closed fold
+  // is a fact this module overrides every second" - so folding it away by hand sticks until the reason
+  // changes: another session on screen, or another word in the box.
+  const active = state.sessions.find((s) => s.id === state.id);
+  const hides = state.sessions.some((s) => s.archived && hitOne(s, filter));
+  const reason = active?.archived ? `active:${active.id}` : filter && hides ? `filter:${filter}` : '';
+  if (reason && reason !== archivedForced) {
+    archivedOpen = true;
+    archivedForced = reason;
   }
+  const want = listPlan(state.sessions, filter);
+  const list = $('#session-list');
+  // Nothing moved, so nothing is touched. `state` events arrive for every running session's tick and used to
+  // be answered by rebuilding all thirteen rows and throwing the scroll position away with them.
+  const dirty = want.map((w, i) => {
+    const o = lastWant[i];
+    if (!o || o.kind !== w.kind) return true;
+    if (w.kind === 'grp') return o.title !== w.title || o.collapsed !== w.collapsed;
+    // The "why is this list empty" row carries its own sentence, and that is the only thing it can change.
+    // Left out, it would count as dirty on every call and be rebuilt once a second forever.
+    if (w.kind === 'none') return o.title !== w.title;
+    return !sameRow(o.s, w.s);
+  });
+  if (want.length !== lastWant.length || dirty.some(Boolean)) {
+    const at = list.scrollTop;
+    if (want.length !== lastWant.length) {
+      list.textContent = '';
+      want.forEach((w) => list.appendChild(nodeOf(w)));
+    } else {
+      dirty.forEach((d, i) => {
+        if (!d) return;
+        const next = nodeOf(want[i]);
+        const now = list.children[i];
+        // replaceChild and not `if (dirty) rebuild`: the whole row is a handful of nodes built from the same
+        // fields in the same order, so replacing one of them is cheaper than re-deriving which text node of
+        // it changed - and it keeps the row's listeners attached to the row that owns them.
+        if (now) list.replaceChild(next, now);
+        else list.appendChild(next);
+      });
+    }
+    list.scrollTop = at; // an unchanged height lands where it was; a shorter list is clamped by the browser
+    lastWant = want;
+  }
+  // The highlight is reconciled here and not left to the diff above, because `sameRow` compares what the
+  // *server* says about a session and `state.id` is no such thing: choosing a session changes not one figure
+  // of the plan, so the diff reports "nothing moved" and the class stays wherever it was. Measured before the
+  // fix: a reload of `#/s/test-1` drew thirteen rows and highlighted none of them, and clicking another row
+  // moved the transcript while the highlight stayed behind. `toggle(name, force)` is a no-op when the class is
+  // already right, so a list reconciled once a second costs thirteen attribute reads and no mutation.
+  syncActive(list, want);
+  // The active row has to be on screen after a click that chose it, and only then: the same call runs once a
+  // second under a running session, and a list that scrolls itself to whatever the server thinks is active
+  // is a list a reader cannot read.
+  if (opts.reveal) {
+    const i = want.findIndex((w) => w.kind === 'row' && w.s.id === state.id);
+    const row = i >= 0 ? list.children[i] : null;
+    // block:'nearest' costs nothing when the row is already in sight, and there is no point in scrolling a
+    // list nobody can see: on a collapsed desktop window the sidebar is a closed panel.
+    if (row && !(document.body.classList.contains('nav-collapsed') && !navIsOpen())) row.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+// syncActive puts `active` on the row of the session on screen and on no other row. It is a loop and not a
+// diff rule because the two figures it compares - the plan and `state.id` - are never both in the plan: the
+// list is a snapshot of the daemon, and which one of the snapshots you are looking at is this window's news.
+function syncActive(list, want) {
+  for (let i = 0; i < want.length; i += 1) {
+    const node = list.children[i];
+    // why the kind is asked and not assumed: a group label and the "why is this list empty" row can never be
+    // active, and skipping them is also what keeps this from clearing a class it did not put there.
+    if (!node || want[i].kind !== 'row') continue;
+    node.classList.toggle('active', want[i].s.id === state.id);
+  }
+}
+
+// nodeOf is the one place a plan entry becomes a node, so a rebuild and a patch cannot draw two different
+// versions of the same thing.
+function nodeOf(w) {
+  if (w.kind === 'row') return rowNode(w.s);
+  if (w.kind === 'none') return el('li', 'none', w.title);
+  const li = el('li', 'grp');
+  // data-open is a CSS hook and aria-expanded is the accessible answer to the same question, and they are
+  // two attributes because `aria-open` is not a thing a screen reader knows and a heading is not a thing a
+  // screen reader expects to expand.
+  li.dataset.open = w.collapsed ? 'false' : 'true';
+  const chevron = icon('chevron', 'ico');
+  chevron.setAttribute('aria-hidden', 'true');
+  if (w.key !== 'archived') {
+    // A heading and nothing more: Pinned, Running and Sessions do not fold, so this says what it is without
+    // pretending to be a control. The chevron is appended anyway - the four labels line up because of it, and
+    // app.css pays for that alignment with `visibility: hidden` rather than with another branch.
+    const label = el('div', 'glabel');
+    label.append(chevron, el('span', '', w.name), el('span', 'cnt', `(${w.count})`));
+    if (w.hint) label.title = w.hint;
+    li.appendChild(label);
+    return li;
+  }
+  const btn = el('button');
+  btn.type = 'button';
+  btn.setAttribute('aria-expanded', w.collapsed ? 'false' : 'true');
+  btn.append(chevron, el('span', '', w.name), el('span', 'cnt', `(${w.count})`));
+  btn.title = w.hint || '';
+  btn.onclick = () => {
+    archivedOpen = !archivedOpen;
+    // The fold is decided by the plan rather than by hiding rows, so the count, the tab order and the scroll
+    // position all follow from one answer instead of from a class somebody remembered to toggle. Forgetting
+    // what was drawn is how the whole list is redrawn, and this is the one change allowed to do it.
+    lastWant = [];
+    loadSessions();
+  };
+  li.appendChild(btn);
+  return li;
+}
+
+// wireSessions is the filter box. It redraws on every keystroke: the list is already in memory, the
+// comparison is three lowercase strings, and a filter that waits a beat before answering feels broken. What
+// is not done here is any focus handling - `wireKeys` in app.js owns the `/` that comes here from anywhere
+// else in the app, and this module does not get to decide what a key outside the box means.
+export function wireSessions() {
+  const box = $('#session-filter');
+  if (!box) return;
+  box.oninput = () => loadSessions();
+  box.onkeydown = (e) => {
+    // Escape in the box means "finished filtering", and that is said more specifically than the Escape in
+    // app.js answers: clearing the word and putting the caret back on the transcript is what a reader in the
+    // box is asking for, twice over - once to clear a long word, once more to leave.
+    if (e.key !== 'Escape') return;
+    // The box owns Escape only while it has something to give back. An empty box is already saying "finished
+    // filtering", so it steps out of the way - out of focus, and out of the event - and the app's own Escape
+    // answers the rest (close the panel the box is standing in, else go to the newest message). Swallowing it
+    // here is what a measurement caught: with the sidebar collapsed, Escape in the filter dropped focus and
+    // left the panel open, so the one key the app promises for getting out of a floating layer had to be
+    // pressed twice and the first press looked like nothing had happened.
+    if (!box.value) {
+      box.blur();
+      return;
+    }
+    e.stopPropagation();
+    box.value = '';
+    loadSessions();
+  };
 }
 
 // selectSession is the only place that clears the view: everything the previous session owned goes
@@ -436,7 +826,10 @@ export async function selectSession(id) {
   state.streams.clear();
   for (const [, card] of state.requests) card.remove();
   state.requests.clear();
-  await loadSessions();
+  // reveal: this is a click on a session, and the row that was just clicked has to be where the list ends
+  // up - a session chosen from a closed panel or from below the fold is otherwise a list that silently
+  // disagrees with the transcript next to it.
+  await loadSessions({ reveal: true });
   await refresh();
 }
 
