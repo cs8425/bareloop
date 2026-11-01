@@ -387,6 +387,16 @@ were bugs first.
   hundred thousand pixels of travel: there the message is simply sent, the loop queues it, and getting back
   to the newest message stays a gesture the reader makes. `#log` is the only scrolling container
   (`min-height: 0` on the flex items is what keeps the document itself from scrolling).
+- **A row's date is the log's newest entry, not the entry you are standing on.** `GET /api/sessions` answers
+  every row from that session's `log.idx` and never opens the transcript, and the timestamp it prints is the
+  newest one any entry of the log carries (`newestTs`, which asks entry rows only - a tip move, a delete or a
+  record this build cannot act on has no entry to take a time from, and answering 1970 for those would be a
+  date that is a lie). So a row says *when this conversation last had something to say*, which is the question a
+  list sorted by recent activity asks. It is not the timestamp of the tip: the two agree until the path is moved
+  back underneath itself without anything new being written, and then the entries that fell off the path keep
+  their later times, so the row keeps the later time too and a session cannot make itself look fresh by
+  rewinding. Which entry you are standing on is a separate fact, and the same row's tooltip prints it beside
+  that newest entry's date.
 
 Below 860px the UI is one column: the session list becomes a drawer (☰, closed by the scrim, by picking a
 session or by Escape) and the side panel becomes a bottom sheet. Heights use `dvh` because on a phone

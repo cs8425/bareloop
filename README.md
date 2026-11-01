@@ -340,7 +340,7 @@ otherwise the model answers in whatever it prefers
 | method | path | what it does |
 |---|---|---|
 | GET | `/api/health` | liveness |
-| GET | `/api/sessions` | every session with its status, and what each one adds up to - how many entries its path holds, how many records its log holds, and what that log costs the disk. Answered from the index: listing sessions reads no transcript, and a session with no index is listed without those numbers rather than with zeroes |
+| GET | `/api/sessions` | every session with its status, and what each one adds up to - how many entries its path holds, how many records its log holds, and what that log costs the disk. Answered from the index: listing sessions reads no transcript, and a session with no index is listed without those numbers rather than with zeroes. `lastTs` is the newest timestamp any entry of the log carries - the log's newest entry, not the entry the path is standing on, so moving a path backwards never makes it look fresh |
 | POST | `/api/sessions` | create a session (body: a config; `id` is required, lowercase, and becomes the directory name - 400 without it, 409 if the directory exists) |
 | GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |
