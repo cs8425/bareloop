@@ -190,7 +190,20 @@ export async function loadSessions() {
     const li = el('li', s.id === state.id ? 'active' : '');
     li.appendChild(el('span', 'sid', s.id));
     li.appendChild(el('span', '', s.name || s.model || ''));
-    li.appendChild(el('span', 'sid', `${s.phase || 'closed'} · ${s.entries} entries`));
+    // Two counts, and they answer different questions: "path" is how many entries the conversation is, and
+    // "log" how many records it took to write them. They part company as soon as anything is edited,
+    // rewound, or compacted, because a patch and a delete are records that add no entry. The last figure is
+    // what the log costs the disk, which is the only one of the three that never lies about a session whose
+    // index is missing - and when it is missing, nothing is claimed about the other two: a zero would read
+    // as an empty session.
+    const stats = el('span', 'sid', s.bytes ? `${s.phase || 'closed'} · path ${fmtN(s.path)} · log ${fmtN(s.log)} · ~${fmtBytes(s.bytes)}` : `${s.phase || 'closed'} · –`);
+    if (s.skipped) {
+      // Ordinary traffic in a session an older build wrote: the index has a row for those records and this
+      // build has no name for what they ask for. They are counted and left alone, which is not damage.
+      stats.textContent += ` · ${fmtN(s.skipped)} ⓘ`;
+      stats.title = `${fmtN(s.skipped)} record${s.skipped === 1 ? '' : 's'} the index has a row for and this build cannot act on: an op it has no name for, from a build older than this one. They stay in the log, and nothing about the session is broken by them.`;
+    }
+    li.appendChild(stats);
     li.onclick = () => selectSession(s.id);
     const rm = el('button', 'ghost', '×');
     rm.title = 'delete this session and its log';
