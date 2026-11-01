@@ -5,6 +5,7 @@
 // "follow only while pinned", where pinned means the bottom of #log is on screen. Any scroll the
 // user performs unpins; the floating jump button (or Escape) re-pins.
 import { $, logEl } from './util.js';
+import { isParked } from './state.js';
 
 const PIN_PX = 48;
 let pinned = true;
@@ -29,6 +30,11 @@ export const markPinned = () => {
 
 export function scrollDown(force = false) {
   const box = logEl();
+  // A parked transcript has no "down" worth going to: its bottom is a page boundary, not the newest
+  // message. An unforced follow — a line of daemon chatter that appended a note, a piece of compaction
+  // talk — must not drag a reader who is three pages back to the end of the page they are on. Forced
+  // scrolls stay: that is a button being pressed, and the parked chips land themselves (js/session.js).
+  if (isParked() && !force) return;
   if (!pinned && !force) {
     unseen++;
     renderJump();

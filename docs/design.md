@@ -322,14 +322,15 @@ promised, and bareloop stores what it answered.
 
 ## The UI, and why it is shaped like this
 
-`web/js/session.js` and its neighbours are plain ES modules; three behaviours are worth knowing because
-each of them was a bug first.
+`web/js/session.js` and its neighbours are plain ES modules; the behaviours worth knowing are the ones that
+were bugs first.
 
 - **Order is the path, not a sort.** `GET /api/session/{id}` answers with `Session.Path()` — the root-to-tip
   sequence that would be sent — so the handler has nothing left to sort, and the entries of a branch nobody
   is on never cross the wire to be dropped by the browser. The UI still sorts by id and still walks parents
-  from `status.tip` (`pathOf`) as a check that both readings agree, because a page is one slice of that
-  path. **Only the path is drawn**: an entry that is not on it belongs to a branch nobody can switch to
+  (`pathOf`) as a check that the two readings agree — starting from the **newest entry of the page it was
+  given**, which is the tip whenever the page ends at the tip and is not when the page is parked elsewhere.
+  **Only the path is drawn**: an entry that is not on it belongs to a branch nobody can switch to
   yet, so it is not shown at all (it stays in the log, and `GET /api/session/{id}/inspect` still lists
   it). That is also the real reason there is no branch switcher: a tree cannot be drawn honestly by
   appending to a list.
@@ -350,16 +351,30 @@ each of them was a bug first.
   address bar: the URL never claims something the page is not showing. `session.js` owns the hash and nothing
   else touches it, which is also why the `hashchange` listener cannot fight `selectSession` - writing an equal
   hash does nothing, so the listener just sees the id it has already selected and stops.
-- **The transcript is a page, and it grows backwards.** `session.js` asks for 40 entries on every read: on
-  one measured 66-entry session that is 681 KB and 82 251 px of transcript instead of the whole path's 1.9 MB
-  and 213 211 px. Reading backwards is a floating `↑ older · 40 of 66` at the top of the transcript, the only
-  place it is ever wanted, and it counts what came back (`window.count`) rather than what was asked for,
-  because a page is whole turns and can arrive smaller. Pressing it grows the window at the **older end**
-  instead of fetching a separate older slice: still one render path, the page still ends at the tip, and
-  `pathOf` still starts from an entry that is on screen. Growing must not move what you are reading, so the
-  distance from the bottom is remembered before the transcript is cleared and pointed back afterwards.
+- **The transcript is a page, and the page has two places.** `session.js` asks for 40 entries on every read:
+  on one measured 66-entry session that is 681 KB and 82 251 px of transcript instead of the whole path's
+  1.9 MB and 213 211 px. A page either **ends at the tip**, which is what opening a session gets you, or is
+  **parked** on a turn away from it, asked for with `?anchor=<id>`. Reading backwards is a floating
+  `↑ older · 40 of 66` at the top of the transcript, the only place it is ever wanted, and it counts what came
+  back (`window.count`) rather than what was asked for, because a page is whole turns and can arrive smaller.
+  At the tip that chip **grows** the window at the older end — one render path, and the page still ends at the
+  tip — while a parked page would only grow the page it is already standing on, so the same chip **slides** it
+  back one and a chip at the bottom walks it forward again, until it reaches the tip and becomes `↓ latest`.
+  Growing must not move what you are reading, so the distance from the bottom is remembered before the
+  transcript is cleared and pointed back afterwards; a parked page has no bottom worth holding on to, so it is
+  placed where it was asked to be — the turn it jumped to, or the newest entry of the page that just slid.
   Once the window is bigger than the server's `maxLimit` the client asks for `?all=1` by name, because a page
   cannot grow past a ceiling without forgetting entries that are already on screen.
+- **A parked page stops believing live traffic.** Everything that answers "what is happening now" draws at the
+  bottom of the transcript, and the bottom of a parked page is a page boundary: one arriving entry puts
+  tonight's answer in the middle of a conversation from last week, and the rule that re-reads when the tip has
+  moved would then drag the view to the tip a frame later. So while parked those events are counted and
+  dropped, and the count is what the bottom chip's tooltip says — a page being ignored looks perfectly calm
+  otherwise. Asking for a page by its anchor is also what makes a reconnect land where the reader left it. Two
+  things end the parking by themselves: the chip, and Escape, whose promise is "take me to the newest message"
+  and therefore means a page jump here. A tip that moves *backwards* is the one case the parked page cannot
+  stay on, because the entry it was anchored to may have stopped existing: that goes back to the tip, with a
+  toast saying why.
 - **Following is opt-out, and the composer never loses.** The transcript scrolls with the output only
   while you are at the bottom; scrolling up (or wheeling up) unpins immediately and a floating
   `↓ latest` counts what you missed. A wall of tokens must never steal the viewport from the composer,

@@ -108,6 +108,11 @@ label.icon-btn { display: inline-grid; place-items: center; width: 30px; height:
 button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #btn-compact { display: inline-flex; align-items: center; gap: 6px; }
 #jump { display: inline-flex; align-items: center; gap: 6px; }
+/* An id outranks the `.hidden` utility — the comment on the composer buttons below documents that trap, and
+   this button was standing in it: it computed display:flex while carrying class="hidden", so "latest"
+   sat in the bottom right corner of every transcript whether it was following the tip or not. The chip
+   that pages a parked transcript lives in this same corner, which is what made it impossible to miss. */
+#jump.hidden { display: none; }
 
 /* The composer's primary slot: send when idle, the red square while it answers, always the same pixels.
    A thumb that reached for "stop" mid-run must not find the thing that sends another message. */
@@ -195,16 +200,23 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
    have read to the top of it, so it sits at the top — and, like `latest`, it floats over the transcript
    instead of taking a row of its own: it is only wanted at one place in a long document, and a strip
    permanently above the transcript is chrome on every screen that has nothing older to read.
+   `newer` is its twin at the bottom and is shown by one state only: the transcript parked on a page that
+   is not the end of the conversation (js/session.js). Sharing `latest`'s corner works because that state
+   takes `latest` out of the picture — while parked, the bottom of the transcript is not the newest
+   message, so the promise it makes is the one thing that must not be on screen.
    #older.shown rather than #older.hidden: an id selector outranks the `.hidden` class rule, so a
    "hidden by default, shown by JS" element has to be *added* by class and never taken away by it. */
-#older {
-  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 4;
+#older, #newer {
+  position: absolute; z-index: 4;
   display: none; align-items: center; gap: 6px;
   background: var(--bg3); box-shadow: 0 3px 12px rgba(0, 0, 0, .55);
   font-size: var(--t-1); white-space: nowrap; max-width: calc(100% - 32px);
 }
-#older.shown { display: inline-flex; }
-#older:disabled { opacity: .6; }
+#older { top: 8px; left: 50%; transform: translateX(-50%); }
+#newer { right: 16px; bottom: 12px; }
+#older.shown, #newer.shown { display: inline-flex; }
+#older:disabled, #newer:disabled { opacity: .6; }
+#log-wrap.parked #jump { display: none; }
 /* The day divider sticks, so "what day am I reading" stays answered while you are in the middle of a
    day — which is the only moment the question gets asked. It costs no script: the scroll container is
    #log (see the overflow above), so `sticky` is a layout hint the browser already computes, whereas a
@@ -694,7 +706,7 @@ button,
   #log {
     padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
   }
-  #jump {
+  #jump, #newer {
     right: 10px;
     bottom: 10px;
   }

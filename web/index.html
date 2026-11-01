@@ -54,6 +54,12 @@
                you are in the transcript, and a permanent row above it would be chrome on every screen. It
                writes its own label, because the label is three numbers it knows and the markup does not. -->
           <button id="older" type="button"></button>
+          <!-- Its twin at the bottom, shown by exactly one state: the transcript is parked on a page that
+               is not the end of the conversation (js/session.js). "Older" slides that page back, this one
+               slides it forward until it reaches the newest message, and the only reason both can share
+               the corner `latest` uses is that it stands down while parked — while parked, the bottom of
+               this transcript is not the newest message, and a button promising it would be a lie. -->
+          <button id="newer" type="button"></button>
         </div>
         <div id="requests"></div>
 

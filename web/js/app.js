@@ -23,7 +23,7 @@
 //
 // This file wires the pieces, handles the global keys, and starts the transport.
 import { $ } from './util.js';
-import { state } from './state.js';
+import { isParked, state } from './state.js';
 import { EV_REFRESH, EV_SESSIONS, on } from './bus.js';
 import { fail, note, promptBox } from './ui.js';
 import { isPinned, scrollDown, wireScroll } from './scroll.js';
@@ -35,7 +35,7 @@ import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
 import { flushStreams } from './transcript.js';
-import { loadSessions, selectSession, refresh, idFromHash, writeHash, wireOlderRow } from './session.js';
+import { loadSessions, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
 import { bootIcons } from './icons.js';
@@ -161,7 +161,10 @@ function wireKeys() {
       hidePanel();
       return;
     }
-    if (!isPinned()) scrollDown(true);
+    // Parked, that promise is a page jump rather than a scroll: the newest message is not in this page at
+    // all, and scrolling would only walk to the bottom of the page being read and call it "latest".
+    if (isParked()) returnToTip();
+    else if (!isPinned()) scrollDown(true);
   });
 }
 
@@ -170,9 +173,9 @@ function wire() {
   // around the glyph that replaces them.
   bootIcons();
   wireScroll();
-  // The "older" chip is wired after the scroll wiring because it hangs a second listener on the same
-  // scroller: one owns following the tip, this one owns reading backwards.
-  wireOlderRow();
+  // The paging chips are wired after the scroll wiring because they hang a second listener on the same
+  // scroller: one owns following the tip, these own reading backwards and forwards.
+  wirePaging();
   wireNav();
   wireComposer();
   wireSettings();

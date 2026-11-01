@@ -16,13 +16,18 @@ export const state = {
   attachments: [], // {name, mimeType, data}
   pending: [],
   status: null,
-  // The slice of the path this tab is showing: {size, count, oldest, hasOlder, total, bytes, max}.
-  // `size` is what this tab asked for and keeps between reads; `count` is what the server says came
-  // back, and only that one answers "how much of the path is on screen" — a page is turn-atomic, so it
-  // can arrive smaller than the number asked for. null until a session has been read, and reset when
-  // the tab looks at another session.
+  // The page of the path this tab is showing, as request plus answer. The two live in one object
+  // because a refresh has to re-ask exactly what it is showing: {mode, size, pivot, stale} are what
+  // this tab asked for and keeps, {count, oldest, newest, hasOlder, hasNewer, total, bytes, max} are
+  // what the server says came back. `count` is the only one that answers "how much of the path is on
+  // screen" — a page is turn-atomic, so it can arrive smaller than the number asked for.
+  // `mode` is 'tip' (the page ends at the newest message) or a parked page around `pivot` ('anchor':
+  // centred on the turn holding it, 'before': the page that ends just before it). `stale` counts live
+  // events this parked page refused to draw (events.js). `place` is the one exception: a field written
+  // just before a refresh and dropped by it — where to put the viewport once the rebuild lands.
+  // null until a session has been read, and reset when the tab looks at another session.
   win: null,
-  pathIds: [], // ids on the current path, root -> tip ([] until a session has loaded)
+  pathIds: [], // ids on the path this tab is showing, root -> tip ([] until a session has loaded; a parked page knows its own page, not the whole conversation)
   seq: 0,
   transport: 'none',
   es: null,
@@ -34,3 +39,11 @@ export const sessionId = () => state.id;
 export function setSessionId(id) {
   state.id = id;
 }
+
+// isParked answers the one question every module asks about the page this tab is showing: is it a page
+// that is not the end of the conversation. Live traffic is an answer to "what is happening now", and
+// while parked nothing that draws at, or scrolls to, the bottom of the transcript may be believed. This
+// predicate lives with the state rather than with the module that pages because three of them ask it —
+// the pager, the event handler and the scroller — and none of the three should have to import another to
+// answer a question about this object.
+export const isParked = () => !!state.win && state.win.mode !== 'tip';

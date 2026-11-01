@@ -1,18 +1,33 @@
 // Turning agent events into DOM. The transport hands every event here, whether it arrived over the
 // websocket, SSE or a poll — there is exactly one rendering path either way.
 import { el, fmtN, logEl, numId } from './util.js';
-import { state } from './state.js';
-import { note } from './ui.js';
+import { isParked, state } from './state.js';
+import { note, toast } from './ui.js';
 import { scrollDown } from './scroll.js';
 import { entryNode, requestCard, streamDelta, toolCard } from './transcript.js';
 import { renderTools, syncToolsPanel } from './tools.js';
-import { loadSessions, refresh, renderPending, renderStatus } from './session.js';
+import { loadSessions, refresh, renderPending, renderStatus, returnToTip } from './session.js';
+
+// Everything on this list answers "what is happening now" by drawing at the bottom of #log, and that
+// sentence only means something while the bottom of #log is the newest message. A jump parks the
+// transcript on a page that is not the end of the conversation: appending there would put tonight's
+// answer in the middle of a conversation from last month, and the tip rule in the `state` case below
+// would then drag the view back to the tip on the next frame. So a parked page stops believing them and
+// counts what it gave up — `#newer` says so in its title, because a transcript that is being ignored
+// looks perfectly calm. A reconnect still finds the page: `ws.onopen` refreshes, and a refresh asks for
+// a parked page by its anchor. Notes are not on the list on purpose: a line about the daemon is not a
+// claim about where this conversation is, and muting an error to keep a page tidy is the worse trade.
+const LIVE_AT_THE_TAIL = ['delta', 'entry', 'tool_call', 'tool_result', 'compaction', 'removed', 'request', 'request_done'];
 
 export function handleEvent(ev) {
   if (ev.seq !== undefined) state.seq = Math.max(state.seq, ev.seq || 0);
   if (ev.session && state.id && ev.session !== state.id) {
     // Another session produced this: the only thing on screen that cares is the sidebar.
     if (ev.type === 'state' || ev.type === 'entry') loadSessions();
+    return;
+  }
+  if (isParked() && LIVE_AT_THE_TAIL.includes(ev.type)) {
+    state.win.stale = (state.win.stale || 0) + 1;
     return;
   }
   switch (ev.type) {
@@ -37,8 +52,19 @@ export function handleEvent(ev) {
       // the path, and no single event can fix that. A tip that moved forwards to an entry nobody is
       // holding means the path changed somewhere this tab did not watch — another tab sent a message.
       // A forward move to an entry already on screen is this session's own work, already drawn.
+      // Parked, both rules change shape: a forward move is what the "newer" chip is for rather than a
+      // reason to re-read a page that did not change, and a backwards move means the entry this page was
+      // anchored on may have stopped existing — so it goes back to the tip, and says so where a rebuild
+      // cannot eat the message.
       const tip = ev.state?.tip;
-      if (tip && prevTip && tip !== prevTip && (numId(tip) < numId(prevTip) || !state.entries.has(tip))) refresh().catch(() => {});
+      const parked = isParked();
+      const moved = !!tip && !!prevTip && tip !== prevTip;
+      if (moved && numId(tip) < numId(prevTip)) {
+        if (parked) {
+          toast('this conversation went backwards while you were reading a page of it — back to the newest message.');
+          returnToTip().catch(() => {});
+        } else refresh().catch(() => {});
+      } else if (moved && !parked && !state.entries.has(tip)) refresh().catch(() => {});
       syncToolsPanel();
       break;
     }

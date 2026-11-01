@@ -2,11 +2,11 @@
 // status badges and the pending queue. This is the module that talks to the server about *sessions*;
 // the transcript module only draws what it is given.
 import { $, el, fmtN, fmtBytes, logEl, clamp, pathOf, sortByNum } from './util.js';
-import { state } from './state.js';
+import { isParked, state } from './state.js';
 import { api, get } from './api.js';
 import { EV_SESSION, emit } from './bus.js';
 import { confirmBox, note } from './ui.js';
-import { isPinned, resetScroll, scrollDown } from './scroll.js';
+import { isPinned, markPinned, resetScroll, scrollDown } from './scroll.js';
 import { closeNav } from './nav.js';
 import { entryNode, linkToolResults } from './transcript.js';
 import { syncComposer } from './composer.js';
@@ -41,24 +41,47 @@ const PAGE = 40;
 // only place where reading backwards happens. At the bottom the newest message is already there.
 const REVEAL_PX = 200;
 
-// pageQuery is the window this tab is showing, as a query string. The window always ends at the tip —
-// reading backwards grows it at the older end — so the transcript never sees half a turn, and the
-// parent walk in pathOf always starts from an entry that is present. Once the tab is holding more than
-// a page may carry there is no page left to ask for, and asking for one would mean agreeing to forget
-// the older entries already on screen: the whole path is asked for by name instead, which is never more
-// than the unpaged read this endpoint made on every refresh before it could page. The cost panel is the
-// other reader of this endpoint and it wants the whole path — it prices every request on the path — so
-// `stats.js` keeps calling `get('')` unparameterised, and the default of a request with no query string
-// staying "no page" is what makes that keep working.
+// pageQuery is the window this tab is showing, as a query string. There are two kinds of window, and
+// which one is in effect is a field on `state.win` rather than a variable of its own, because the
+// request and the facts about its answer have to survive a rebuild together:
+//
+//  - `tip`, the default: the window ends at the newest message, so reading backwards *grows* it at the
+//    older end — nothing already on screen is dropped, and the parent walk in `pathOf` always starts
+//    from an entry that is present. Once the tab is holding more than a page may carry there is no page
+//    left to ask for, and asking for one would mean agreeing to forget the older entries already on
+//    screen: the whole path is asked for by name instead, which is never more than the unpaged read this
+//    endpoint made on every refresh before it could page. The cost panel is the other reader of this
+//    endpoint and it wants the whole path — it prices every request on the path — so `stats.js` keeps
+//    calling `get('')` unparameterised, and the default of a request with no query string staying "no
+//    page" is what makes that keep working.
+//  - parked: the window is a page *away from* the newest message, because the reader jumped to a turn.
+//    `anchor` asks for the page centred on the turn holding `pivot`, `before` for the page that ends
+//    just before it. Neither is ever combined with `all=1`: the endpoint takes `all` to mean "no page at
+//    all" and answers `all` plus anything else with a 400.
 function pageQuery() {
-  const size = state.win ? state.win.size : PAGE;
-  const max = state.win?.max || 0;
-  return max && size > max ? '?all=1' : `?limit=${size}`;
+  const w = state.win;
+  if (!w) return `?limit=${PAGE}`;
+  if (w.mode === 'anchor') return `?anchor=${w.pivot}&limit=${w.size}`;
+  if (w.mode === 'before') return `?before=${w.pivot}&limit=${w.size}`;
+  return w.max && w.size > w.max ? '?all=1' : `?limit=${w.size}`;
 }
 
 // One page on its way at a time: a second press must not grow the window before the first one has
 // landed, or the window grows twice for one response.
 let loadingOlder = false;
+
+// renderPaging keeps the two paging chips and the parked marker honest. It is called after every render
+// and after every press, because what a chip may promise depends on where in the conversation the page
+// is, and that is the server's answer rather than anything this module remembers.
+function renderPaging() {
+  const wrap = $('#log-wrap');
+  // The corner #jump owns promises "the newest message", and while parked the bottom of this transcript
+  // is not that. Toggling a class here instead of reaching into scroll.js leaves the button with the
+  // module that draws it: scroll.js learns the transcript is parked from CSS, not from a call.
+  if (wrap) wrap.classList.toggle('parked', isParked());
+  renderOlder();
+  renderNewer();
+}
 
 // renderOlder writes the chip's own label: how much of the path is on screen, of how much, and what it
 // cost to fetch. Every number is the server's, not the client's guess — including `count`, which is what
@@ -72,12 +95,42 @@ function renderOlder() {
     chip.classList.remove('shown');
     return;
   }
+  const same = `about ${fmtBytes(w.bytes)} to fetch.`;
   chip.textContent = `↑ older · ${fmtN(w.count)} of ${fmtN(w.total)}`;
-  chip.title =
-    `the transcript is a page: ${fmtN(w.count)} of ${fmtN(w.total)} entries on the path are on screen, about ${fmtBytes(w.bytes)} to fetch.\n` +
-    `click to read ${fmtN(PAGE)} more — the page grows at the older end and what you are looking at does not move.`;
+  // The label is the same in both window modes because the number means the same thing; what differs is
+  // the promise, and a title that promised "+40 more" while parked would be promising a re-fetch.
+  chip.title = isParked()
+    ? `the transcript is parked on a page of it: ${fmtN(w.count)} of ${fmtN(w.total)} entries on the path are on screen, ${same}\nclick to read the page before this one — the window slides, so the newest entries you can see now are left behind and come back with "newer".`
+    : `the transcript is a page: ${fmtN(w.count)} of ${fmtN(w.total)} entries on the path are on screen, ${same}\nclick to read ${fmtN(PAGE)} more — the page grows at the older end and what you are looking at does not move.`;
   chip.disabled = loadingOlder;
   revealOlder();
+}
+
+// renderNewer is the way back from a parked page, and nothing shows it when the transcript is not
+// parked: at the tip there is nothing newer than the newest message, so a chip for it would be chrome on
+// every screen that has nothing to go back from.
+function renderNewer() {
+  const chip = $('#newer');
+  if (!chip) return;
+  const w = state.win;
+  const parked = isParked();
+  chip.classList.toggle('shown', parked);
+  if (!parked) {
+    // Label and title go back to nothing rather than keeping the last parked page's numbers: a hidden
+    // element holding "14 of 66" is a lie waiting for whoever shows it next.
+    chip.textContent = '';
+    chip.title = '';
+    return;
+  }
+  chip.textContent = `${w.hasNewer ? '↓ newer' : '↓ latest'} · ${fmtN(w.count)} of ${fmtN(w.total)}`;
+  chip.title =
+    (w.hasNewer
+      ? `this page is parked on ${w.pivot}: ${fmtN(w.count)} of ${fmtN(w.total)} entries on the path are on screen.\nclick to read forward — each click picks the page back up around the newest entry it holds, until it reaches the newest message.`
+      : `this page already reaches the newest message; click to read the transcript from there again.`) +
+    // The count of what was given up rather than the fact of it, because the transcript looks perfectly
+    // calm while it is being ignored, and "how out of date am I" is the question a parked reader has.
+    (w.stale ? `\n\n${fmtN(w.stale)} thing${w.stale === 1 ? '' : 's'} happened at the tip since this page was read, and none of it was drawn here.` : '');
+  chip.disabled = loadingOlder;
 }
 
 // revealOlder shows the chip when there is something older AND the top of the transcript is on screen.
@@ -87,30 +140,96 @@ function revealOlder() {
   chip.classList.toggle('shown', !!state.win?.hasOlder && logEl().scrollTop <= REVEAL_PX);
 }
 
-// loadOlder grows the page rather than fetching a separate older slice: one request, one render path,
-// and the window stays contiguous with the tip. What it pays for that is re-fetching what is already on
-// screen — which is what every refresh did unconditionally before the endpoint could page.
+// loadOlder is one gesture with two moves behind it, and the window decides which one it is. At the tip
+// the page *grows*: it ends at the newest message, so reading backwards means more of the same page, and
+// re-fetching what is on screen is the price of staying on one request path. Parked, growing is not even
+// available — `?limit=N` on a parked page asks for the page you are already standing on — so the window
+// slides back instead, and lands at the bottom of what arrives: the end that continues what you were
+// reading is the end closest to you.
 async function loadOlder() {
   if (loadingOlder || !state.win?.hasOlder) return;
+  const w = state.win;
   loadingOlder = true;
-  state.win.size += PAGE;
-  renderOlder();
+  const undo = { mode: w.mode, pivot: w.pivot, size: w.size };
+  if (w.mode === 'tip') w.size += PAGE;
+  else {
+    w.mode = 'before';
+    w.pivot = w.oldest;
+    w.place = 'bottom';
+  }
+  renderPaging();
   try {
     await refresh();
   } catch {
-    state.win.size -= PAGE; // the page that did not arrive was never added to the window
+    Object.assign(w, undo); // the page that did not arrive was never added to the window
+    delete w.place; // and neither was the promise about where to land
   } finally {
     loadingOlder = false;
-    renderOlder();
+    renderPaging();
   }
 }
 
-// wireOlderRow is called once from app.js: the chip and the scroll position that reveals it.
-export function wireOlderRow() {
-  const chip = $('#older');
-  if (!chip) return;
-  chip.onclick = () => loadOlder();
-  logEl().addEventListener('scroll', revealOlder, { passive: true });
+// loadNewer walks a parked page forward. The endpoint has no `after=`, and inventing an id (newest + 1)
+// would be a guess about the log's id space: ids are dense but an entry with the next number can live on
+// another branch, and an anchor that is not on the path is answered with a 400. So forward is asked the
+// way the server can always honour it — park on the newest entry this page already holds, which the
+// server just sent and therefore exists on the path. That reaches the tip in a few presses instead of
+// one, which is what an endpoint that pages by whole turns costs.
+async function loadNewer() {
+  if (loadingOlder || !isParked()) return;
+  const w = state.win;
+  if (!w.hasNewer) return returnToTip(); // this page already reaches the tip: "newer" means go home
+  loadingOlder = true;
+  const undo = { mode: w.mode, pivot: w.pivot };
+  w.mode = 'anchor';
+  w.pivot = w.newest;
+  w.place = 'bottom';
+  renderPaging();
+  try {
+    await refresh();
+  } catch {
+    Object.assign(w, undo);
+    delete w.place;
+  } finally {
+    loadingOlder = false;
+    renderPaging();
+  }
+}
+
+// returnToTip drops the parked window. The page size is deliberately not carried over: it was grown to
+// read backwards from a place, and back at the tip the older chip starts growing again from one page.
+export function returnToTip() {
+  state.win = null;
+  // refresh() only puts the viewport at the bottom on its own while the transcript is pinned, and a
+  // parked page is not: say so here, or the reader lands in the middle of the page they just left.
+  markPinned();
+  // ...and force it again once the read has landed. A reader who was parked has a viewport sitting in the
+  // middle of the conversation, and holding that distance-from-bottom across a page swap stops the view
+  // short of the newest message — measured 2 531 pixels short of it. "Back to the newest message" that
+  // arrives 2 531 pixels away is half a promise.
+  return refresh().then(() => scrollDown(true));
+}
+
+// jumpTo parks the transcript on a turn that is not near the tip. The tick ruler is what will call this
+// once it exists, and any "who said this" link wants the same thing: the conversation from there, with
+// the turn you asked for at the top of the viewport rather than somewhere in the middle of it.
+export async function jumpTo(id) {
+  if (!state.id || !id) return;
+  // One page, always: a window grown to 200 entries to read backwards from the tip is the wrong shape
+  // to land in the middle of a conversation with. `anchor` is the only way to ask for a page around an
+  // entry, and the endpoint snaps it back to the turn start that owns the id, so this never lands on
+  // half a turn.
+  state.win = { mode: 'anchor', size: PAGE, pivot: id, stale: 0, place: id };
+  await refresh();
+}
+
+// wirePaging is called once from app.js: the two chips, and the scroll position that reveals the top one.
+export function wirePaging() {
+  const older = $('#older');
+  if (older) older.onclick = () => loadOlder();
+  const newer = $('#newer');
+  if (newer) newer.onclick = () => loadNewer();
+  if (older) logEl().addEventListener('scroll', revealOlder, { passive: true });
 }
 
 // refresh re-reads the session and rebuilds the transcript. Streams that are still running survive:
@@ -119,7 +238,17 @@ export function wireOlderRow() {
 export async function refresh() {
   if (!state.id) return;
   const box = logEl();
-  const asked = state.win ? state.win.size : PAGE;
+  // The request currently on screen: `state.win` is only replaced at the bottom of this function, which
+  // is what lets the window outlive the rebuild. `place` is read here and deliberately never written back
+  // down — "put the viewport there" is a fact about the navigation landing now, not about the page, and
+  // keeping it out of the request is what stops a jump from turning into a permanent instruction: an
+  // entry arriving at the tip must not make every later event re-read the page someone parked on.
+  const prev = state.win;
+  const mode = prev?.mode || 'tip';
+  const parked = mode !== 'tip';
+  const size = prev?.size || PAGE;
+  const pivot = prev?.pivot || '';
+  const place = prev?.place || '';
   const data = await get(pageQuery());
   // Both config writers (settings dialog, tools drawer) PATCH a whole config built on top of
   // state.cfg, so a copy older than the last save silently undoes it — a price edited in the dialog
@@ -132,11 +261,12 @@ export async function refresh() {
   const wasEmpty = !box.children.length;
   // A rebuild replaces every pixel of the transcript, so afterwards the viewport has to be pointed back
   // at the same place in the conversation. Distance from the bottom is the one number that survives a
-  // change in height: the window only ever grows at the older end, so holding that distance holds the
-  // entry the reader was looking at — the whole difference between “more arrived above” and “the page
-  // jumped”. A fresh transcript and a reader following the tip have nothing to hold: for those the
-  // bottom is the right place, and it is scrollDown() below that puts it there.
-  const keep = wasEmpty || isPinned() ? null : box.scrollHeight - box.scrollTop;
+  // change in height: while the window ends at the tip it only ever grows at the older end, so holding
+  // that distance holds the entry the reader was looking at — the whole difference between “more arrived
+  // above” and “the page jumped”. A fresh transcript and a reader following the tip have nothing to hold:
+  // for those the bottom is the right place, and it is scrollDown() below that puts it there. A page that
+  // was asked to land somewhere (place) has its own answer, and skipping this reads no layout at all.
+  const keep = place || wasEmpty || isPinned() ? null : box.scrollHeight - box.scrollTop;
   box.textContent = '';
   state.entries.clear();
   state.tools.clear();
@@ -145,7 +275,11 @@ export async function refresh() {
   // The path is what gets sent, and it is the only thing the transcript shows. An entry that is not on it
   // belongs to another branch: with no tree view there is no way back to that branch, so drawing it would
   // put history on screen that leads nowhere and nobody can pick up again. It stays in the log.
-  const onPath = pathOf(entries, data.status?.tip);
+  // The walk starts at the newest entry of the page rather than at the tip, and that is the only way it
+  // can: a page parked away from the tip does not contain the tip, and a parent walk that cannot find its
+  // starting point draws nothing at all. At the tip the two are the same entry, because a page that ends
+  // at the tip has the tip as its newest entry — which is also why nobody noticed until a page did not.
+  const onPath = pathOf(entries, data.window?.newestId || data.status?.tip);
   state.pathIds = [...onPath].reverse(); // pathOf walks tip -> root; the restart confirm wants root -> tip
   for (const e of entries) {
     if (onPath.has(e.id)) entryNode(e);
@@ -159,25 +293,44 @@ export async function refresh() {
   state.pending = data.pending || [];
   renderPending();
   const w = data.window || {};
-  // `size` is what this tab asked for and keeps between reads; the rest is what the server says came
-  // back. An answer with no `window` at all (an older server) leaves the chip out of the UI entirely,
-  // because `hasOlder` can only ever be false — no promise is made about paging that cannot be kept.
+  // The request goes back down unchanged and the facts come from the server. An answer with no `window`
+  // at all (an older server) leaves both chips out of the UI, because `hasOlder` and `hasNewer` can only
+  // ever be false — no promise is made about paging that cannot be kept.
   state.win = {
-    size: asked,
+    mode,
+    size,
+    pivot,
+    // What a parked page gave up while it was being read is no business of this response: it is the tally
+    // of events the gate in events.js refused to draw, and it outlives a re-read of the same page because
+    // a re-read of a parked page finds the same page with the tip further away than before.
+    stale: parked ? prev?.stale || 0 : 0,
     count: w.count || 0,
     oldest: w.oldestId || '',
+    newest: w.newestId || '',
     hasOlder: !!w.hasOlder,
+    hasNewer: !!w.hasNewer,
     total: w.total || 0,
     bytes: w.bytes || 0,
     max: w.maxLimit || 0,
   };
-  scrollDown(wasEmpty);
-  // Reading backwards: the newest message stays exactly as far below the viewport as it was, which is
-  // the whole difference between "more arrived above" and "the page jumped".
-  if (keep !== null) box.scrollTop = box.scrollHeight - keep;
-  // Last, because the chip decides whether to appear by asking where the top of the transcript is, and
-  // the viewport has to be back where the reader left it before that question means anything.
-  renderOlder();
+  // Where the viewport goes is a separate question from what the rebuild contains. A parked page has no
+  // bottom worth holding on to — the window slid, so both of its ends moved — so it is placed by what the
+  // reader asked for: the entry they jumped to, or the bottom of the page that just arrived, which is the
+  // end that continues the sentence they were reading.
+  const target = place && place !== 'bottom' ? state.entries.get(place) : null;
+  if (place === 'bottom') box.scrollTop = box.scrollHeight;
+  else if (target) target.scrollIntoView({ block: 'start' });
+  else {
+    scrollDown(wasEmpty);
+    // Reading backwards: the newest message stays exactly as far below the viewport as it was, which is
+    // the whole difference between "more arrived above" and "the page jumped". This is also the fall-back
+    // when a jump named an entry that did not arrive — a page is whole turns, so being handed a different
+    // page than the one the id was on is something the endpoint is allowed to do.
+    if (keep !== null) box.scrollTop = box.scrollHeight - keep;
+  }
+  // Last, because a chip decides whether to appear by asking where the top of the transcript is, and the
+  // viewport has to be back where the reader left it before that question means anything.
+  renderPaging();
 }
 
 export async function loadSessions() {
