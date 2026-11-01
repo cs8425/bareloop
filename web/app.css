@@ -732,6 +732,23 @@ body.nav-collapsed #app { --side-w: 0px; }
 /* ☰ is the only way back into the list, so it is on screen exactly when the sidebar is not: the rule that
    hides it on a desktop window (`#menu, #scrim { display: none }`) is beaten here and nowhere else. */
 body.nav-collapsed #menu { display: inline-grid; }
+/* and it is raised above the thing it opens. The panel drops from the top-left corner, which is where this
+   button lives, so at equal rank the panel wins and the button that opened the list cannot be reached to
+   close it - measured as a click at the centre of ☰ landing on the sidebar's own heading. The floating layer
+   is already ranked (scrim 30, drawer and panel 31, the phone's bottom sheet 32), so this clears all of them
+   rather than tying with one. */
+#menu {
+  position: relative;
+  z-index: 33;
+}
+/* and the heading inside the panel gets out of its way. The panel starts at the window's top-left corner,
+   which is where the top bar keeps ☰, and ☰ is raised above the panel so the press that opened the list can
+   close it - leaving the two glyphs drawn on each other. 10px of panel padding plus this is 50px, eight
+   clear of ☰'s right edge (top-bar padding 12 plus a 30px button), so the row reads "☰ bareloop". Only while
+   the panel is out: neither the column nor the phone drawer has a ☰ lying on top of it. */
+body.nav-collapsed.nav-open .side-head > b {
+  margin-left: 40px;
+}
 body.nav-collapsed #scrim {
   position: fixed;
   inset: 0;

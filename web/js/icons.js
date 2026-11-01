@@ -37,9 +37,13 @@ const PATHS = {
     '<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
   unarchive:
     '<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8"/><path d="M12 16v-4"/><path d="m9 14 3-3 3 3"/>',
-  // One chevron, and the state is carried by rotating it (see `li.grp[data-open]` in app.css): pointing
+  // The group chevron, and the state is carried by rotating it (see `li.grp[data-open]` in app.css): pointing
   // right means "there is a group here that is not drawn", pointing down means it is.
   chevron: '<path d="m9 6 6 6-6 6"/>',
+  // A mirrored one, for the button whose arrow is a direction rather than a state: the sidebar collapse
+  // points the way the column travels when it is pressed. Rotating `chevron` would reach the same pixel and
+  // would tie a sidebar button to a transform a list row owns.
+  chevronLeft: '<path d="m15 18-6-6 6-6"/>',
 };
 
 // icon returns a standalone <svg>. It is not `aria-hidden` only when given no name to label it with:

@@ -16,8 +16,21 @@
 // session's own config.json: the same person on another machine sees the same pinned and archived sessions
 // and may well want the sidebar wide over there.
 import { $ } from './util.js';
+import { swapIcon } from './icons.js';
 
 const KEY = 'bareloop.navCollapsed';
+
+// remembered reads the stored preference rather than the class on <body>, because the two are different
+// questions: the class is "is a column not reserved right now" and a narrow window answers that with no for
+// its own reasons, while the storage is "did this browser ever ask for the collapse". Growing the window back
+// has to ask the second question or the first answer becomes permanent.
+const remembered = () => {
+  try {
+    return localStorage.getItem(KEY) === '1';
+  } catch {
+    return false; // a browser that refuses storage has no preference to restore
+  }
+};
 
 // The same 860px app.css asks for the drawer, written down twice because there is no build step to share
 // one number between a stylesheet and a module. It decides two things only: whether a stored collapse
@@ -37,11 +50,23 @@ function setDrawer(on) {
   if (side) side.classList.toggle('drawer', on && !isMobile());
 }
 
+// One control both drops the list down and puts it away again, and it cannot wear the same sentence in both
+// states. The panel is drawn over the top bar, so ☰ is raised above it by app.css - which is what makes
+// "press the thing you just pressed to put it away" a gesture that exists at all.
+function syncMenuButton() {
+  const btn = $('#menu');
+  if (!btn) return;
+  btn.title = open ? 'close the session list' : 'open the session list';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-expanded', String(open));
+}
+
 export function setNav(isOpen) {
   open = isOpen;
   document.body.classList.toggle('nav-open', isOpen);
   const scrim = $('#scrim');
   if (scrim) scrim.classList.toggle('hidden', !isOpen);
+  syncMenuButton();
   // A panel that opens and then wants a second click before you can type is not a panel. On a phone the
   // same focus would shove the keypad over the drawer the reader was about to scan, so it is desktop-only.
   if (isOpen && isCollapsed() && !isMobile()) $('#session-filter')?.focus();
@@ -72,12 +97,21 @@ function setCollapsed(on, remember) {
 }
 
 // The button that owns the collapse lives inside the sidebar, where the thing it moves is. One control and
-// one meaning: the arrow says which way the column goes, and it is hidden below the breakpoint because a
-// phone window has no column to give back.
+// one meaning: the arrow says which way the column goes - `<` while there is a column to give back, `>` while
+// the list lives in a panel and the press takes a column back - and it is hidden below the breakpoint because
+// a phone window has no column to give back.
+let glyph = 'chevronLeft'; // what index.html drew, so the first sync only pays for a swap when it differs
 function syncCollapseButton() {
   const btn = $('#collapse');
   if (!btn) return;
   const on = isCollapsed();
+  const want = on ? 'chevron' : 'chevronLeft';
+  // why the comparison instead of always swapping: a window resize runs this with a state that has not
+  // changed, and every swap is a new node for the style sheet and the accessibility tree to learn again.
+  if (want !== glyph && btn.querySelector('svg')) {
+    glyph = want;
+    swapIcon(btn, want, null);
+  }
   btn.title = on ? 'keep the session sidebar open' : 'collapse the session sidebar and widen the transcript';
   btn.setAttribute('aria-label', btn.title);
   btn.setAttribute('aria-expanded', String(on));
@@ -93,6 +127,7 @@ export function bootNav() {
     saved = null;
   }
   setCollapsed(saved === '1' && !isMobile(), false);
+  syncMenuButton(); // ☰ starts folded away and has to say so: nothing has called setNav yet to write it
 
   $('#menu').onclick = () => setNav(!open);
   $('#scrim').onclick = () => setNav(false);
@@ -107,12 +142,18 @@ export function bootNav() {
       setCollapsed(on, true);
     };
   }
-  // Crossing the breakpoint in either direction is a relayout rather than an edit of the drawer. Held
-  // across it, the class would be a desktop window with no column reserved and no panel to open - a sidebar
-  // that cannot be opened - and a phone drawer left "open" would come back as a panel when the window grew.
-  // The stored value is left alone, so growing the window back restores the choice.
-  window.addEventListener('resize', () => {
-    setCollapsed(isCollapsed() && !isMobile(), false);
+  // Crossing the breakpoint in either direction is a relayout rather than an edit of the drawer. Held across
+  // it, the class would be a desktop window with no column reserved and no panel to open - a sidebar that
+  // cannot be opened - and a phone drawer left "open" would come back as a panel when the window grew.
+  //
+  // matchMedia is the one that knows a breakpoint was crossed; `resize` only knows a size arrived. Measured
+  // against the old listener: dragging the window narrow and back left `bareloop.navCollapsed=1` in storage
+  // while <body> stayed expanded until a reload - `isCollapsed()` was already false by the time the window
+  // grew again - and any single frame that reported a narrow viewport ate the collapse for the rest of the
+  // session (a capture of the page measures the viewport too). Asking the media query, and asking the
+  // storage, is what makes growing the window back restore the choice this file promises.
+  window.matchMedia(`(max-width: ${MOBILE_PX}px)`).addEventListener('change', (e) => {
+    setCollapsed(!e.matches && remembered(), false);
     setNav(false);
   });
 }
