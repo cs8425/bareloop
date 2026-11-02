@@ -43,39 +43,55 @@ type waitResult struct {
 	Status      string `json:"status"`
 	ScheduledAt string `json:"scheduled_at"`
 	ResumedAt   string `json:"resumed_at"`
+	// Reason names who ended the wait, and it is only ever there when it was a person: a bare
+	// "interrupted" cannot tell "somebody stopped this" from "this ended early and you should try
+	// again", and the two call for opposite next moves. Stop() has nobody's message after it, so it
+	// has nothing to name and leaves the field out.
+	Reason string `json:"reason,omitempty"`
 }
 
-func runWait(ctx context.Context, in Input, raw json.RawMessage) Result {
+func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error) {
 	var q waitArgs
 	if err := decodeArgs(raw, &q); err != nil {
-		return ErrText("wait: " + err.Error())
+		return ErrText("wait: " + err.Error()), nil
 	}
 	duration, until := argText(q.Duration), argText(q.Until)
 	switch {
 	case duration != "" && until != "":
-		return ErrText(`wait takes either duration or until, not both: duration is a length of time ("5m") and until is a moment ("2026-11-01T22:25:00+08:00").`)
+		return ErrText(`wait takes either duration or until, not both: duration is a length of time ("5m") and until is a moment ("2026-11-01T22:25:00+08:00").`), nil
 	case duration == "" && until == "":
-		return ErrText(`wait needs to be told when: duration is a length of time ("5m", "30s", "2h") and until is a moment ("2026-11-01T22:25:00+08:00").`)
+		return ErrText(`wait needs to be told when: duration is a length of time ("5m", "30s", "2h") and until is a moment ("2026-11-01T22:25:00+08:00").`), nil
 	}
 
 	loc, err := LoadTimezone(in.DefaultTimezone)
 	if err != nil {
 		// The session's own default is what is broken (a hand-edited config.json is enough), so the
 		// message names the setting instead of reading like a bad argument.
-		return ErrText("wait: " + err.Error() + " (this session's timezone setting)")
+		return ErrText("wait: " + err.Error() + " (this session's timezone setting)"), nil
 	}
 
 	now := in.now()
 	scheduled, err := schedule(now, duration, until, loc)
 	if err != nil {
-		return ErrText("wait: " + err.Error())
+		return ErrText("wait: " + err.Error()), nil
 	}
 	if after := scheduled.Sub(now); after > maxWait {
-		return ErrText("wait: " + scheduled.Format(time.RFC3339) + tooLong)
+		return ErrText("wait: " + scheduled.Format(time.RFC3339) + tooLong), nil
 	}
 	at := scheduled.Format(time.RFC3339)
 
 	if remaining := scheduled.Sub(in.now()); remaining > 0 {
+		// why the limit is checked for being set at all: zero is what every caller that has never
+		// heard of parking passes, and for those the behaviour here is exactly what it always was.
+		if limit := in.MaxInLoopSleep; limit > 0 && remaining > limit {
+			// Past what this run will hold the loop open for, the wait is handed to the daemon rather
+			// than slept: the moment it is due can be recomputed from this very call (it is in the log
+			// before the answer is), so a goroutine held for six hours buys nothing that a timer does
+			// not — and it is the goroutine that a restart takes away.
+			in.logf("wait: %s is %s from now, longer than this run will hold the loop for (%s); the loop is released and the daemon owns the wake-up",
+				at, remaining.Truncate(time.Second), in.MaxInLoopSleep)
+			return Result{}, &Parked{Until: scheduled}
+		}
 		// Say it before sleeping, not after: a run that produces nothing for five minutes is
 		// otherwise indistinguishable from a hung one, and this is the line that tells the
 		// difference. It goes out before the sleep because after the sleep it would be too late.
@@ -89,20 +105,33 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) Result {
 			// wait that did finish must not be reported as interrupted — on that word the model
 			// would schedule the same wait all over again.
 			if in.now().Before(scheduled) {
-				return ErrText(JSON(waitResult{
+				return in.withNote(ErrText(JSON(waitResult{
 					Status:      "interrupted",
 					ScheduledAt: at,
 					ResumedAt:   in.now().Format(time.RFC3339),
-				}))
+					Reason:      interruptReason(ctx),
+				}))), nil
 			}
 		}
 	}
 
-	return Result{Text: JSON(waitResult{
+	return in.withNote(Result{Text: JSON(waitResult{
 		Status:      "completed",
 		ScheduledAt: at,
 		ResumedAt:   in.now().Format(time.RFC3339),
-	})}
+	})}), nil
+}
+
+// interruptReason reads who ended the wait from the cause the run's context was cancelled with, and
+// returns the sentinel's own words so the two cannot drift apart. Only a person is named: an
+// uncaused cancellation (Stop(), a run that ended, this process going away) is still honestly
+// reported as "interrupted", and a cause this code does not know is reported as no cause rather than
+// guessed at.
+func interruptReason(ctx context.Context) string {
+	if errors.Is(context.Cause(ctx), ErrUserInterrupt) {
+		return ErrUserInterrupt.Error()
+	}
+	return ""
 }
 
 // schedule is the one place that decides when a wait ends, so the two ways of asking cannot drift

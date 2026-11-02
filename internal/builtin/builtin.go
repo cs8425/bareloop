@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -49,6 +50,20 @@ type Input struct {
 	// Now is the clock, injectable so a test does not have to sleep for five minutes. Nothing in
 	// here reads the wall clock directly.
 	Now func() time.Time
+	// MaxInLoopSleep is the longest a tool may keep the loop waiting inside one call. Past that
+	// length the wait is handed back instead of slept (see Parked): a wait that resumes in six
+	// hours is not worth a goroutine, and a goroutine does not survive a restart while the tool call
+	// already in the log does. Zero means "sleep as long as you were asked to", which is what every
+	// caller of this package meant before there was a choice — including every test here, and any
+	// session that has no reason to hold a wait short.
+	MaxInLoopSleep time.Duration
+	// DaemonNote is an aside about this call that only the daemon can witness — "the daemon
+	// restarted between this call and its answer". A tool that can be interrupted like that puts it
+	// after its own answer and never inside it: the JSON stays the tool's account of what it did,
+	// the note stays the daemon's account of what happened around it. It is set for the calls being
+	// resumed, not for the rest of the run, and of the tools here only a wait has anything to say
+	// with it — get_datetime has no past to explain.
+	DaemonNote string
 }
 
 func (in Input) now() time.Time {
@@ -64,6 +79,19 @@ func (in Input) logf(format string, args ...any) {
 	}
 }
 
+// withNote is how an answer leaves a tool: what it decided to say, and the daemon's aside after it
+// when there is one. Both a completed wait and an interrupted one carry it, because the fact the
+// note states is about the call rather than about which answer the call got.
+func (in Input) withNote(r Result) Result {
+	if in.DaemonNote == "" {
+		return r
+	}
+	if r.Text == "" {
+		return Result{Text: in.DaemonNote, IsError: r.IsError}
+	}
+	return Result{Text: r.Text + "\n\n" + in.DaemonNote, IsError: r.IsError}
+}
+
 // Tool is one builtin tool: the definition the model is shown, plus what to do when it is called.
 type Tool struct {
 	Name        string
@@ -71,8 +99,40 @@ type Tool struct {
 	InputSchema json.RawMessage
 	// Run answers the call. It is handed the loop's context, so a tool that waits is interrupted
 	// by Stop()/Interrupt() like any other tool call, and reports which of the two happened.
-	Run func(ctx context.Context, in Input, args json.RawMessage) Result
+	//
+	// The error is not a failed call: a failed call is a Result with IsError set, which is text the
+	// model is meant to read and fix. The error is something only the daemon can act on, and today
+	// there is exactly one such thing (Parked). It is a second return value rather than a field of
+	// Result so that "answered" and "did not answer, and here is why" cannot be mixed by forgetting
+	// a line — and so the compiler asks every caller to look.
+	Run func(ctx context.Context, in Input, args json.RawMessage) (Result, error)
 }
+
+// Parked is a builtin handing its work to the daemon instead of doing it here: the moment has been
+// decided, this loop is not the thing that will wake up, and no result is written yet — the result
+// belongs to the turn that wakes. It comes back as the error of a call, which is the one channel a
+// caller cannot ignore by accident, since an ignored Result would leave the tool call silently
+// unanswered.
+type Parked struct {
+	// Until is the moment the wait is due, not a length: arming from a moment means a daemon that
+	// wakes up an hour late resumes an hour late rather than waiting an hour more.
+	Until time.Time
+}
+
+// Error describes the handover in the words the model would need if it ever saw it. That is not a
+// dead case: a caller that treats every error as a failed call turns this line into a tool result,
+// and even then the model should learn that the wait is scheduled rather than lost.
+func (p *Parked) Error() string {
+	return fmt.Sprintf("this wait is scheduled for %s and the loop is not held open for it",
+		p.Until.Format(time.RFC3339))
+}
+
+// ErrUserInterrupt is how the session tells a waiting tool that a person ended the wait rather than
+// the clock or Stop(): cancel the run's context with it as the cause (context.WithCancelCause) and
+// wait says so in its result. The word matters because of what comes next — an interrupt appends
+// the person's message right after that result, and a model that reads "interrupted" with no
+// reason schedules the same wait again instead of reading the message.
+var ErrUserInterrupt = errors.New("user interrupt")
 
 // known is every builtin tool that exists, sorted by name. The order is not cosmetic: the tool
 // block is rendered in front of the history, so the list of names is part of the KV prefix and
@@ -118,6 +178,23 @@ func Names() []string {
 // isError set, which is how the loop already records a tool that answered "no".
 func ErrText(text string) Result {
 	return Result{Text: text, IsError: true}
+}
+
+// ResumeNote is the daemon's aside about a wait it had to answer on someone else's behalf. The
+// wording lives here because it is the wait's own schedule being described — one voice for both
+// halves — while the caller supplies only the fact only it can witness ("the daemon restarted").
+// reason has to read like the start of a sentence, because that is what it is spliced into, and the
+// moment it resumed is deliberately not repeated: resumed_at in the JSON is that timestamp and this
+// function would print a second one a microsecond apart from it.
+func ResumeNote(reason string, scheduled, resumed time.Time) string {
+	late := resumed.Sub(scheduled)
+	// why the guard: a clock that went backwards during a restart (an NTP correction is enough) must
+	// not produce "-4m12s before it could be answered", which is a sentence about the future.
+	if late < 0 {
+		late = 0
+	}
+	return fmt.Sprintf("[%s: this wait was due at %s, %s before it could be answered]",
+		reason, scheduled.Format(time.RFC3339), late.Truncate(time.Second))
 }
 
 // JSON marshals one of the fixed result shapes below. Marshal cannot fail on a struct of strings,

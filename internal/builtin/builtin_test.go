@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -19,6 +20,17 @@ func fixedInput(tz string) Input {
 }
 
 func call(t *testing.T, name, args string, in Input) Result {
+	t.Helper()
+	res, err := tryCall(t, name, args, in)
+	if err != nil {
+		t.Fatalf("builtin %s handed the call back to the daemon (%v) instead of answering it", name, err)
+	}
+	return res
+}
+
+// tryCall is for the tests that are about a call not being answered here, which is the one thing a
+// builtin can say with an error.
+func tryCall(t *testing.T, name, args string, in Input) (Result, error) {
 	t.Helper()
 	tool, ok := Get(name)
 	if !ok {
@@ -324,6 +336,184 @@ func TestWaitSleepsAndResumes(t *testing.T) {
 	}
 }
 
+// clockAt is the frozen clock the parking tests need: with Now fixed at `at`, a six-hour wait is
+// decided exactly the way a six-millisecond one is, and whether the tool slept is found out with
+// the one clock the tool was not handed a fake of — time.Since.
+func clockAt() Input {
+	return Input{Now: func() time.Time { return at }}
+}
+
+// TestALongWaitIsHandedOverNotSlept is the whole point of MaxInLoopSleep: past the limit the tool
+// says "not here" and gives the daemon the moment, without the call having been answered.
+func TestALongWaitIsHandedOverNotSlept(t *testing.T) {
+	in := clockAt()
+	in.MaxInLoopSleep = 5 * time.Minute
+	due := at.Add(6 * time.Hour)
+
+	var lines []string
+	in.Logf = func(format string, args ...any) {
+		lines = append(lines, strings.TrimSpace(fmt.Sprintf(format, args...)))
+	}
+
+	start := time.Now()
+	// Both ways of asking for six hours, because a relative wait is the one whose moment has to be
+	// computed before anybody can be told when to come back.
+	for _, args := range []string{`{"until":"` + due.Format(time.RFC3339) + `"}`, `{"duration":"6h"}`} {
+		res, err := tryCall(t, "wait", args, in)
+		if spent := time.Since(start); spent > time.Second {
+			t.Fatalf("%s parked and still cost %v of real time", args, spent)
+		}
+		var parked *Parked
+		if !errors.As(err, &parked) {
+			t.Fatalf("%s returned err=%v, want a *builtin.Parked", args, err)
+		}
+		if !parked.Until.Equal(due) {
+			t.Fatalf("%s parked until %s, want %s", args, parked.Until.Format(time.RFC3339), due.Format(time.RFC3339))
+		}
+		if res != (Result{}) {
+			t.Fatalf("%s parked and still brought an answer: %+v", args, res)
+		}
+	}
+
+	if len(lines) != 2 {
+		t.Fatalf("parking wrote %d log lines, want one per call: %q", len(lines), lines)
+	}
+	// The line a person debugging this has to read has to say the loop is gone and who is left
+	// holding the wake-up — "parked until" alone would not tell the two parks apart.
+	for _, want := range []string{"released", "daemon owns the wake-up", "5m0s"} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("the park log line %q does not contain %q", lines[0], want)
+		}
+	}
+}
+
+// TestTheLimitLeavesAShorterWaitAlone is the boundary, read the honest way: exactly at the limit is
+// not past it, so the wait is still slept and still answered in place — the same single result a
+// caller has always gotten, with no handover to make.
+func TestTheLimitLeavesAShorterWaitAlone(t *testing.T) {
+	in := clockAt()
+	in.MaxInLoopSleep = 5 * time.Minute
+	args := `{"until":"` + at.Add(5*time.Minute).Format(time.RFC3339) + `"}`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tool, _ := Get("wait")
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	res, err := tool.Run(ctx, in, json.RawMessage(args))
+	if err != nil {
+		t.Fatalf("a wait at the limit was handed over instead of slept: %v", err)
+	}
+	if !strings.Contains(res.Text, `"status":"interrupted"`) {
+		t.Fatalf("a slept wait did not report the interruption: %q", res.Text)
+	}
+	cancel()
+}
+
+// TestResumeNoteSaysWhatWasMissed pins the words the daemon puts under a wait it had to answer for:
+// what was missed and why, in the voice of a wait rather than of a log line. It deliberately does
+// not repeat the moment the wait resumed — resumed_at is that timestamp, and a second one printed a
+// microsecond later is a contradiction waiting for a reader.
+func TestResumeNoteSaysWhatWasMissed(t *testing.T) {
+	got := ResumeNote("the daemon restarted", at.Add(-3*time.Hour-4*time.Minute), at)
+	for _, want := range []string{
+		"the daemon restarted",
+		"was due at 2026-11-01T11:21:00Z",
+		"3h4m0s before it could be answered",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the note %q does not contain %q", got, want)
+		}
+	}
+	if n := strings.Count(got, "2026-11-01"); n != 1 {
+		t.Fatalf("the note prints a day %d times, and one of them is a second answer to when: %q", n, got)
+	}
+	// A clock that went backwards while the process was gone is a fact about the clock, not a
+	// duration to print in a sentence about the past.
+	if back := ResumeNote("the clock jumped", at.Add(time.Hour), at); !strings.Contains(back, "0s before") {
+		t.Fatalf("a wait that came back before it was due says: %q", back)
+	}
+}
+
+// TestDaemonNoteGoesAfterTheJSON is what keeps the two accounts separable: a reader that parses the
+// tool's answer must not have the daemon's sentence glued onto it, and a reader that wants the
+// restart must not have to know the JSON to find it.
+func TestDaemonNoteGoesAfterTheJSON(t *testing.T) {
+	scheduled := at.Add(-time.Hour)
+	in := clockAt()
+	in.DaemonNote = ResumeNote("the daemon restarted", scheduled, at)
+
+	got := call(t, "wait", `{"until":"`+at.Add(-time.Hour).Format(time.RFC3339)+`"}`, in)
+	if got.IsError {
+		t.Fatalf("a resumed wait failed: %s", got.Text)
+	}
+	head, tail, ok := strings.Cut(got.Text, "\n\n")
+	if !ok {
+		t.Fatalf("the note is not separated from the answer: %q", got.Text)
+	}
+	var res waitResult
+	if err := json.Unmarshal([]byte(head), &res); err != nil {
+		t.Fatalf("the answer alone is not the JSON the tool promises: %v (%s)", err, head)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("a resumed wait is %q, want completed: %s", res.Status, got.Text)
+	}
+	if res.ResumedAt != at.Format(time.RFC3339) {
+		t.Fatalf("resumed_at = %q, want the clock the daemon answered on", res.ResumedAt)
+	}
+	if tail != in.DaemonNote {
+		t.Fatalf("the note came out as %q, want %q", tail, in.DaemonNote)
+	}
+	// And a tool that was not told anything still answers as it always did.
+	if plain := call(t, "wait", `{"until":"`+at.Add(-time.Hour).Format(time.RFC3339)+`"}`, clockAt()); plain.Text != head {
+		t.Fatalf("an unannotated answer changed shape: %q", plain.Text)
+	}
+}
+
+// TestInterruptedNamesWhoEndedIt is the difference between waiting again and reading the message:
+// a person who interrupts gets their message appended right after this result, and only the word
+// "user" tells the model to look at it. A cancellation nobody attributed stays plainly interrupted,
+// because Stop() has no message after it and inventing a reason would be a claim about a person.
+func TestInterruptedNamesWhoEndedIt(t *testing.T) {
+	tool, _ := Get("wait")
+
+	byPerson, cancelPerson := context.WithCancelCause(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancelPerson(ErrUserInterrupt)
+	}()
+	got, err := tool.Run(byPerson, Input{}, json.RawMessage(`{"duration":"30s"}`))
+	if err != nil {
+		t.Fatalf("an interrupted wait handed over instead of answering: %v", err)
+	}
+	var res waitResult
+	if jsonErr := json.Unmarshal([]byte(got.Text), &res); jsonErr != nil {
+		t.Fatalf("the answer is not JSON: %v (%s)", jsonErr, got.Text)
+	}
+	if res.Reason != "user interrupt" {
+		t.Fatalf("a wait ended by a person says reason=%q, want %q", res.Reason, "user interrupt")
+	}
+	cancelPerson(nil)
+
+	byStop, cancelStop := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancelStop()
+	}()
+	gotStop, err := tool.Run(byStop, Input{}, json.RawMessage(`{"duration":"30s"}`))
+	if err != nil {
+		t.Fatalf("a stopped wait handed over instead of answering: %v", err)
+	}
+	if !strings.Contains(gotStop.Text, `"status":"interrupted"`) {
+		t.Fatalf("a stopped wait is not interrupted: %q", gotStop.Text)
+	}
+	if strings.Contains(gotStop.Text, `"reason"`) {
+		t.Fatalf("a stop nobody attributed still named a reason: %q", gotStop.Text)
+	}
+	cancelStop()
+}
+
 // TestWaitIsInterruptedByCancel is the escape hatch the session has: Stop() ends the wait, and the
 // model is told which of the two happened rather than being left to infer it from a gap.
 func TestWaitIsInterruptedByCancel(t *testing.T) {
@@ -337,7 +527,7 @@ func TestWaitIsInterruptedByCancel(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	got := tool.Run(ctx, Input{}, json.RawMessage(`{"duration":"30s"}`))
+	got, _ := tool.Run(ctx, Input{}, json.RawMessage(`{"duration":"30s"}`))
 	if spent := time.Since(start); spent > 5*time.Second {
 		t.Fatalf("the cancellation did not end the wait (took %v)", spent)
 	}
@@ -364,7 +554,7 @@ func TestWaitNamesTheParkBeforeItSleeps(t *testing.T) {
 	in := Input{Logf: func(format string, args ...any) {
 		lines = append(lines, strings.TrimSpace(fmt.Sprintf(format, args...)))
 	}}
-	_ = tool.Run(context.Background(), in, json.RawMessage(`{"duration":"15ms"}`))
+	_, _ = tool.Run(context.Background(), in, json.RawMessage(`{"duration":"15ms"}`))
 	if len(lines) == 0 {
 		t.Fatal("a wait slept without saying it was parking")
 	}

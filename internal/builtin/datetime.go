@@ -24,10 +24,12 @@ type datetimeArgs struct {
 	Timezone *string `json:"timezone"`
 }
 
-func runDatetime(_ context.Context, in Input, raw json.RawMessage) Result {
+// runDatetime has nothing to hand over to the daemon: an answer about the clock is always cheap
+// enough to give here, so every return below is an answer and the error is always nil.
+func runDatetime(_ context.Context, in Input, raw json.RawMessage) (Result, error) {
 	var q datetimeArgs
 	if err := decodeArgs(raw, &q); err != nil {
-		return ErrText("get_datetime: " + err.Error())
+		return ErrText("get_datetime: " + err.Error()), nil
 	}
 	// A named zone wins over the session default: that is the whole point of the argument, and it
 	// is what lets one call ask about the other end of a conversation.
@@ -40,11 +42,11 @@ func runDatetime(_ context.Context, in Input, raw json.RawMessage) Result {
 		if argText(q.Timezone) == "" {
 			// The broken value is the session's own, which is a different file to go and fix, so
 			// the message says which value was read rather than blaming the caller's argument.
-			return ErrText("get_datetime: " + err.Error() + ` (this session's timezone setting)`)
+			return ErrText("get_datetime: " + err.Error() + ` (this session's timezone setting)`), nil
 		}
-		return ErrText("get_datetime: " + err.Error())
+		return ErrText("get_datetime: " + err.Error()), nil
 	}
-	return Result{Text: FormatTime(in.now().In(loc))}
+	return Result{Text: FormatTime(in.now().In(loc))}, nil
 }
 
 // FormatTime is the two lines get_datetime answers with: the human one (date, clock, offset, zone,

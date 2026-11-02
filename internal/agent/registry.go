@@ -735,7 +735,14 @@ func (r *registry) callBuiltin(ctx context.Context, ref toolRef, args json.RawMe
 		// and what it means is that a newer version of the daemon no longer has this builtin.
 		return nil, ref, fmt.Errorf("builtin tool %q does not exist in this version of bareloopd", ref.Tool)
 	}
-	res := tool.Run(ctx, r.builtinInput(), args)
+	res, err := tool.Run(ctx, r.builtinInput(), args)
+	if err != nil {
+		// A builtin that cannot answer says so in text the model can read, so the only thing that can
+		// come back on this channel is a handover to the daemon (builtin.Parked, and nothing else
+		// today). It goes back exactly as it came: the registry does not get to decide what a wait
+		// that will not be slept here means, and the loop is the code that has to answer for it.
+		return nil, ref, err
+	}
 	return &mcp.CallResult{
 		Content: []mcp.ContentBlock{{Type: "text", Text: res.Text}},
 		IsError: res.IsError,
