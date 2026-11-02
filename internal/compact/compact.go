@@ -222,10 +222,11 @@ const (
 	ReasonInLoopOff     Reason = "in-loop compaction is off"
 	ReasonAlreadyActive Reason = "a compaction is already running"
 	ReasonNotStreaming  Reason = "generation in flight: compaction never runs mid-stream"
-	// ReasonUnanswered is the path ending on a tool call with no result — a wait the daemon is holding
-	// (park.go). A boundary written there would put the summary in front of an answer the model is still
-	// owed, and the kept tail could not contain a call that has nothing after it to keep.
-	ReasonUnanswered Reason = "a scheduled tool call is unanswered: the path has no place to cut"
+	// ReasonUnanswered is the path ending on a tool call with no result — a wait the daemon is holding, or
+	// a call a run is in the middle of (park.go answeringLocked). A boundary written there would put the
+	// summary in front of an answer the model is still owed, and the kept tail could not contain a call that
+	// has nothing after it to keep.
+	ReasonUnanswered Reason = "a tool call is unanswered: the path has no place to cut"
 )
 
 // Plan describes where to cut (§2.3).

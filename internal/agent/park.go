@@ -19,6 +19,10 @@ package agent
 // that has something after it (only a trailing one is legal), so a message appended during a wait
 // does not merely read out of order — it destroys the result before it exists. That is why parked
 // input is held in memory, and why a restart loses it rather than the path gaining a hole.
+//
+// The predicate that decides it is answeringLocked, and it asks about the call rather than about the wait:
+// an ordinary tool call leaves the same window open for the length of the call, with nothing parked and no
+// timer anywhere, and the messages that arrive in it are held by this file all the same.
 
 import (
 	"context"
@@ -175,8 +179,8 @@ func endedCallCause(ctx context.Context, callID string) (error, bool) {
 
 // isParked reports that a tool call is handed over to the daemon and still unanswered. The session
 // keeps reporting phase "running" while that is true — which is what keeps a parked session's Enter key
-// meaning "queue" (D84) and keeps a compaction out of the middle of an unanswered call — so this, not
-// the phase, is the question that distinguishes asleep from awake.
+// meaning "queue" (D84) and keeps a second run from starting next to an armed wake — so this, not the
+// phase, is the question that distinguishes asleep from awake.
 //
 // It is deliberately true for the microseconds a run is still winding down after handing the wait over:
 // what makes the ordering safe is the unanswered call, and that outlives the run.
@@ -186,14 +190,71 @@ func (s *Session) isParked() bool {
 	return s.park != nil
 }
 
-// isAnswering reports that the path ends on a tool call this session owes an answer to — whether the
-// wait is on a timer or a run is on its way to the model with it. Anything that would put an entry
-// between a call and its result has to ask this rather than isParked, because the wake is exactly the
-// moment a park stops being visible and the hole does not.
-func (s *Session) isAnswering() bool {
+// isAnswering reports that the path is owed an answer to a tool call — the wait is on a timer, or a run is
+// between committing the call and writing its result. Anything that would put an entry between a call and
+// its result has to ask this rather than isParked, because the wake is exactly the moment a park stops being
+// visible and the hole does not.
+func (s *Session) isAnswering() bool { return s.answering() != "" }
+
+// answering names the call the path is owed an answer for, and "" when it is owed none. Two things read it:
+// a message that would otherwise fall into the hole (Send), and a compaction that would otherwise cut the
+// path at the call (CompactNow).
+func (s *Session) answering() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held != ""
+	return s.answeringLocked()
+}
+
+// answeringLocked is that question with the lock held. Two shapes owe an answer, and the second is the
+// one this file used to miss:
+//
+//   - s.held: a wait this daemon owns, asleep on a timer or handed over by the process that died;
+//   - a run is in flight and one of the calls of the last entry that asked for tools has no result yet —
+//     the tip of the path is that entry, or one of its results with more still owed. The call is
+//     committed and its result is not, which is the same hole with no wait in it: measured, a message
+//     appended in that window leaves the model reading its tool answer after the person's new message,
+//     and it answered by inventing the output. Nothing in this project reorders a path, so the order
+//     written in that window is the order every later turn sends.
+//
+// why the run is part of the second shape and the shape alone is not enough: an unanswered call at the tip
+// is also what an abort or a restart leaves behind, and then nothing in this process intends to answer it.
+// Holding a message for a promise nobody is going to keep parks it in memory until the next restart, and
+// the person pressing send is the only answer such a call is ever going to get.
+func (s *Session) answeringLocked() string {
+	if s.held != "" {
+		return s.held
+	}
+	// why the phase rather than s.cancel: a run owns the phase from the moment it is started until the
+	// moment it stops, and this is the only question worth asking — is somebody in this process on their
+	// way to that answer.
+	if s.phase != phaseRunning {
+		return ""
+	}
+	// why this walks back over the results instead of only reading the tip: a turn is answered one call at a
+	// time, so between one result and the next the calls after it are still owed an answer, and a message
+	// that lands there splits one of them from its result just as thoroughly. Counting the results is enough
+	// rather than matching ids, because runTools works through a turn's calls in order, which makes the
+	// results already on the path a prefix of the calls.
+	answered := 0
+	for id := s.st.Tip; id != ""; {
+		e := s.st.Entries[id]
+		if e == nil {
+			return ""
+		}
+		if e.Kind == ir.KindTool {
+			answered++
+			id = e.ParentID
+			continue
+		}
+		if e.Kind != ir.KindAssistant || len(e.ToolCalls) == 0 {
+			return ""
+		}
+		if answered >= len(e.ToolCalls) {
+			return ""
+		}
+		return e.ToolCalls[answered].ID
+	}
+	return ""
 }
 
 // parkWaitLocked takes a wait over from the loop: the timer is armed, whatever is already held is kept
@@ -353,16 +414,18 @@ func (s *Session) holdMessage(msg Message) bool {
 //
 // Holding is not a courtesy: appended now, the message would sit between the call and its result, and
 // the assembler answers that shape by inventing a failure for a tool that is merely still waiting. The
-// question is s.held rather than s.park because of the wake: that run answers the call and then asks
-// the model, and the wait it was built from is over by then — while the hole a message could fall into
-// is not.
+// question is answeringLocked rather than s.park, because of the wake: that run answers the call and
+// then asks the model, and the wait it was built from is over by then — while the hole a message could
+// fall into is not. And rather than s.held, because of the call a run is in the middle of: the same
+// hole, with nothing parked and nothing holding.
 func (s *Session) holdMessageLocked(msg Message) bool {
-	if s.held == "" {
+	call := s.answeringLocked()
+	if call == "" {
 		return false
 	}
 	s.queue = append(s.queue, msg)
 	s.logf("message held in memory instead of appended: it joins the path after the answer to %s, and a restart drops it",
-		s.held)
+		call)
 	return true
 }
 

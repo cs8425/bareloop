@@ -394,3 +394,139 @@ func TestTheFactsAboutAResumedCallReachOnlyThatCall(t *testing.T) {
 		t.Errorf("a wake with nothing to explain lost the address or the ask: %+v", silent)
 	}
 }
+
+// The window an ordinary tool call leaves open is the same debt as a wait: the call is on the path and its
+// result is not. Nothing is parked here and no timer exists — a run is a few hundred milliseconds from the
+// answer — so the only fact that can say "an answer is coming" is that this session has a run and an
+// unanswered tip. What that cost before it was held: the model read its tool answer after the person's new
+// message, and answered by inventing the output.
+func TestAMessageSentWhileACallIsBeingMadeStaysOffThePath(t *testing.T) {
+	// `shell` on purpose: not one of the daemon's tools, so nothing in this fixture is a wait and nothing
+	// can be parked. This is the hole r61's queue did not cover.
+	s := parkFixture(t, "inflight", "shell", time.Now(), `{"command":"sleep 30"}`)
+	s.mu.Lock()
+	// why the field is written rather than a run being started: the run goroutine is not what is under test,
+	// and the LLM of this fixture answers on a port nothing listens on (top of this file). The phase is the
+	// one fact a run leaves behind that the predicate reads, and a run that got as far as a tool call set it.
+	s.phase = phaseRunning
+	s.mu.Unlock()
+
+	if err := s.Send(context.Background(), Message{Text: "also, while that runs"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if n := len(s.path()); n != 1 {
+		t.Errorf("the path grew to %d entries while a call was outstanding: %s", n, describePath(s.path()))
+	}
+	if st := s.Status(); st.Queued != 1 {
+		t.Errorf("queued = %d, want 1", st.Queued)
+	}
+
+	// The result lands, and only then does the message take the place it was held out of.
+	if _, err := s.appendEntry(&ir.Entry{
+		Kind: ir.KindTool, Role: "tool", ToolCallID: "call-1", Tool: "shell", Content: "30 seconds of silence",
+	}); err != nil {
+		t.Fatalf("append the result: %v", err)
+	}
+	s.flushHeld()
+
+	path := s.path()
+	if len(path) != 3 {
+		t.Fatalf("the path is %d entries, want 3: %s", len(path), describePath(path))
+	}
+	if path[1].Kind != ir.KindTool {
+		t.Errorf("the second entry is a %s, want the tool result: %s", path[1].Kind, describePath(path))
+	}
+	if path[2].Kind != ir.KindUser || path[2].Content != "also, while that runs" {
+		t.Errorf("the message is not next after the result: %s", describePath(path[2:]))
+	}
+}
+
+// The window is not only the one before the first result of a turn. A turn is answered one call at a time,
+// so the seconds between two results of the same turn leave the second call exactly as unanswered as it was
+// before the first answer was written — and a message that lands there splits that call from its result just
+// the same. Reading the tip of the path alone cannot see it, which is why answeringLocked walks back over
+// the results rather than stopping at the last entry.
+func TestAMessageSentBetweenTwoCallsOfOneTurnStaysOffThePath(t *testing.T) {
+	s := parkFixture(t, "second", "shell", time.Now(), `{"command":"ls"}`)
+	if _, err := s.appendEntry(&ir.Entry{
+		Kind: ir.KindTool, Role: "tool", ToolCallID: "call-1", Tool: "shell", Content: "listed",
+	}); err != nil {
+		t.Fatalf("append the first result: %v", err)
+	}
+	if _, err := s.appendEntry(&ir.Entry{
+		Kind: ir.KindAssistant, Role: "assistant", Model: "test-model", Finish: "tool_calls",
+		ToolCalls: []ir.ToolCall{{ID: "call-2a", Name: "shell"}, {ID: "call-2b", Name: "shell"}},
+	}); err != nil {
+		t.Fatalf("append the turn asking for two calls: %v", err)
+	}
+	if _, err := s.appendEntry(&ir.Entry{
+		Kind: ir.KindTool, Role: "tool", ToolCallID: "call-2a", Tool: "shell", Content: "first of two",
+	}); err != nil {
+		t.Fatalf("append the first of two results: %v", err)
+	}
+
+	s.mu.Lock()
+	// why the field is written rather than a run being started: see the test above, which is under the same
+	// constraint — no LLM is listening on this fixture's port.
+	s.phase = phaseRunning
+	s.mu.Unlock()
+
+	if err := s.Send(context.Background(), Message{Text: "and the other one?"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if n := len(s.path()); n != 4 {
+		t.Errorf("the path grew to %d entries while the second call of a turn was outstanding: %s", n, describePath(s.path()))
+	}
+	if st := s.Status(); st.Queued != 1 {
+		t.Errorf("queued = %d, want 1", st.Queued)
+	}
+
+	if _, err := s.appendEntry(&ir.Entry{
+		Kind: ir.KindTool, Role: "tool", ToolCallID: "call-2b", Tool: "shell", Content: "second of two",
+	}); err != nil {
+		t.Fatalf("append the second of two results: %v", err)
+	}
+	s.flushHeld()
+
+	path := s.path()
+	if len(path) != 6 {
+		t.Fatalf("the path is %d entries, want 6: %s", len(path), describePath(path))
+	}
+	if path[4].ToolCallID != "call-2b" {
+		t.Errorf("the fifth entry answers %q, want call-2b: %s", path[4].ToolCallID, describePath(path[3:]))
+	}
+	if path[5].Kind != ir.KindUser || path[5].Content != "and the other one?" {
+		t.Errorf("the message is not next after the last result it was held for: %s", describePath(path[4:]))
+	}
+}
+
+func TestAMessageIsNotHeldForACallNobodyIsAnswering(t *testing.T) {
+	// The other half of the predicate, and the one that keeps it from becoming a trap: an unanswered call at
+	// the tip is also what an abort leaves behind, and then no answer is coming. Holding a message for a
+	// promise nobody intends to keep parks it in memory until the next restart, and the person pressing send
+	// is the only answer such a call is ever going to get.
+	s := parkFixture(t, "nobody", "shell", time.Now().Add(-time.Hour), `{"command":"sleep 30"}`)
+	if err := s.Send(context.Background(), Message{Text: "what happened to that shell call?"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if n := len(s.path()); n != 2 {
+		t.Errorf("the path is %d entries, want 2: %s", n, describePath(s.path()))
+	}
+	if st := s.Status(); st.Queued != 0 {
+		t.Errorf("queued = %d, want 0: nothing is going to answer that call, so nothing is worth waiting for", st.Queued)
+	}
+}
+
+func TestCompactionIsRefusedWhileACallIsBeingMade(t *testing.T) {
+	// The third reader of the same predicate, and the widest of the three: a compaction asks isAnswering
+	// rather than the phase, and a session in this window is neither streaming nor parked — so the button
+	// could cut the path at the call, which is the one thing that reason's own comment says never to do.
+	s := parkFixture(t, "cut", "shell", time.Now(), `{"command":"sleep 30"}`)
+	s.mu.Lock()
+	s.phase = phaseRunning
+	s.mu.Unlock()
+
+	if _, err := s.CompactNow(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "unanswered") {
+		t.Errorf("compaction was not refused for a call that is merely being made: %v", err)
+	}
+}

@@ -358,9 +358,11 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			s.probeNCTX("first send of this session")
 		}
 
-		// Rebuild the payload from storage on every turn. This is the mechanism that injects
-		// a message the user sent mid-run: it is already on the path, so it simply becomes
-		// part of this turn's payload, right after the tool results.
+		// Rebuild the payload from storage on every turn. This is the mechanism that injects a message the
+		// user sent mid-run: it is already on the path, so it becomes part of this turn's payload. The
+		// exception has a name: a message that arrived while a tool call was outstanding is held (see
+		// answeringLocked) and joins the path after that call's answer, so it reaches this turn the same
+		// way — just never between a call and its result.
 		built, sizes, tools := s.build()
 		s.markSent()
 		s.emitPending()
@@ -461,6 +463,11 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			// an answer that has not been written yet. The run ends — the wake is what continues.
 			return true, nil
 		}
+		// Every call of this turn has its answer on the path now, and that is the breakpoint the messages
+		// which arrived mid-call were held for: after the results they interrupted, before the model is
+		// asked again (D84). Waiting for the end of the run instead would steer none of this run's remaining
+		// turns with them, and the run would finish answering a question the person had already amended.
+		s.flushHeld()
 		if abortedTools {
 			if fm := s.takeForceMsg(); fm != nil {
 				if e, err := s.appendEntry(s.userEntry(*fm)); err == nil {

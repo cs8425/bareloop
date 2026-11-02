@@ -476,10 +476,11 @@ func (s *Session) Send(ctx context.Context, msg Message) error {
 	if strings.TrimSpace(msg.Text) == "" && len(msg.Images) == 0 {
 		return errors.New("agent: empty message")
 	}
-	// A wait the loop is not holding cannot be answered by anything this message touches, and
-	// appending it now would put a user message between a tool call and its result — which is the one
-	// shape the assembler refuses to leave alone (park.go). So it waits here, in memory, and docs/ says
-	// out loud that a restart drops it.
+	// Whatever the path is owed an answer for — the wait the loop handed over, or a call this run is between
+	// committing and answering — cannot be answered by anything this message touches, and appending it now
+	// would put a user message between a tool call and its result, which is the one shape the assembler
+	// refuses to leave alone (answeringLocked, park.go). So it waits here, in memory, and docs/ says out
+	// loud that a restart drops it.
 	if s.holdMessage(msg) {
 		return nil
 	}
