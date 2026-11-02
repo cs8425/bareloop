@@ -15,6 +15,12 @@ export const state = {
   requests: new Map(), // pending input-request id -> element
   attachments: [], // {name, mimeType, data}
   pending: [],
+  // What this tab sent that the daemon is holding off the path (a tool call has an answer owed), oldest
+  // first. The server's `status.queued` is the count — it is the one thing that also sees another tab's
+  // messages and the bolt's — and this is the copy of the text, which only the sender has. It is not a
+  // queue: it is a mirror, dropped and re-cut whenever the count says the head has joined the log, and it
+  // is emptied when this tab looks at another session because it describes the one it is leaving.
+  held: [],
   status: null,
   // The page of the path this tab is showing, as request plus answer. The two live in one object
   // because a refresh has to re-ask exactly what it is showing: {mode, size, pivot, stale} are what

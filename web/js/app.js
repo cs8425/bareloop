@@ -35,7 +35,7 @@ import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
 import { flushStreams } from './transcript.js';
-import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions } from './session.js';
+import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions, renderStatus } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
 import { bootIcons } from './icons.js';
@@ -203,7 +203,10 @@ function wire() {
   // reload of a collapsed window.
   bootNav();
   wireSessions();
-  wireComposer();
+  // The composer gets one renderer handed to it rather than importing it: the reply to a send carries the
+  // session's status, and the fact that a message was held off the path is in that status and nowhere else
+  // (js/composer.js rememberHeld).
+  wireComposer({ onStatus: renderStatus });
   wireSettings();
   wirePanel();
   wireTools();

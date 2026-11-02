@@ -46,6 +46,11 @@
         <div id="statusbar">
           <span id="phase" class="badge">idle</span>
           <span id="turn"></span>
+          <!-- A session asleep on a wait really is `running` — the composer's Enter key reads that word and
+               nothing else may own it — so the wait gets its own badge instead of a new phase. It shows the
+               moment the wait is due rather than a countdown, because nothing here re-renders to watch one
+               go by, and a figure that quietly goes stale is worse than no figure. -->
+          <span id="wake" class="badge hidden"></span>
           <!-- The token bar is the door to the tokens-and-cost panel: it is the one thing in this row
                that is about tokens, and "how full is the window" wants a "what did it cost" behind it.
                It is a span, so it is given the role, the name and the keys a button ships with. -->
@@ -75,6 +80,19 @@
         <div id="pending" class="hidden">
           <span id="pending-badge" class="badge hidden">pending</span>
           <ul id="pending-list"></ul>
+          <!-- The other half of what is waiting, and the two halves answer different questions. The list
+               above is in the log: it is a promise the loop will get to. This one is in the daemon's memory:
+               a tool call still has an answer owed, and a message appended now would sit between that call
+               and its result, so it waits instead — off the path, with no entry event and nothing drawn
+               until the answer lands. Without this box such a message has left the textarea and appears
+               nowhere, which reads exactly like a message that was lost.
+               What it can name is this tab's own sends: the daemon publishes how many it is holding, not what
+               they say, so a message sent from another window counts and does not appear, and after a reload
+               the ones sent before it do either. Both are said as `+N more` rather than drawn as an empty row.
+               The text is not kept somewhere private to fix that: the log is the only memory here, and this is
+               the one interval where a message is in neither. -->
+          <span id="held-badge" class="badge hidden">held</span>
+          <ul id="held-list"></ul>
         </div>
 
         <div id="composer">

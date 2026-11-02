@@ -248,6 +248,10 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .badge { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; color: var(--muted); }
 .badge.running { color: #cfe3ff; border-color: #35639f; }
 .badge.compacting { color: #f0d6a0; border-color: #6d5626; }
+/* Asleep is its own colour and its own badge because the phase cannot say it: a session parked on a wait is
+   `running` on purpose (the composer's Enter key reads that word), and a reader looking at that word needs
+   the second fact beside it rather than a third phase for the same moment. */
+.badge.asleep { color: #cbb8f0; border-color: #4a3f6d; }
 /* The bar is a text container with a number drawn in it, so its height is written in the text's own
    units: `height: 16px` with `font-size: 11px` inside is a box that cannot grow with the number, and the
    number is the reason the bar exists. 1.35em of the status bar's 12px is the 16px it always was. */
@@ -402,6 +406,8 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .state-running { color: var(--warn); }
 .state-ok { color: var(--ok); }
 .state-error { color: var(--err); }
+/* A parked call has not finished, and `ms` next to it would be a number about something else entirely. */
+.state-parked { color: #cbb8f0; }
 
 .note { color: var(--muted); font-size: var(--t-1); text-align: center; margin: 6px 0; }
 .compact-banner { border: 1px solid #4a3866; background: #1d1826; border-radius: 8px; padding: 7px 11px; margin-bottom: 10px; font-size: var(--t-2); }
@@ -481,6 +487,12 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #pending ul { margin: 3px 0 0; padding-left: 18px; max-height: 24vh; overflow-y: auto; }
 /* The tail of the queue is a count, not an item: it should not wear a bullet or an indent. */
 #pending li.more { list-style: none; margin-left: -18px; }
+/* The second badge needs no rule of its own: it follows a `ul`, which is a block, so it already starts on a
+   line of its own — and `display` on an id would out-specify the `.hidden` rule that hides it. */
+/* One line per message: this box shares its column with the transcript, and its rows must not be the
+   reason the conversation lost lines. The whole message is in the row's title. */
+#pending li.held-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+#pending li.why { list-style: none; margin-left: -18px; opacity: 0.7; }
 
 #requests { flex: 0 0 auto; max-height: 34vh; overflow-y: auto; }
 #requests:empty { display: none; }

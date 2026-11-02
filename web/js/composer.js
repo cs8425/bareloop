@@ -164,11 +164,35 @@ function clearDraft() {
 async function send() {
   const body = draft();
   if (!body || !state.id) return;
+  const id = state.id; // the reply belongs to the session that was on screen when Enter was pressed
+  const wasHeld = state.status?.queued || 0; // what this tab last saw is the only baseline it has
   clearDraft();
   const parked = isParked(); // why: parked is "I am reading somewhere else", not "follow the tail"
   if (!parked) markPinned(); // sending a message means "show me the answer", before the server has anything to show
-  await call('/send', body);
+  const res = await call('/send', body);
+  rememberHeld(id, body, res, wasHeld);
   if (!parked) scrollDown(true); // why: forced, and force is what an explicit press of the button means here
+}
+
+// rememberHeld notices what the server did with the message instead of guessing it from the phase. The reply
+// carries the session's whole status, and a `queued` that went up is the fact that the message is being held
+// off the path: a tool call is owed an answer and appending it now would put it between that call and its
+// result (js/park). The phase would be the wrong thing to read twice over — a run can be live with nothing
+// owed, and a session asleep on a wait has no run at all — and this tab has no way to know the queue depth
+// any other way, because holding a message emits no event.
+//
+// It draws nothing itself beyond handing that status to the renderer, which owns both halves of the box
+// (js/session.js renderHeld): this module knows the words, and only the count is the server's.
+function rememberHeld(id, body, res, wasHeld) {
+  const status = res?.status;
+  // why the id check: the Enter was pressed on one session and the reply can land after a click moved the
+  // tab to another, and a message belongs to the conversation it was typed into.
+  if (!status || state.id !== id) return;
+  state.status = status;
+  if ((status.queued || 0) > wasHeld) {
+    state.held.push({ text: body.text || '', images: (body.images || []).length });
+  }
+  onStatus?.(status);
 }
 
 async function interruptSend() {
@@ -177,6 +201,9 @@ async function interruptSend() {
   clearDraft();
   const parked = isParked(); // why: the bolt aborts a generation; it does not get to move the reader
   if (!parked) markPinned();
+  // /interrupt answers `{ok}` and nothing else, so this tab learns nothing here about where the message
+  // went: unlike a send there is no status to take a held count from, and the held box (js/session.js
+  // renderHeld) has to wait for the next status of the session to notice this message at all.
   await call('/interrupt', body);
   if (!parked) scrollDown(true);
 }
@@ -186,7 +213,15 @@ async function stop() {
   await call('/stop', {});
 }
 
-export function wireComposer() {
+// onStatus is handed in rather than imported. This module already sits on the receiving end of an import
+// from js/session.js (which owns syncComposer), and a composer that imported back would close the project's
+// first module cycle just to reach one renderer — app.js has both of them in scope already and can hand the
+// function over. It exists because the reply to a send is the freshest status this tab ever gets at the
+// moment it most needs one: see rememberHeld.
+let onStatus = null;
+
+export function wireComposer(hooks = {}) {
+  onStatus = hooks.onStatus || null;
   placeholderOnSends = input().placeholder; // capture the HTML's copy before the first syncComposer rewrites it
   $('#btn-send').onclick = send;
   $('#btn-interrupt').onclick = interruptSend;

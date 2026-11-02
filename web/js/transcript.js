@@ -845,10 +845,14 @@ export function toolCard(callId, label, cls) {
     setLabel(text) {
       lbl.textContent = text;
     },
-    setBadge(text, cls2) {
+    setBadge(text, cls2, title) {
       if (done) return;
       badge.textContent = text;
       badge.className = cls2 || '';
+      // why it travels with the call rather than being set once at construction: this badge can be the only
+      // thing a reader has for hours — a call parked on a wait says so in one word, and the sentence behind
+      // that word is not guessable from it.
+      badge.title = title || '';
     },
     // finished binds a card to the entry that answered the call. The badge becomes that entry's outcome
     // (ms and isError, neither of which the assistant entry has) and the link becomes the way to read the

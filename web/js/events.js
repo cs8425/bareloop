@@ -152,7 +152,12 @@ function onToolProgress(d, isResult) {
   // the call ended, so the badge comes from here; the entry's own event binds the card to it and wins,
   // because it carries the milliseconds the tool itself measured.
   if (isResult) {
-    if (d.status === 'error') card.setBadge('error', 'state-error');
+    // A parked handover arrives as a tool_result and carries an `ms`, so without this branch the card comes
+    // up “12 ms ✓” — the badge of a call that finished quickly, on the one call in this product that has not
+    // finished at all and may not for another six hours. The tooltip is the server's own sentence about the
+    // handover, so the card cannot disagree with what the daemon promised.
+    if (d.status === 'parked') card.setBadge('asleep', 'state-parked', d.result || 'this wait is scheduled and the loop is not held open for it');
+    else if (d.status === 'error') card.setBadge('error', 'state-error');
     else if (d.ms) card.setBadge(`${d.ms} ms`, 'state-ok');
   }
   attach(card, d.entryId);

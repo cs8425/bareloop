@@ -821,6 +821,11 @@ export async function selectSession(id) {
   logEl().textContent = '';
   resetScroll();
   state.entries.clear();
+  // why here and not in refresh(): this mirror is this tab's memory of what *it* sent, and it survives a
+  // re-read of the same session (a refresh is caused by events, including the ones that do not touch the
+  // queue). Changing session is the only thing that makes those copies somebody else's. The count that
+  // trims it belongs to the session being loaded, which is why it goes empty with the entries.
+  state.held = [];
   state.tools.clear();
   state.toolResults.clear();
   state.streams.clear();
@@ -842,6 +847,25 @@ export function renderStatus(st) {
   // while a run is live. One owner for that decision (composer.js), because the glyph and the Enter key
   // have to agree - Enter interrupts mid-run, so a send arrow sitting there would be a lie.
   syncComposer(st.phase === 'running');
+  // And the one fact `running` cannot carry: that this session is asleep on a tool call the daemon owns the
+  // wake-up for (js/park). It is shown as the moment the wait is due, never as a countdown — nothing
+  // re-renders while a session is asleep, and a figure that goes stale next to a promise is a lie about the
+  // promise. The title is where the two things a reader might act on live: that a restart does not lose the
+  // wait, and that it does lose anything sent while waiting.
+  const wake = $('#wake');
+  const due = st.wakeAt ? new Date(st.wakeAt) : null;
+  if (due && !Number.isNaN(due.getTime())) {
+    wake.textContent = `asleep → ${due.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    wake.title =
+      `A tool call is waiting until ${due.toLocaleString()}.\n` +
+      'The loop is not held open for it: the daemon starts the run that answers it a few seconds before that moment.\n' +
+      'Restarting the daemon keeps the wait — it is recomputed from the log — but a message sent while it waits lives in memory, and a restart drops it.';
+    wake.classList.remove('hidden');
+  } else {
+    wake.textContent = '';
+    wake.title = '';
+    wake.classList.add('hidden');
+  }
   const servers = st.servers || [];
   const failed = servers.filter((s) => s.error || !s.connected);
   const tools = servers.reduce((n, s) => n + (s.tools || 0), 0);
@@ -875,6 +899,11 @@ export function renderStatus(st) {
         : `– / ${fmtN(nctx)} (no measurement${st.summary ? ' since the last compaction' : ' yet'})${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
       : `${fmtN(used)} tokens · n_ctx unknown: set it in Settings (the server reported no window)`;
   $('#session-name').value = st.name || st.session || '';
+  // The queue this status reports is drawn here rather than where the queue changes hands, because a queue
+  // that is being held does not change hands and says nothing at all: `Send` takes the message into memory
+  // and emits no event, and the only thing that ever mentions it is the next status. This is also how the
+  // box learns a held message has finally joined the log — the same status that reports `queued: 0`.
+  renderPending();
 }
 
 // renderPending shows queued inputs: they are entries already in the log, so the list is a promise
@@ -891,21 +920,88 @@ export function renderStatus(st) {
 // putting them all in the DOM is how the queue once took the transcript to 0 px of its own.
 const PENDING_SHOWN = 8;
 
+// HELD_SHOWN is smaller than PENDING_SHOWN because those are ids nobody reads and these are sentences
+// somebody does, and this box shares its column with the transcript it must not crowd out (app.css).
+const HELD_SHOWN = 4;
+
 export function renderPending() {
   const box = $('#pending');
   const list = $('#pending-list');
   const badge = $('#pending-badge');
   list.textContent = '';
   if (!state.pending.length) {
-    box.classList.add('hidden');
     badge.classList.add('hidden');
-    return;
+  } else {
+    badge.classList.remove('hidden');
+    badge.textContent = `pending: ${state.pending.length}`;
+    for (const id of state.pending.slice(0, PENDING_SHOWN)) list.appendChild(el('li', '', id));
+    if (state.pending.length > PENDING_SHOWN) {
+      list.appendChild(el('li', 'more', `+ ${fmtN(state.pending.length - PENDING_SHOWN)} more`));
+    }
   }
-  box.classList.remove('hidden');
+  const held = renderHeld();
+  // One box, two reasons to be open: something on the path waiting to be answered, or something off the
+  // path waiting to be appended.
+  box.classList.toggle('hidden', !state.pending.length && !held);
+}
+
+// renderHeld draws the messages the daemon is holding off the path and returns how many it is holding.
+//
+// It needs two sources because neither knows the whole story. The count is the server's (`status.queued`),
+// the only figure that also covers a message another window sent; the text is this tab's (`state.held`),
+// which the server never stores where a client could read it. What reconciles them is that the queue is
+// FIFO — park.go appends held messages to the path in the order they arrived — so when the count drops, the
+// ones that left are the oldest, and trimming the head of the mirror is arithmetic rather than a guess.
+// Where the count is larger than the mirror, the difference is counted out loud and never invented: this
+// tab cannot know words it never sent. Measured both ways: three sends from this tab drew three rows, and
+// the same three after a reload drew none and one line reading "+ 3 more".
+//
+// When this runs is not "whenever the daemon's number moves". The page is event-driven (the poll in
+// transport.js only exists while the websocket is down), and a sleeping or parked wait emits nothing while
+// it sleeps. Measured: a send from a second client left this box on `held: 2` for the whole of a parked
+// wait while the daemon was already counting 3, and the number came right by itself when the hold ended.
+// A send from *this* tab does not have to wait for an event at all — composer.js takes the count off the
+// POST's own answer (see rememberHeld) — which is why the message you just sent is in this box at once.
+//
+// The mirror is not cleared by the `entry` event that finally shows the message, because nothing in that
+// event says which queued message it was, and a row drawn twice is a message that looks like it happened
+// twice. It is cleared by the count reaching zero, which is the same fact with less ambiguity — at that
+// point the entries have arrived, and one of the two renders is a frame's overlap rather than a claim.
+// Measured as a stop: a parked run held three of them, and stopping it wrote all three (once each, oldest
+// first) before the answer that reads them.
+function renderHeld() {
+  const badge = $('#held-badge');
+  const list = $('#held-list');
+  const queued = state.status?.queued || 0;
+  list.textContent = '';
+  if (!queued) {
+    state.held = [];
+    badge.classList.add('hidden');
+    badge.title = '';
+    return 0;
+  }
+  if (queued < state.held.length) state.held = state.held.slice(state.held.length - queued);
   badge.classList.remove('hidden');
-  badge.textContent = `pending: ${state.pending.length}`;
-  for (const id of state.pending.slice(0, PENDING_SHOWN)) list.appendChild(el('li', '', id));
-  if (state.pending.length > PENDING_SHOWN) {
-    list.appendChild(el('li', 'more', `+ ${fmtN(state.pending.length - PENDING_SHOWN)} more`));
+  badge.textContent = `held: ${fmtN(queued)}`;
+  badge.title = 'Not in the log yet. A tool call is still owed its answer and this message would land between that call and its result, so the daemon keeps it in memory and appends it once the answer is written — a restart drops these.';
+  const unknown = Math.max(0, queued - state.held.length);
+  for (const m of state.held.slice(0, HELD_SHOWN)) {
+    const words = m.text.replace(/\s+/g, ' ').trim();
+    const li = el('li', 'held-text', words || `(${m.images} image${m.images === 1 ? '' : 's'})`);
+    li.title = [words, m.images ? `${m.images} image(s)` : ''].filter(Boolean).join(' + ');
+    list.appendChild(li);
   }
+  const hidden = state.held.length > HELD_SHOWN ? state.held.length - HELD_SHOWN : 0;
+  if (hidden || unknown) {
+    const li = el('li', 'more', `+ ${fmtN(hidden + unknown)} more`);
+    // why a line and not a blank: the count is a fact even where the words are not, and "bareloopd is
+    // holding 3" is the answer to the question the box exists for. Only the words are missing, and this
+    // says which and how many rather than leaving the number unexplained.
+    li.title = unknown
+      ? `${fmtN(unknown)} of them did not come from this tab — another window, or sent before this page was loaded — so the words are not here.`
+      : '';
+    list.appendChild(li);
+  }
+  list.appendChild(el('li', 'why', 'not in the log yet · a restart drops these'));
+  return queued;
 }
