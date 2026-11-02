@@ -130,6 +130,17 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 		cfg.Compact = m.defaults.Compact
 	}
 	cfg.Compact = cfg.Compact.Normalise()
+	// The daemon's own tools are inherited as a list, not per name: the list IS the policy, and an
+	// empty list in a create body is the answer "none of them", which is kept rather than replaced by
+	// the daemon's defaults. A session that says nothing gets whatever the daemon decided to offer.
+	if cfg.BuiltinTools == nil {
+		cfg.BuiltinTools = m.defaults.BuiltinTools
+	}
+	// And the timezone, for the same reason as the price tag above: it is a daemon-wide answer about
+	// the machine the daemon runs on, and writing it once in config.json beats writing it per session.
+	if strings.TrimSpace(cfg.Timezone) == "" {
+		cfg.Timezone = m.defaults.Timezone
+	}
 	return cfg
 }
 
@@ -321,6 +332,12 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 	// read — is refused before data/<id>/config.json exists, so whoever typed the path hears about it now
 	// rather than as a failed request an hour later.
 	if err := validateTLS(cfg); err != nil {
+		return nil, err
+	}
+	// And the same rule one more time for the daemon's own tools: "a name that is not a builtin" and
+	// "a zone this machine cannot resolve" are typos in a body the caller still has, and Create is the
+	// last place that can say so without costing the session a turn.
+	if err := validateBuiltin(cfg); err != nil {
 		return nil, err
 	}
 	// The directory is the identity, so an existing directory means the id is taken - even when no log

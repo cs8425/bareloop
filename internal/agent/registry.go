@@ -13,20 +13,27 @@ import (
 	"sync"
 	"time"
 
+	"bareloop/internal/builtin"
 	"bareloop/internal/llm"
 	"bareloop/internal/mcp"
 )
 
 // registry is a session's MCP server pool plus the name mapping the model sees.
 //
-// There are no built-in tools: everything the model may call comes from an MCP server. A tool is
-// published under its own name by default — no namespace, because tool names are already written to
-// be read — or under "<toolPrefix>_<tool>" when the session asks for one, sanitised to the character
-// set OpenAI-style function calling accepts and mapped back to (server, tool). When two tools want
-// the same name the later one is published as "<server>_<tool>" and the collision is logged; nothing
-// already published is ever renamed. That stability is the point: the `tools` array the chat template
-// renders must not change under the KV prefix cache, and old transcripts quote the names they were
-// written with (spec §5.3).
+// Everything the model may call comes from an MCP server, except the handful of tools this daemon
+// answers itself (package builtin — the loop's own clock). Those are published through this same
+// registry: the same name stability, the same per-session switches, the same drawer, because two
+// places answering "what may the model call" is two answers. Two things differ: a builtin is off
+// until a session names it in Config.BuiltinTools, and a builtin is never renamed to make room —
+// its name is what the documentation quotes and what a transcript already quotes.
+//
+// A tool is published under its own name by default — no namespace, because tool names are already
+// written to be read — or under "<toolPrefix>_<tool>" when the session asks for one, sanitised to
+// the character set OpenAI-style function calling accepts and mapped back to (server, tool). When
+// two tools want the same name the later one is published as "<server>_<tool>" and the collision is
+// logged; nothing already published is ever renamed. That stability is the point: the `tools` array
+// the chat template renders must not change under the KV prefix cache, and old transcripts quote the
+// names they were written with (spec §5.3).
 //
 // Which tools are offered at all is per-session policy (mcp.Config.Disabled, DisabledTools,
 // ToolPrefix). The registry caches every server's last tools/list result, so changing the policy
@@ -56,6 +63,20 @@ type registry struct {
 	emit   func(Event)
 	logf   func(string, ...any)
 	notify bool
+	// builtinOn is this session's on-list for the tools the daemon answers itself: they arrive with
+	// the rest of the policy (SetPolicy) rather than being read from the session at call time, so
+	// that "which builtins is this run publishing?" has the same single answer the MCP tools have —
+	// the array published at the start of the run.
+	builtinOn map[string]bool
+	// builtinTZ is the timezone the time tools answer in when a call does not name one; "" is UTC.
+	builtinTZ string
+	// builtinPublished is the subset of builtinOn that actually got its own name in the array being
+	// published. It is what makes a published builtin's name unclaimable by a later tools/list, so an
+	// MCP server that grows a tool called wait cannot evict it out of the array a run is using.
+	builtinPublished map[string]bool
+	// builtinBlocked is which builtins were last reported as unpublished because of a name
+	// collision — the bookkeeping that lets the warning be said once instead of on every re-filter.
+	builtinBlocked map[string]bool
 	// askElicit forwards a server input request to the user; set by the owning Session.
 	askElicit func(ctx context.Context, req mcp.ElicitRequest) (mcp.ElicitResponse, error)
 }
@@ -63,6 +84,10 @@ type registry struct {
 type toolRef struct {
 	Server string
 	Tool   string
+	// Builtin marks a tool this daemon answers itself, which is how call() knows not to go looking
+	// for an MCP client. It is a flag and not a name test: a server called "builtin" is refused at
+	// the API (validateBuiltin), and a flag cannot be confused by anything written later.
+	Builtin bool
 }
 
 // toolPolicy is one server's tool switches as configured by this session.
@@ -121,6 +146,12 @@ func newRegistry(emit func(Event), logf func(string, ...any), notify bool) *regi
 		logf:         logf,
 		notify:       notify,
 	}
+	// Every builtin is off until a session says otherwise, which is the zero value of an empty set.
+	// The maps still have to exist: a switched-off builtin still shows in the tools drawer, and the
+	// blocked-name bookkeeping writes as it publishes.
+	r.builtinOn = map[string]bool{}
+	r.builtinPublished = map[string]bool{}
+	r.builtinBlocked = map[string]bool{}
 	if logf == nil {
 		r.logf = func(string, ...any) {}
 	}
@@ -275,6 +306,40 @@ func (r *registry) collisionNote(server, raw, got, want string) {
 	}
 }
 
+// noteBuiltinBlocked is what a name collision costs when it is a builtin that lost: not a rename
+// (a builtin's name is its identity, and moving it would rewrite what a transcript means), so the
+// only honest report is who holds the name and which switch would free it.
+//
+// It is said once per change of state, for the same reason collisionNote is logged when a name is
+// decided rather than on every re-filter: a warning that repeats while nobody has changed anything
+// stops being a warning.
+func (r *registry) noteBuiltinBlocked(name string, owner toolRef) {
+	if r.builtinBlocked[name] {
+		return
+	}
+	r.builtinBlocked[name] = true
+	who := "another tool"
+	if owner.Tool != "" {
+		who = "the tool " + owner.Server + "/" + owner.Tool
+	}
+	msg := fmt.Sprintf("builtin tool %s is not published: %s already owns that name; the name is not reclaimed while anything in this process has used it, so set mcp[].toolPrefix on that server and restart bareloopd to make room", name, who)
+	r.logf("%s", msg)
+	if r.emit != nil {
+		r.emit(Event{Type: EvtLog, Level: "warn", Info: msg})
+	}
+}
+
+// noteBuiltinsRestored closes the book on a builtin that was blocked and is not any more, so the log
+// does not leave a warning standing over a tool that works again.
+func (r *registry) noteBuiltinsRestored() {
+	for name := range r.builtinBlocked {
+		if r.builtinPublished[name] {
+			delete(r.builtinBlocked, name)
+			r.logf("builtin tool %s is published again now that nothing else owns the name", name)
+		}
+	}
+}
+
 // rebuildLocked republishes the model-visible tool array from the cached tools/list results and
 // the policy in force. Filtering happens here and nowhere else: a tool that is not in defs is
 // invisible to the model and unresolvable by name, so no separate permission check is needed.
@@ -288,6 +353,15 @@ func (r *registry) rebuildLocked() []llm.Tool {
 
 	byName := map[string]toolRef{}
 	defs := make([]llm.Tool, 0, 64)
+	// A builtin that has been switched off releases the name it held, and that happens before any
+	// MCP tool is published, because this is the moment the name becomes free: a tool that is off
+	// must not reserve anything, while a builtin that is still on keeps its place in the array so a
+	// server that grows a tool called wait cannot move the ground under a run in flight.
+	for name := range r.builtinPublished {
+		if !r.builtinOn[name] {
+			delete(r.builtinPublished, name)
+		}
+	}
 	for _, name := range servers {
 		tools := append([]mcp.Tool(nil), r.last[name]...)
 		sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
@@ -310,6 +384,31 @@ func (r *registry) rebuildLocked() []llm.Tool {
 			r.status[name] = st
 		}
 	}
+	// The daemon's own tools are published last and are never renamed: an MCP tool that already
+	// owns `wait` keeps it (that is what toolPrefix is for) rather than being moved out of the way
+	// of a builtin. A builtin that cannot have its own name is not published at all, and the log says
+	// who has the name and what to do about it. claimableLocked also refuses a name a renamed tool left
+	// behind, which is why a prefix added mid-life does not hand the builtin the name it just freed:
+	// the transcript full of that name is still sitting in front of the model, and two tools answering
+	// to one name is a misroute rather than a namespace.
+	for _, t := range builtin.All() {
+		if !r.builtinOn[t.Name] {
+			// Off is off: not in defs, so invisible to the model and unresolvable by name, like any
+			// other tool this session switched off.
+			continue
+		}
+		ref := toolRef{Server: BuiltinServer, Tool: t.Name, Builtin: true}
+		if !r.claimableLocked(t.Name, ref) {
+			r.noteBuiltinBlocked(t.Name, byName[t.Name])
+			continue
+		}
+		r.builtinPublished[t.Name] = true
+		byName[t.Name] = ref
+		defs = append(defs, llm.Tool{
+			Name: t.Name, Description: clip(t.Description, 4000), Parameters: normalizeSchema(t.InputSchema),
+		})
+	}
+	r.noteBuiltinsRestored()
 	// Renamed-away names keep resolving (they belong to a tool that is still published), so an
 	// old transcript's tool_calls and a model imitating an old name both still mean one thing.
 	for name, ref := range r.retired {
@@ -395,6 +494,12 @@ func (r *registry) freeNameLocked(want string, ref toolRef) string {
 // before a rename, in which case the alias is consumed by taking it back — so a prefix that was
 // changed and then changed back puts the tool under the name a transcript already uses.
 func (r *registry) claimableLocked(name string, ref toolRef) bool {
+	// A name a published builtin holds is not free for anyone else: an MCP server that grows a tool
+	// called wait at the next tools/list must not evict it out of the array this run is already
+	// sending, which would change both the KV prefix and what the model's call means.
+	if r.builtinPublished[name] && !ref.Builtin {
+		return false
+	}
 	if owner, retired := r.retired[name]; retired {
 		if owner == ref {
 			delete(r.retired, name)
@@ -442,25 +547,54 @@ func (r *registry) policyOfLocked(server string) toolPolicy {
 // before connect too, so a server's tools are filtered from the moment they are first listed.
 // It reports whether the published array changed, which is what a caller needs to know to decide
 // whether the prompt prefix just moved.
-func (r *registry) SetPolicy(cfgs []mcp.Config) bool {
+//
+// It takes the whole Config rather than the MCP list, because that is where the policy lives: the
+// per-server switches, the daemon's own tools, and the timezone the time tools answer in. One
+// argument, one answer to "what is published now".
+func (r *registry) SetPolicy(cfg Config) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	before := make([]llm.Tool, len(r.defs))
 	copy(before, r.defs)
-	r.policy = policiesOf(cfgs)
+	r.policy = policiesOf(cfg.MCP)
+	r.setBuiltinLocked(cfg.BuiltinTools, cfg.Timezone)
 	r.rebuildLocked()
 	return !sameToolNames(before, r.defs)
 }
 
-// PolicyPending reports whether cfgs say something different from the policy the registry is
+// setBuiltinLocked installs the builtin policy from config. An empty or absent list means every
+// one of them is off, which is the point: a builtin is a handle on the loop, and a builtin added in
+// a later version must not appear in a session that never asked for it.
+//
+// A name that does not exist is reported — a typo that does nothing silently is the worst kind —
+// but only when the list changed, so a hand-written config.json does not say it again on every
+// tools/list.
+func (r *registry) setBuiltinLocked(on []string, tz string) {
+	next := builtinEnabled(on)
+	if sameBuiltinSet(r.builtinOn, next) {
+		r.builtinTZ = tz
+		return
+	}
+	for _, name := range unknownBuiltinNames(on) {
+		msg := fmt.Sprintf(`builtinTools asks for %q, which is not a builtin tool; the ones there are: %s`, name, strings.Join(builtin.Names(), ", "))
+		r.logf("%s", msg)
+		if r.emit != nil {
+			r.emit(Event{Type: EvtLog, Level: "warn", Info: msg})
+		}
+	}
+	r.builtinOn, r.builtinTZ = next, tz
+}
+
+// PolicyPending reports whether cfg says something different from the policy the registry is
 // publishing right now — a tool change that is written to config.json but has not taken effect,
 // because a run is carrying the previous array. Deriving it from the two policies instead of
 // from a flag is what makes "did the change land?" a question with one answer.
-func (r *registry) PolicyPending(cfgs []mcp.Config) bool {
-	next := policiesOf(cfgs)
+func (r *registry) PolicyPending(cfg Config) bool {
+	next := policiesOf(cfg.MCP)
+	on := builtinEnabled(cfg.BuiltinTools)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return !samePolicies(r.policy, next)
+	return !samePolicies(r.policy, next) || !sameBuiltinSet(r.builtinOn, on)
 }
 
 // policiesOf turns MCP configs into the registry's own policy shape. An empty toolPrefix means the
@@ -577,6 +711,9 @@ func (r *registry) call(ctx context.Context, name string, args json.RawMessage, 
 	if !ok {
 		return nil, toolRef{}, fmt.Errorf("unknown tool %q", name)
 	}
+	if ref.Builtin {
+		return r.callBuiltin(ctx, ref, args)
+	}
 	r.mu.RLock()
 	cli := r.servers[ref.Server]
 	r.mu.RUnlock()
@@ -585,6 +722,33 @@ func (r *registry) call(ctx context.Context, name string, args json.RawMessage, 
 	}
 	res, err := cli.CallTool(ctx, ref.Tool, args, on)
 	return res, ref, err
+}
+
+// callBuiltin answers one of the daemon's own tools. The result is shaped like an MCP one, because
+// the loop records the two identically — one text, one error flag, one entry — and a tool answered
+// closer to home should not cost a second code path in runTools. `on` is not used: there is no
+// transport here to report progress from, and a tool that wants to be read while it works has a log.
+func (r *registry) callBuiltin(ctx context.Context, ref toolRef, args json.RawMessage) (*mcp.CallResult, toolRef, error) {
+	tool, ok := builtin.Get(ref.Tool)
+	if !ok {
+		// Only a hand-written config can get this far (the API refuses a name that does not exist),
+		// and what it means is that a newer version of the daemon no longer has this builtin.
+		return nil, ref, fmt.Errorf("builtin tool %q does not exist in this version of bareloopd", ref.Tool)
+	}
+	res := tool.Run(ctx, r.builtinInput(), args)
+	return &mcp.CallResult{
+		Content: []mcp.ContentBlock{{Type: "text", Text: res.Text}},
+		IsError: res.IsError,
+		Rounds:  1,
+	}, ref, nil
+}
+
+// builtinInput is what a builtin is told about the session that called it: the timezone to answer
+// in, and the log to say "I am parking for five minutes" in.
+func (r *registry) builtinInput() builtin.Input {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return builtin.Input{DefaultTimezone: r.builtinTZ, Logf: r.logf}
 }
 
 // counts reports (published now, enabled by policy, offered in total) for the status line. The
@@ -602,14 +766,23 @@ func (r *registry) counts() (published, enabled, total int) {
 			}
 		}
 	}
+	// The daemon's own tools count like any other, because the status line answers "how many tools
+	// does a request carry" and does not care who is going to answer them.
+	for _, t := range builtin.All() {
+		total++
+		if r.builtinOn[t.Name] {
+			enabled++
+		}
+	}
 	return published, enabled, total
 }
 
 // view reports every tool this session's servers have ever listed, published or not — the tools
 // drawer's data. It reads the cache, so it answers while a run is in flight and never asks a
 // server anything (a tool of an offline server is still worth showing: that is when deciding
-// whether to keep it is free).
-func (r *registry) view(cfgs []mcp.Config) *ToolsView {
+// whether to keep it is free). The daemon's own tools are the last group, whatever the servers did.
+func (r *registry) view(cfg Config) *ToolsView {
+	cfgs := cfg.MCP
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -699,7 +872,70 @@ func (r *registry) view(cfgs []mcp.Config) *ToolsView {
 		out.Total += len(tools)
 		out.Visible += ts.Enabled
 	}
+	built := r.builtinBlockLocked()
+	out.Servers = append(out.Servers, built)
+	out.Total += built.Known
+	out.Visible += built.Enabled
 	return out
+}
+
+// builtinBlockLocked is the drawer's group for the tools this daemon answers itself. The whole set
+// is shown whether or not this session switched any of it on, for the same reason a server's
+// switched-off tools are shown: a switch nobody can find is a switch nobody uses, and "off by
+// default" is worth seeing once.
+func (r *registry) builtinBlockLocked() ToolsServer {
+	ts := ToolsServer{
+		Name:      BuiltinServer,
+		Transport: BuiltinServer,
+		Builtin:   true,
+		// Connected is the drawer's word for "this group works right now", and for a builtin that
+		// needs nothing to connect to it is always true — which is also why it is not worth a new
+		// field the UI would have to guess the meaning of.
+		Connected: true,
+	}
+	for _, t := range builtin.All() {
+		on := r.builtinOn[t.Name]
+		ts.Tools = append(ts.Tools, ToolRow{
+			Name:        t.Name,
+			RawName:     t.Name,
+			Description: clip(t.Description, 240),
+			Schema:      normalizeSchema(t.InputSchema),
+			Enabled:     on,
+			EstTokens:   estToolTokens(t.Name, t.Description, t.InputSchema),
+		})
+		ts.Known++
+		if on {
+			ts.Enabled++
+		}
+	}
+	if blocked := blockedBuiltinNames(r.builtinBlocked); blocked != "" {
+		// The group is switched on and still not published, which the drawer has to say out loud:
+		// a row that reads "on" while the model was never offered the tool is the one lie this
+		// panel cannot tell. The verb agrees with the list and the advice avoids "it/them", because the
+		// sentence is read out loud to a person and may name more than one tool.
+		verb := " is"
+		if strings.Contains(blocked, ", ") {
+			verb = " are"
+		}
+		ts.Note = blocked + verb + " switched on but not published: an MCP tool already owns that name."
+		// The advice is the one thing that actually works: a name this registry has ever published is
+		// not handed over mid-process, because the transcript that quotes it would change what it means.
+		ts.Note += " Set that server's toolPrefix and restart bareloopd to free it."
+	}
+	return ts
+}
+
+// blockedBuiltinNames joins the names last reported as blocked, or "" when nothing is.
+func blockedBuiltinNames(blocked map[string]bool) string {
+	var names []string
+	for name := range blocked {
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // statusSnapshot reports the servers for the UI.

@@ -29,7 +29,7 @@ func toolRegistryLogged(logf func(string, ...any)) *registry {
 	}
 	r.status["beta"] = ServerStatus{Name: "beta", Connected: true}
 	r.status["alpha"] = ServerStatus{Name: "alpha", Connected: true}
-	r.SetPolicy([]mcp.Config{{Name: "beta"}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha"}}})
 	return r
 }
 
@@ -65,7 +65,7 @@ func TestPublishedNamesHaveNoPrefix(t *testing.T) {
 	r := newRegistry(nil, nil, false)
 	r.last["files"] = []mcp.Tool{{Name: "fs_read"}, {Name: "fs_write"}}
 	r.status["files"] = ServerStatus{Name: "files", Connected: true}
-	r.SetPolicy([]mcp.Config{{Name: "files"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "files"}}})
 	if got := visibleNames(r); !equalNames(got, []string{"fs_read", "fs_write"}) {
 		t.Fatalf("no prefix configured: got %v, want [fs_read fs_write]", got)
 	}
@@ -80,7 +80,7 @@ func TestToolPolicyFiltersPublished(t *testing.T) {
 		t.Fatalf("default policy: got %v, want %v", before, defaultNames)
 	}
 
-	r.SetPolicy([]mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}}, {Name: "alpha"}}})
 	got := visibleNames(r)
 	if !equalNames(got, []string{"fs_read", "search", "beta_fs_read"}) {
 		t.Fatalf("after switching fs_write off: got %v", got)
@@ -99,7 +99,7 @@ func TestToolPolicyGlob(t *testing.T) {
 	r := newRegistry(nil, nil, false)
 	r.last["s"] = []mcp.Tool{{Name: "fs_read"}, {Name: "fs_write"}, {Name: "patch"}}
 	r.status["s"] = ServerStatus{Name: "s", Connected: true}
-	r.SetPolicy([]mcp.Config{{Name: "s", DisabledTools: []string{"fs_*"}}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "s", DisabledTools: []string{"fs_*"}}}})
 	if got := visibleNames(r); !equalNames(got, []string{"patch"}) {
 		t.Fatalf("glob: got %v, want [patch]", got)
 	}
@@ -110,11 +110,11 @@ func TestToolPolicyGlob(t *testing.T) {
 // prefix) byte-identical, and must put the tool back under the name old transcripts quote.
 func TestToolNamesAreStableAcrossToggles(t *testing.T) {
 	r := toolRegistry()
-	r.SetPolicy([]mcp.Config{{Name: "beta", DisabledTools: []string{"fs_read"}}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_read"}}, {Name: "alpha"}}})
 	if off := visibleNames(r); !equalNames(off, []string{"fs_read", "search", "fs_write"}) {
 		t.Fatalf("with beta/fs_read off: got %v", off)
 	}
-	r.SetPolicy([]mcp.Config{{Name: "beta"}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha"}}})
 	if got := visibleNames(r); !equalNames(got, defaultNames) {
 		t.Fatalf("after switching it back on: got %v (names must not drift)", got)
 	}
@@ -155,7 +155,7 @@ func TestCollidingToolIsPublishedByServerAndLogged(t *testing.T) {
 // old names.
 func TestToolPrefixRenamesAndKeepsAliases(t *testing.T) {
 	r := toolRegistry()
-	r.SetPolicy([]mcp.Config{{Name: "beta", ToolPrefix: "vb"}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta", ToolPrefix: "vb"}, {Name: "alpha"}}})
 	got := visibleNames(r)
 	if !equalNames(got, []string{"fs_read", "search", "vb_fs_read", "vb_fs_write"}) {
 		t.Fatalf("custom prefix: got %v (one underscore, no double underscore)", got)
@@ -167,7 +167,7 @@ func TestToolPrefixRenamesAndKeepsAliases(t *testing.T) {
 		t.Fatalf("renamed-away name must still resolve, got %v %v", ref, ok)
 	}
 	// Changing the prefix back must restore the original names, not mint "beta_fs_read_2".
-	r.SetPolicy([]mcp.Config{{Name: "beta"}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha"}}})
 	if !equalNames(visibleNames(r), defaultNames) {
 		t.Fatalf("prefix reverted: got %v, want %v", visibleNames(r), defaultNames)
 	}
@@ -181,7 +181,7 @@ func TestToolPrefixCollision(t *testing.T) {
 	r.last["two"] = []mcp.Tool{{Name: "read"}}
 	r.status["one"] = ServerStatus{Name: "one", Connected: true}
 	r.status["two"] = ServerStatus{Name: "two", Connected: true}
-	r.SetPolicy([]mcp.Config{{Name: "one", ToolPrefix: "x"}, {Name: "two", ToolPrefix: "x"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "one", ToolPrefix: "x"}, {Name: "two", ToolPrefix: "x"}}})
 	got := visibleNames(r)
 	if !equalNames(got, []string{"x_read", "two_read"}) {
 		t.Fatalf("collision: got %v, want [x_read two_read]", got)
@@ -196,20 +196,28 @@ func TestToolPrefixCollision(t *testing.T) {
 // has already finished.
 func TestPolicyPendingIsDerived(t *testing.T) {
 	r := toolRegistry()
-	cfg := []mcp.Config{{Name: "beta"}, {Name: "alpha"}}
+	cfg := Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha"}}}
 	if r.PolicyPending(cfg) {
 		t.Fatal("just applied: nothing may be pending")
 	}
-	if !r.PolicyPending([]mcp.Config{{Name: "beta", DisabledTools: []string{"fs_read"}}, {Name: "alpha"}}) {
+	if !r.PolicyPending(Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_read"}}, {Name: "alpha"}}}) {
 		t.Fatal("a tool switch that is not published yet must read as pending")
 	}
 	// Whitespace is not a change; a prefix that happens to equal the server name IS one, since it
 	// renames alpha's tools from fs_read to alpha_fs_read.
-	if r.PolicyPending([]mcp.Config{{Name: "beta"}, {Name: "alpha", ToolPrefix: "  "}}) {
+	if r.PolicyPending(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha", ToolPrefix: "  "}}}) {
 		t.Fatal("whitespace around an empty prefix must not read as pending")
 	}
-	if !r.PolicyPending([]mcp.Config{{Name: "beta"}, {Name: "alpha", ToolPrefix: "alpha"}}) {
+	if !r.PolicyPending(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha", ToolPrefix: "alpha"}}}) {
 		t.Fatal("a prefix equal to the server name renames tools, so it is a change")
+	}
+	// A builtin the config asks for is a pending change like any other tool, and a timezone with no
+	// tool switched on is not a change at all — nothing visible moves.
+	if !r.PolicyPending(Config{MCP: cfg.MCP, BuiltinTools: []string{"wait"}}) {
+		t.Fatal("a builtin that is not published yet must read as pending")
+	}
+	if r.PolicyPending(Config{MCP: cfg.MCP, Timezone: "Asia/Taipei"}) {
+		t.Fatal("a timezone alone changes no tool, so it may not read as pending")
 	}
 }
 
@@ -217,13 +225,15 @@ func TestPolicyPendingIsDerived(t *testing.T) {
 // servers offer and 7 is what this session leaves switched on.
 func TestCountsSeparatesPublishedFromOffered(t *testing.T) {
 	r := toolRegistry()
+	// total counts what the session could have: the four tools the two servers offered, plus the two
+	// builtins every session is offered and every session has to switch on by name.
 	published, enabled, total := r.counts()
-	if published != 4 || enabled != 4 || total != 4 {
+	if published != 4 || enabled != 4 || total != 6 {
 		t.Fatalf("no policy: got published=%d enabled=%d total=%d", published, enabled, total)
 	}
-	r.SetPolicy([]mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}}, {Name: "alpha"}})
+	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}}, {Name: "alpha"}}})
 	published, enabled, total = r.counts()
-	if published != 3 || enabled != 3 || total != 4 {
+	if published != 3 || enabled != 3 || total != 6 {
 		t.Fatalf("one off: got published=%d enabled=%d total=%d", published, enabled, total)
 	}
 }
@@ -233,17 +243,23 @@ func TestCountsSeparatesPublishedFromOffered(t *testing.T) {
 // that is what reading a name is not.
 func TestViewShowsDisabledToolsToo(t *testing.T) {
 	r := toolRegistry()
-	cfg := []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}, ToolPrefix: "vb"}, {Name: "alpha"}}
+	cfg := Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}, ToolPrefix: "vb"}, {Name: "alpha"}}}
 	r.SetPolicy(cfg)
 	v := r.view(cfg)
-	if v.Total != 4 || v.Visible != 3 {
+	if v.Total != 6 || v.Visible != 3 {
 		t.Fatalf("view counts: got visible=%d total=%d", v.Visible, v.Total)
 	}
-	if len(v.Servers) != 2 || v.Servers[0].Name != "alpha" {
+	if len(v.Servers) != 3 || v.Servers[0].Name != "alpha" {
 		t.Fatalf("servers: %+v", v.Servers)
 	}
 	if v.Servers[1].Prefix != "vb" || v.Servers[0].Prefix != "" {
 		t.Fatalf("prefixes: alpha=%q beta=%q, want \"\" and \"vb\"", v.Servers[0].Prefix, v.Servers[1].Prefix)
+	}
+	// The last group is the daemon's own two tools, listed and switched off: a session has to name
+	// the one it wants before it appears in a request.
+	built := v.Servers[2]
+	if !built.Builtin || built.Name != BuiltinServer || built.Enabled != 0 || built.Known != 2 {
+		t.Fatalf("builtins: %+v", built)
 	}
 	var found bool
 	for _, row := range v.Servers[1].Tools {
@@ -272,7 +288,7 @@ func TestViewShowsDisabledToolsToo(t *testing.T) {
 // so in the drawer, or the switch labelled beta_fs_read is a mystery.
 func TestViewExplainsARenamedTool(t *testing.T) {
 	r := toolRegistry()
-	v := r.view([]mcp.Config{{Name: "beta"}, {Name: "alpha"}})
+	v := r.view(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha"}}})
 	rows := map[string]ToolRow{}
 	for _, srv := range v.Servers {
 		for _, row := range srv.Tools {

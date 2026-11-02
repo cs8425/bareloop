@@ -44,6 +44,9 @@
       "temperature": 0.2
     },
 
+    "builtinTools": [],
+    "timezone": "",
+
     "mcp": [
       {
         "name": "stub",

@@ -160,7 +160,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	s.reg.askElicit = s.askElicit
 	// Install the tool policy before any server is listed, so tools are filtered from the first
 	// tools/list rather than published for one turn and taken back.
-	s.reg.SetPolicy(cfg.MCP)
+	s.reg.SetPolicy(cfg)
 	s.sentTip = tipOfPending(st)
 	// The configured window is the starting point only: before the session sends anything the
 	// server is asked once and the effective value is re-derived (nctx.go). Nothing probed is ever
@@ -371,7 +371,7 @@ func (s *Session) Status() *Status {
 
 	_, _, cmp := s.effective()
 	published, enabled, total := s.reg.counts()
-	pendingTools := s.reg.PolicyPending(cfg.MCP)
+	pendingTools := s.reg.PolicyPending(cfg)
 	if !known {
 		// Fall back to the last real usage on the path (never an estimate), stopping at the active
 		// compaction entry: usage from before it describes a payload that no longer exists (1.5),
@@ -725,6 +725,16 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		// An empty list is a change ("remove every server"); an absent key is not.
 		patch.MCP = old.MCP
 	}
+	// Same rule as the fields above: an absent timezone is not a change, and going back to UTC is sent
+	// as "UTC" rather than as an empty string, which means unchanged here as it does for the mode above.
+	if patch.Timezone == "" {
+		patch.Timezone = old.Timezone
+	}
+	// An absent builtinTools key is not a change, while an empty list is a decision ("switch all of
+	// them off") — the same line the MCP list draws just above between "did not say" and "said none".
+	if patch.BuiltinTools == nil {
+		patch.BuiltinTools = old.BuiltinTools
+	}
 	// compact is the one block that replaces instead of merging field by field, and Params is why: it is a
 	// plain struct, so an absent key and a zero key are the same byte to the decoder, while 0 is a legal
 	// answer for two of its fields (minKeptMessages, minKeptUserTurns — "no floor"). A field-by-field merge
@@ -748,6 +758,13 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		s.mu.Unlock()
 		return err
 	}
+	// The same rule for the daemon's own tools: the merged config is what would be written, so a
+	// builtinTools name that does not exist or a timezone that cannot be resolved is refused here and
+	// not discovered as a failed tool call an hour from now.
+	if err := validateBuiltin(patch); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	reconnectMCP := !sameMCP(old.MCP, patch.MCP)
 	llmChanged := !old.LLM.Same(patch.LLM)
 	s.cfg = patch
@@ -756,11 +773,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if err := s.mgr.SaveConfig(patch); err != nil {
 		return err
 	}
-	// Tool policy (which tools are on, under which prefix) travels with the MCP list but is not a
-	// connection change, so it is installed whatever else changed: before a reconnect, so a
-	// re-listed server is filtered from the first tools/list, or right here if the servers were
-	// left alone. UpdateConfig only runs while idle, so there is no run snapshot to wait for.
-	if s.reg.SetPolicy(patch.MCP) {
+	// Tool policy (which tools are on, under which prefix, and which of the daemon's own tools the
+	// session asked for) travels with the config but is not a connection change, so it is installed
+	// whatever else changed: before a reconnect, so a re-listed server is filtered from the first
+	// tools/list, or right here if the servers were left alone. UpdateConfig only runs while idle, so
+	// there is no run snapshot to wait for.
+	if s.reg.SetPolicy(patch) {
 		s.emitTools()
 	}
 	if llmChanged {
@@ -818,18 +836,18 @@ func sameMCP(a, b []mcp.Config) bool {
 
 // ---------------------------------------------------------------- tool policy
 
-// Tools reports the tools drawer: every tool this session's MCP servers have listed, what each is
-// estimated to cost, how often the transcript used it, and whether a change is still waiting for
-// the end of the run. It works in any phase — a run in flight is exactly when you want to know
-// which tool is eating the context — and it never asks a server anything, because the registry
-// caches the last tools/list result of every server it knows about.
+// Tools reports the tools drawer: every tool this session's MCP servers have listed and every tool
+// the daemon answers itself, what each is estimated to cost, how often the transcript used it, and
+// whether a change is still waiting for the end of the run. It works in any phase — a run in flight
+// is exactly when you want to know which tool is eating the context — and it never asks a server
+// anything, because the registry caches the last tools/list result of every server it knows about.
 func (s *Session) Tools() *ToolsView {
 	cfg := s.Config()
-	view := s.reg.view(cfg.MCP)
+	view := s.reg.view(cfg)
 	view.Session = s.ID
 	view.UpdatedAt = time.Now().UTC()
 
-	view.PendingChanges = s.reg.PolicyPending(cfg.MCP)
+	view.PendingChanges = s.reg.PolicyPending(cfg)
 	s.mu.Lock()
 	view.ContextUsed = s.ctxUsed
 	s.mu.Unlock()
@@ -860,8 +878,8 @@ func (s *Session) Tools() *ToolsView {
 	return view
 }
 
-// SetToolPolicy is the drawer's write path: it switches tools of one MCP server off or on for this
-// session and/or changes the prefix that server's tools are published under — both per session,
+// SetToolPolicy is the drawer's write path: it switches the tools of one group off or on for this
+// session and/or changes the prefix that group's tools are published under — both per session,
 // because both live in this session's config.json (mcp[].disabledTools, mcp[].toolPrefix).
 //
 // Unlike UpdateConfig, it is allowed while the session is running, and it still cannot affect a
@@ -874,6 +892,11 @@ func (s *Session) Tools() *ToolsView {
 // A nil disabled slice or a nil prefix pointer means "not a change"; an empty non-nil slice means
 // "everything on again", which is what the drawer's "all tools" button sends, and an empty prefix
 // means "no namespace", which is what a server without toolPrefix gets.
+//
+// The daemon's own tools are the same drawer and the same promise (server == BuiltinServer), with
+// one difference that comes from their being off by default: the drawer sends what is switched off,
+// and for these the config stores what is switched on, so the two views are translated here rather
+// than in two places that can disagree.
 func (s *Session) SetToolPolicy(server string, disabled []string, prefix *string) (*ToolsView, error) {
 	s.mu.Lock()
 	cfg := s.cfg
@@ -882,40 +905,53 @@ func (s *Session) SetToolPolicy(server string, disabled []string, prefix *string
 	mcpCfg := make([]mcp.Config, len(cfg.MCP))
 	copy(mcpCfg, cfg.MCP)
 	cfg.MCP = mcpCfg
-	idx := -1
-	for i := range cfg.MCP {
-		if cfg.MCP[i].Name == server {
-			idx = i
-			break
+	if server == BuiltinServer {
+		// A builtin is published under its own name or not at all (that name is what the
+		// documentation quotes), so there is no prefix for this group to have — and no suffix is
+		// invented for it either, which is what accepting the field would quietly mean.
+		if prefix != nil {
+			s.mu.Unlock()
+			return nil, errors.New("agent: builtin tools are published under their own names; toolPrefix is for MCP servers")
 		}
-	}
-	if idx < 0 {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("agent: session %s has no MCP server %q", s.ID, server)
-	}
-	if disabled != nil {
-		clean := make([]string, 0, len(disabled))
-		for _, d := range disabled {
-			if d = strings.TrimSpace(d); d != "" {
-				clean = append(clean, d)
+		if disabled != nil {
+			cfg.BuiltinTools = builtinEnabledFromOff(disabled)
+		}
+	} else {
+		idx := -1
+		for i := range cfg.MCP {
+			if cfg.MCP[i].Name == server {
+				idx = i
+				break
 			}
 		}
-		cfg.MCP[idx].DisabledTools = clean
-	}
-	if prefix != nil {
-		raw := strings.TrimSpace(*prefix)
-		if len(raw) > 32 {
+		if idx < 0 {
 			s.mu.Unlock()
-			return nil, errors.New("agent: a tool prefix is at most 32 characters")
+			return nil, fmt.Errorf("agent: session %s has no MCP server %q", s.ID, server)
 		}
-		// The prefix becomes part of every tool name this session sends, so it is held to the
-		// character set function calling accepts — and to no silent fixups: a typo that quietly turns
-		// "my/server" into "my_server" would rename tools behind their back.
-		if raw != "" && sanitize(raw) != raw {
-			s.mu.Unlock()
-			return nil, fmt.Errorf("agent: a tool prefix may only use A-Z a-z 0-9 _ - and may not start or end with _ or - (got %q)", raw)
+		if disabled != nil {
+			clean := make([]string, 0, len(disabled))
+			for _, d := range disabled {
+				if d = strings.TrimSpace(d); d != "" {
+					clean = append(clean, d)
+				}
+			}
+			cfg.MCP[idx].DisabledTools = clean
 		}
-		cfg.MCP[idx].ToolPrefix = raw
+		if prefix != nil {
+			raw := strings.TrimSpace(*prefix)
+			if len(raw) > 32 {
+				s.mu.Unlock()
+				return nil, errors.New("agent: a tool prefix is at most 32 characters")
+			}
+			// The prefix becomes part of every tool name this session sends, so it is held to the
+			// character set function calling accepts — and to no silent fixups: a typo that quietly
+			// turns "my/server" into "my_server" would rename tools behind their back.
+			if raw != "" && sanitize(raw) != raw {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("agent: a tool prefix may only use A-Z a-z 0-9 _ - and may not start or end with _ or - (got %q)", raw)
+			}
+			cfg.MCP[idx].ToolPrefix = raw
+		}
 	}
 	running := s.phase != phaseIdle
 	s.cfg = cfg
@@ -928,7 +964,7 @@ func (s *Session) SetToolPolicy(server string, disabled []string, prefix *string
 		// The registry keeps publishing what this run is committed to; the change lands when the
 		// run releases its snapshot (loop.go), which is also when the drawer's ⏳ disappears.
 		s.logf("tool policy for %s changed during a run: it takes effect when the run ends", server)
-	} else if s.reg.SetPolicy(cfg.MCP) {
+	} else if s.reg.SetPolicy(cfg) {
 		s.logf("tool policy for %s applied", server)
 		s.emitTools()
 	}

@@ -144,7 +144,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 		// array. The registry only re-filters the tools/list results it already cached, so running
 		// this at every run end is free — and it beats a stored "pending" flag, which could only be
 		// a second answer to "did the change land?", and a stale one at that.
-		toolsChanged := s.reg.SetPolicy(s.Config().MCP)
+		toolsChanged := s.reg.SetPolicy(s.Config())
 		// The snapshot is dropped while the phase still says running, so no new run can have taken
 		// one yet and this cannot wipe somebody else's.
 		s.tmu.Lock()

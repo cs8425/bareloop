@@ -9,7 +9,8 @@
 //     summary request, inspector, rebuild after reload (§5.4)
 //   - compaction never runs while a generation is running (§1.1) and commits the entry and
 //     the new path tip in one storage write (§3.8, §3.10)
-//   - there are no built-in tools: every tool comes from an MCP server (§"all tools via MCP")
+//   - every tool the model may call comes from an MCP server, except the handful this daemon
+//     answers itself (package builtin), which a session has to ask for by name
 package agent
 
 import (
@@ -187,8 +188,13 @@ type ToolsServer struct {
 	Transport string `json:"transport"`
 	Connected bool   `json:"connected"`
 	Disabled  bool   `json:"disabled,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Impl      string `json:"impl,omitempty"`
+	// Builtin marks the group this daemon answers itself: no transport, no prefix to set, and every
+	// one of its tools off until the session names it. The drawer needs the flag rather than a name
+	// test because the row it renders changes (no prefix box, a different explanation), not because
+	// it has to route anything — routing is carried by toolRef.Builtin.
+	Builtin bool   `json:"builtin,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Impl    string `json:"impl,omitempty"`
 	// Prefix is the model-visible prefix in force; empty means no namespace at all, which is the
 	// default. ConfiguredPrefix is what config.json says (toolPrefix), so a difference between the two
 	// can only be whitespace.
@@ -266,6 +272,19 @@ type Config struct {
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 	// NotifyTools asks MCP servers for list_changed subscriptions.
 	NotifyTools bool `json:"notifyTools,omitempty"`
+
+	// BuiltinTools lists the tools this daemon answers itself, by name: "wait", "get_datetime".
+	// It is an on-list and not an off-list, and that is the whole policy: these are handles on the
+	// loop rather than capabilities, so none of them is on until a session asks for it by name — and a
+	// builtin added in a later version cannot appear in a session that never asked, which an
+	// off-list would have done. A name that does not exist is refused by the API; a hand-written
+	// config.json gets a warning in the log and is otherwise ignored.
+	BuiltinTools []string `json:"builtinTools,omitempty"`
+	// Timezone is the zone the time tools answer in when a call does not name one: an IANA name
+	// ("Asia/Taipei"), a fixed offset ("+08:00", "UTC+8") or "Local" for the machine's own. Empty is
+	// UTC, deliberately — which machine answered a request is not information anybody asked for. It
+	// cannot be sent back to empty over the API (empty means unchanged); send "UTC" for that.
+	Timezone string `json:"timezone,omitempty"`
 
 	// StructuredContent is this session's default for what a tool's structuredContent does on the way
 	// to the model: "auto" (default: append it unless the text already contains it), "fallback" (only

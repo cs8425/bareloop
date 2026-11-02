@@ -1,0 +1,194 @@
+package builtin
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+)
+
+// maxWait caps what a wait may ask for. It is not a safety limit for the daemon — Stop() is that —
+// it is a typo limit: "1000h" is a mistake somebody wants told rather than a promise this process
+// undertakes to keep a timer for.
+const maxWait = 100 * 365 * 24 * time.Hour
+
+// tooLong is what an absurd wait says. It names the way out in the same breath, because the number
+// that trips it is always a mistake and the caller's next move is the question.
+const tooLong = " is more than a century away, which is a typo and not a schedule"
+
+func waitTool() Tool {
+	return Tool{
+		Name: "wait",
+		Description: "Pause the agent loop and resume it after the specified duration or at the " +
+			"specified time. Nothing is sent to the model while it waits; the result of this call is " +
+			"what the resumed turn sees.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration":{"type":"string","description":"Relative duration, e.g. 5m, 30s, 2h, 1h30m; a bare number is seconds"},"until":{"type":"string","description":"Absolute RFC3339 timestamp with timezone, e.g. 2026-11-01T22:25:00+08:00; one without an offset is read in this session's default timezone"}},"additionalProperties":false}`),
+		Run:         runWait,
+	}
+}
+
+// waitArgs is two ways of saying when, and nothing else: additionalProperties is false in the
+// schema, so this code never has to wonder what an unexpected key meant.
+type waitArgs struct {
+	Duration *string `json:"duration"`
+	Until    *string `json:"until"`
+}
+
+// waitResult is what this tool answers, and the pair scheduled_at/resumed_at is what tells the
+// model whether it got the wait it asked for: interrupted with a scheduled_at still in the future
+// is the record of somebody ending it early.
+type waitResult struct {
+	Status      string `json:"status"`
+	ScheduledAt string `json:"scheduled_at"`
+	ResumedAt   string `json:"resumed_at"`
+}
+
+func runWait(ctx context.Context, in Input, raw json.RawMessage) Result {
+	var q waitArgs
+	if err := decodeArgs(raw, &q); err != nil {
+		return ErrText("wait: " + err.Error())
+	}
+	duration, until := argText(q.Duration), argText(q.Until)
+	switch {
+	case duration != "" && until != "":
+		return ErrText(`wait takes either duration or until, not both: duration is a length of time ("5m") and until is a moment ("2026-11-01T22:25:00+08:00").`)
+	case duration == "" && until == "":
+		return ErrText(`wait needs to be told when: duration is a length of time ("5m", "30s", "2h") and until is a moment ("2026-11-01T22:25:00+08:00").`)
+	}
+
+	loc, err := LoadTimezone(in.DefaultTimezone)
+	if err != nil {
+		// The session's own default is what is broken (a hand-edited config.json is enough), so the
+		// message names the setting instead of reading like a bad argument.
+		return ErrText("wait: " + err.Error() + " (this session's timezone setting)")
+	}
+
+	now := in.now()
+	scheduled, err := schedule(now, duration, until, loc)
+	if err != nil {
+		return ErrText("wait: " + err.Error())
+	}
+	if after := scheduled.Sub(now); after > maxWait {
+		return ErrText("wait: " + scheduled.Format(time.RFC3339) + tooLong)
+	}
+	at := scheduled.Format(time.RFC3339)
+
+	if remaining := scheduled.Sub(in.now()); remaining > 0 {
+		// Say it before sleeping, not after: a run that produces nothing for five minutes is
+		// otherwise indistinguishable from a hung one, and this is the line that tells the
+		// difference. It goes out before the sleep because after the sleep it would be too late.
+		in.logf("wait: the loop is parked until %s (%s from now); Stop interrupts it", at, remaining.Truncate(time.Second))
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			// why: a cancellation can win the race against a deadline that has already passed, and a
+			// wait that did finish must not be reported as interrupted — on that word the model
+			// would schedule the same wait all over again.
+			if in.now().Before(scheduled) {
+				return ErrText(JSON(waitResult{
+					Status:      "interrupted",
+					ScheduledAt: at,
+					ResumedAt:   in.now().Format(time.RFC3339),
+				}))
+			}
+		}
+	}
+
+	return Result{Text: JSON(waitResult{
+		Status:      "completed",
+		ScheduledAt: at,
+		ResumedAt:   in.now().Format(time.RFC3339),
+	})}
+}
+
+// schedule is the one place that decides when a wait ends, so the two ways of asking cannot drift
+// apart over what "now" and "which zone" mean.
+func schedule(now time.Time, duration, until string, loc *time.Location) (time.Time, error) {
+	if duration != "" {
+		d, err := ParseDuration(duration)
+		if err != nil {
+			return time.Time{}, err
+		}
+		// A relative wait is reported in the session's own zone, so scheduled_at is the same "now"
+		// get_datetime just reported rather than a third one nobody asked for.
+		return now.Add(d).In(loc), nil
+	}
+	return parseMoment(until, loc)
+}
+
+// tooLongSeconds bounds the float path of ParseDuration before it becomes a Duration: converting a
+// float too large for a Duration is not a thing with a defined answer, and "defined answer" is what
+// a bound is for.
+const tooLongSeconds = float64(maxWait) / float64(time.Second)
+
+// ParseDuration reads the duration a wait is given. The rules are time.ParseDuration's — "5m",
+// "30s", "2h", "1h30m" — plus one: a bare number is seconds.
+//
+// why the one extra rule: a bare number is the thing time.ParseDuration refuses and the thing a
+// caller types without thinking ("90"), and reading it as 90 minutes would be guessing at somebody
+// else's unit in the one direction that costs hours.
+func ParseDuration(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, errors.New("empty duration")
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		// why !(f >= 0): "nan" and "inf" are both numbers to strconv.ParseFloat, and a NaN is not
+		// less than zero — so one test covers NaN, negatives and +Inf together.
+		if !(f >= 0) {
+			return 0, fmt.Errorf("%q is not a duration: a wait does not go backwards, and it is not infinite", s)
+		}
+		if f > tooLongSeconds {
+			return 0, errors.New(s + " seconds" + tooLong)
+		}
+		return time.Duration(f * float64(time.Second)), nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration: try 30s, 5m, 2h or 1h30m (a bare number means seconds)", s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("a wait cannot go backwards (%s)", s)
+	}
+	return d, nil
+}
+
+// momentLayouts are the shapes a timestamp arrives in once a model is writing one: RFC3339, which
+// the schema asks for (Go's parser takes a fractional second on this path whether or not the layout
+// spells it out), and the three that dropped the offset. They are tried in order, so the strictest
+// reading is the one that wins.
+var momentLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// parseMoment reads an absolute moment. The tool description asks for an offset, and a timestamp
+// without one is still read — in defaultLoc, which is the zone this session has already said it
+// works in — because scheduled_at comes back naming the zone it was read in, and that is what
+// turns an ambiguous call into an unambiguous result.
+func parseMoment(s string, defaultLoc *time.Location) (time.Time, error) {
+	for _, layout := range momentLayouts {
+		// why two parsers and not one: RFC3339 carries its own offset, so the moment is already
+		// decided by the text. The layouts below carry none, and time.Parse would read "22:25" as
+		// 22:25 UTC — the same digits in a different moment. ParseInLocation is what makes
+		// "in this session's timezone" mean the wall clock the caller was looking at.
+		var (
+			t   time.Time
+			err error
+		)
+		if layout == time.RFC3339 {
+			t, err = time.Parse(layout, s)
+		} else {
+			t, err = time.ParseInLocation(layout, s, defaultLoc)
+		}
+		if err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("%q is not a moment that can be read: try an RFC3339 timestamp with a timezone, like 2026-11-01T22:25:00+08:00", s)
+}
