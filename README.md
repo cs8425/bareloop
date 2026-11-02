@@ -79,10 +79,17 @@ not there says so and puts the current one back into the address bar.
 
 The transcript is the log: what you see is what is stored. In the composer **Enter** sends, **Shift+Enter**
 adds a line, and you can **paste or drop images** (and files) next to your text. While a run is going **Enter
-still just sends**: the message joins the path as *pending* and is injected at the next turn boundary. **stop**
-keeps what was produced, and **interrupt** - the bolt, and the only gesture that reaches it - aborts the
-generation in progress and starts the loop again on what you just typed. Scrolling up unpins the view from the
-streaming output, and `↓ latest` takes you back.
+still just sends**: the message joins the path as *pending*, unless a tool call is still owed its answer, in
+which case the daemon holds it and appends it right after that answer
+([two moments for a message](#two-moments-for-a-message)). **stop** keeps what was produced, and
+**interrupt** - the bolt, and the only gesture that reaches it - aborts the generation in progress and starts
+the loop again on what you just typed. Scrolling up unpins the view from the streaming output, and
+`↓ latest` takes you back.
+
+A session asleep on a `wait` says so beside the phase - `asleep → 14:32`, the moment it is due, in the
+browser's own clock - and still reports *running*, because everything there is to do with it - end it, or
+interrupt it with a message - is something you do to a running session. `wakeAt` in the status is what carries
+that moment, and `queued` is what counts the messages sent while waiting for it.
 
 Per session you can:
 
@@ -137,6 +144,8 @@ its own copy in `data/<id>/config.json`.
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
 | `insecureTLS`, `caFile` | on `defaults.llm` and on any `mcp[]` entry with a `url`: how an https endpoint is trusted ([reaching an endpoint no trust store knows](#reaching-an-endpoint-no-trust-store-knows)) |
+| `defaults.builtinTools` | the tools the daemon answers itself, named one at a time: `wait`, `get_datetime`. It is an **on-list**, so all of them are off until a session says otherwise ([the daemon's own two tools](#the-daemons-own-two-tools)) |
+| `defaults.timezone` | the zone the time tools answer in when a call names none: an IANA name (`Asia/Taipei`), a fixed offset (`+08:00`, `UTC+8`), `Local` for the machine's own - and nothing at all means UTC ([the daemon's own two tools](#the-daemons-own-two-tools)) |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
 | `defaults.asm` | payload options: `sendReasoning` (**on** by default), `sendImages` (**on**), `omitToolResultName` (off) |
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
@@ -182,6 +191,8 @@ default:
 | `compact.maxAttempts` | `0` or absent = 3 tries for one summary | `> 0` tries; **a negative keeps trying until the summary fits** |
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
 | `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
+| `builtinTools` | absent = **every one of them off** — the list is what switches a builtin on | any list of real names (`["wait"]`); `[]` is a decision meaning "all off", and a name that is not a builtin is a 400 rather than a quiet no |
+| `timezone` | absent = UTC | any zone the daemon can resolve — `Asia/Taipei`, `+08:00`, `UTC-5`, `Local`. Getting back to UTC means sending `"UTC"`, because empty means unchanged |
 | `structuredContent` | absent = **`auto`** (fold the tool's JSON in, but never twice) | `fallback` / `always` / `drop`, per server in `mcp[]` ([the four words](#structured-content-in-four-words)) |
 | `llm.insecureTLS` | absent = verify, like anyone else | `false` is the same as absent; **`true` is a different endpoint** and is logged every time it applies |
 | `llm.caFile` | absent = the system trust store | a PEM bundle to verify against — and the only thing it is verified against |
@@ -267,6 +278,38 @@ Changes apply at the **next run**: a run in flight keeps the tool array it start
 mid-run would break the prefix cache and strand a `tool_call` whose tool vanished. `pendingChanges` says
 when something is waiting; `toolsPending` in the status says the same thing in one bit.
 
+### The daemon's own two tools
+
+Two tools are answered by `bareloopd` itself: no server to start, no connection to keep, nothing to install.
+
+| tool | what it does | what it takes |
+|---|---|---|
+| `wait` | pauses the loop and resumes it later. Nothing is sent to the model while it waits, and the result of this call is what the resumed turn reads | either `duration` (`"5m"`, `"1h30m"`, `"30s"`; a bare number is seconds) **or** `until` (an RFC3339 moment, e.g. `2026-11-01T22:25:00+08:00`). A moment more than a century away is refused as the typo it is, and an `until` written without an offset is read in the session's own timezone |
+| `get_datetime` | the date, the clock, the offset, the zone it is naming, the day of the week — and an RFC3339 stamp on the last line, which is a `wait` argument waiting to be pasted | an optional `timezone`, for the case where the interesting question is what time it is somewhere else |
+
+Both are **off until a session names them**, because they are handles on the loop rather than capabilities: a
+builtin added in a later version must not turn up in a session that never asked for it, which is exactly what
+an off-list would do. So `builtinTools` stores the names that are **on**, and the tools drawer, which sends
+what is switched off for every group, has that translated at the one place that can do it. A name that is not
+a builtin is refused at the API rather than ignored — a config line that silently does nothing reads later as
+a guarantee — while a hand-written `data/<id>/config.json` gets a line in the log and is otherwise ignored.
+The group is published in `GET .../tools` as the server `builtin`, and no MCP server may take that name: a
+transcript saying `builtin/wait` has to mean one route. A builtin is published under its own name or not at
+all — never renamed to make room, never prefixed, since the name is what the documentation quotes and what a
+transcript already quotes.
+
+`timezone` is what the two tools answer in when a call does not say. An IANA name is resolved against the
+platform's zoneinfo and, where there is none, against the copy embedded in the binary, so a container with no
+`/usr/share/zoneinfo` still knows `Asia/Taipei`. Nothing configured is **UTC** rather than the host's zone,
+because which machine answered a request is not information anybody asked for; a session that wants the host's
+zone writes `Local`. A zone that cannot be resolved is refused where `builtinTools` is checked, when the
+config is written, rather than surfacing as a failed tool call an hour from now. Neither field has a control
+of its own in the settings dialog: `timezone` is set in `data/<id>/config.json` or by `PATCH`, and
+`builtinTools` is switched in the tools drawer.
+
+`wait` is the one tool that can outlive the request that asked for it, and what the daemon holds while it
+waits, what a restart keeps and what a restart drops, is [here](docs/design.md#sleeping-and-who-owns-the-wake-up).
+
 ### Structured content, in four words
 
 A tool result can carry two channels: `content` (text, images) and `structuredContent` (JSON validated
@@ -345,9 +388,9 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |
 | DELETE | `/api/session/{id}` | close and delete the session |
-| POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now or queue |
-| POST | `/api/session/{id}/interrupt` | abort the current generation and send this message instead |
-| POST | `/api/session/{id}/stop` | abort the current run, keep what was produced |
+| POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now: the message is appended, or held in memory until nothing is owed an answer ([two moments](#two-moments-for-a-message)) |
+| POST | `/api/session/{id}/interrupt` | abort the current generation - or end a wait that has been handed to the daemon - and send this message immediately after |
+| POST | `/api/session/{id}/stop` | abort the current run, keep what was produced; on a session parked on a wait it ends the wait, since that is all there is to stop |
 | POST | `/api/session/{id}/resume` | continue from the current tip without appending anything; the path must end on a user message, a tool result or a compaction summary |
 | POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold |
 | POST | `/api/session/{id}/gate` | `{id, answer}` - `accept` / `retry` / `skip` for an oversized summary |
@@ -424,12 +467,40 @@ Event types: `hello`, `entry`, `delta`, `tool_call`, `tool_result`, `state`, `pe
 `request`, `request_done`, `log`, `info`, `error`, `removed`, `tools` (the tool set was rebuilt; the body is
 the same view `GET .../tools` returns).
 
-### Message queue
+### Two moments for a message
 
-A message that arrives while the loop is running is appended to the path like any other entry, which makes
-it *pending*. It is injected at the next turn boundary, after the tool result that belongs to the current
-turn, or as soon as compaction finishes. `/interrupt` stops generation first, keeps what was produced, and
-sends the message immediately.
+A message can arrive at two moments, and they are not the same transaction.
+
+**Nothing is owed.** The path ends somewhere a model can be asked again: the session is idle, or the last
+entry is a user message, a tool result, or a compaction summary. `POST .../send` appends the message like any
+other entry, which makes it *pending* — on disk the moment it is accepted, counted by `status.pending`, read
+at the next turn boundary: after the tool result belonging to the current turn, or as soon as a compaction
+finishes. A restart cannot lose it.
+
+**A tool call is still owed its answer.** That is the stretch between a `tool_call` reaching
+`data/<id>/log.jsonl` and its result being written — while a slow tool runs, while a `wait` sleeps, while a
+parked session waits on a timer with no goroutine held open for it. Appending into that gap would put a user
+message between the call and its result, and the assembler answers that shape by inventing a failure for a
+tool that is merely still waiting. So `bareloopd` takes the message **into memory instead**: the request is
+accepted, `status.queued` counts it, no entry is written, and no event names it. When the answer is finally
+written the held messages are appended in arrival order, and the model reads them after it.
+
+Ending a wait early flushes what was waiting rather than leaving it behind. `/interrupt` ends it as itself, so
+the model reads the wait saying `user interrupt` and then reads the message; `/stop` ends it too, and keeps
+everything that was produced.
+
+**A restart drops what was held.** The wait itself survives — its moment is recomputed from the tool call
+already in the log, whether the process that died was sleeping it or holding it on a timer, so it wakes on
+schedule whatever happened to the daemon — but the messages held in memory in front of it are written nowhere,
+because nothing would be left to answer the call they queued behind. That
+is the documented cost of holding them at all: the alternative is a path with a hole in it, and a hole is
+exactly what the assembler has to invent an answer for
+([sleeping, and who owns the wake-up](docs/design.md#sleeping-and-who-owns-the-wake-up)).
+
+One box on screen shows both kinds, because a reader cannot tell them apart from the message itself:
+`pending:` counts what is on the path, `held:` what is off it. A held message is quoted only where this tab
+was the one that sent it; the rest are counted, not invented
+([the UI, and why it is shaped like this](docs/design.md#the-ui-and-why-it-is-shaped-like-this)).
 
 ## Tests
 

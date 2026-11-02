@@ -320,6 +320,94 @@ be changed later without rewriting `data/<id>/log.jsonl`
 with the tool definition; nothing here re-validates a result against it — the server is the one that
 promised, and bareloop stores what it answered.
 
+### The name builtin is taken
+
+The tools this daemon answers itself go through the same registry as MCP tools and are recorded under the
+server name `builtin`, because a transcript reading `builtin/wait` has to mean one route and one owner. Three
+rules come from that: no MCP server may be named `builtin`, and a config that tries is refused where it is
+written; `toolPrefix` is refused on the builtin group, since these tools are published under their own names
+or not at all; and a builtin is **never renamed to make room**. An MCP tool that already owns
+`wait` keeps it — that is what a prefix is for — and the builtin is not published, with a line in the log
+naming who has the name and what to do about it. The same stability that protects the KV prefix of every
+session with history protects a transcript already written: a name a tool was published under before a prefix
+change moved it keeps resolving to that tool, because two tools answering to one name is a misroute rather
+than a namespace ([switches, prefixes and the cache](../README.md#tools-switches-prefixes-and-the-cache)).
+
+## Sleeping, and who owns the wake-up
+
+**A tool call is a debt.** `runTools` commits the assistant entry carrying the `tool_call` before it calls the
+tool, so between that write and the write of the result the path ends on a question with no answer — and while
+that is true, nothing may be appended to the path. `asm.repair` is what turns the rule from tidy into
+mandatory: an unanswered call with something after it is not a shape a provider accepts, so the assembler
+invents one — `[no result recorded — turn was interrupted]`, marked as an error. A message appended during a
+wait therefore does not merely read out of order; it destroys the result before it exists, and what the model
+gets handed is a failure for a tool that was merely still running.
+
+One predicate decides whether anything is owed (`answeringLocked`, `internal/agent/park.go`), and it asks about
+the **call** rather than about any sleep: an ordinary tool call in flight leaves the same window open for the
+length of the call, with nothing scheduled and no timer anywhere. While it says yes, `POST …/send` is accepted
+and the message is **held in memory** instead of appended: it joins the path in arrival order once the answer
+is written, `status.queued` is the only sign it exists, and nothing is emitted meanwhile. `Close()` drops that
+memory, so a restart loses those messages — the documented cost of the arrangement, whose alternative is a path
+with a hole in it, and a hole is precisely what the assembler has to invent an answer for.
+
+### Two ways to spend a wait
+
+`wait` is the one tool that can outlive the request that asked for it, and it sleeps in one of two places.
+Under `parkAfter` (five minutes) the run's own goroutine sleeps with it: the session has a run, the loop is held
+open, and the wait costs a goroutine for every second of it. Past `parkAfter` the tool answers `Parked` instead,
+and what the process holds is one timer, the messages that arrive meanwhile, and one line of explanation for a
+wake the daemon had to produce for itself.
+
+Nothing new is written for the handover, which is what makes it worth doing: the moment a wait is due is
+recomputable from the call's own arguments and the timestamp of the entry that carries it. So `recoverPark` can
+walk the log when a session is opened, find the call still waiting, and rearm the timer for whatever is left —
+**continuing** the wait rather than restarting it — and it never cares what the process that died was doing
+with that wait, sleeping a short one in a goroutine or holding a long one on a timer, because it reads nothing
+but the log. The anchor for "when was this asked" is that entry timestamp, handed back to the tool as
+`builtin.Input.ResumeCalledAt`; without it a resumed wait would count a fresh interval from the wall clock and
+every restart would push the promise further out. The answer it eventually writes says the daemon was not
+running, because that is a fact about the wait the model has to be told rather than invited to infer. A wait is
+therefore the part of this that survives a restart; the messages held in front of it are the part that does
+not, and that is the same asymmetry seen from the other end.
+
+A goroutine held for six hours buys nothing a timer does not, and holding a run open for six hours holds
+everything a run holds — among them the tool array it started with, and the policy change queued behind it.
+`parkAfter` is what trades that against the common case: a wait under five minutes is a plain sleep, one code
+path, nothing to recover. Two constants are about the world rather than the code:
+
+- **`wakeLead` (twenty seconds)** fires the timer early so a run is already being assembled while the last
+  moments of the wait are still being slept. It cannot make a wait finish early, because the result's
+  `resumed_at` is the tool's own clock after its own sleep rather than the timer's.
+- **`rearmCap` (one hour)** is how long a timer is ever allowed to sleep at once. Go's timers count monotonic
+  time, which does not pass while a laptop is closed — one set for forty days on a machine asleep for thirty
+  of them fires thirty days late. Rearming hourly and comparing against the wall clock bounds that lateness to
+  the cap, and a daemon that was simply not running wakes on the first comparison after it starts.
+
+A handed-over wait can also be ended, and the two ways of doing it are the two ways of ending anything else:
+`Stop()` does the only thing stop can mean when nothing is generating, answering the call `interrupted` and
+naming nobody, because nothing of anybody's is coming after it; `Interrupt(msg)` holds the message like any
+message sent into a debt and then ends the wait as `user interrupt`, so the model reads the wait's own sentence
+about who ended it and then reads the message. Either way what was held is written out rather than left behind,
+because once nothing is owed to the tool the messages the user sent are owed to the conversation.
+
+### Why a parked session still reports running
+
+`status.phase` stays `running` while a session is parked — no run, no request in flight, nothing streaming. It
+is neither cosmetic nor an oversight: the phase is the guard that says *this session is spoken for*, and a
+parked session is exactly as spoken for as one with a run in it. It is what stops `Send` from starting a second
+run to answer a call that already has an owner, what keeps `SetTip` from moving the path out from under a
+scheduled wake, what makes the one-run-at-a-time guard mean the same thing at wake time as anywhere else, and
+what keeps the composer showing the two controls that still do something to a wait — stop and the bolt —
+instead of a send arrow and no way to end it. A fourth phase value would put each of those decisions in a
+second place to get right.
+
+What the phase cannot carry, two fields do. `status.wakeAt` is the moment the wait is due, in UTC: the wait is
+due at one instant everywhere on earth, and the session's timezone is for what the tools answer, not for this.
+`status.queued` counts what was sent while waiting for it, and it is reported whenever the queue is non-empty
+rather than only while parked — the few seconds of a wake are a live run with an unanswered call, and a queue
+nobody can see during them reads like a lost message.
+
 ## The UI, and why it is shaped like this
 
 `web/js/session.js` and its neighbours are plain ES modules; the behaviours worth knowing are the ones that
@@ -397,6 +485,21 @@ were bugs first.
   their later times, so the row keeps the later time too and a session cannot make itself look fresh by
   rewinding. Which entry you are standing on is a separate fact, and the same row's tooltip prints it beside
   that newest entry's date.
+- **A message that is not on the path still has to be shown.** One box carries both kinds of waiting:
+  `pending: N` for user entries that are on the path and not answered yet, and `held: N` for the ones the
+  daemon is keeping off it (`park.go`, and *Two moments for a message* in `README.md`) — up to four of them,
+  oldest first, each with its words collapsed onto one line, then `+ N more` for whatever the count covers and
+  the box cannot name, then one line saying what it is: not in the log yet, a restart drops these. The count is
+  the server's and the words are this tab's, because the daemon reports how many it is holding and never what
+  they say; a message sent from another window, or before this page was loaded, is counted out loud rather than
+  invented. Two limits follow from that and are drawn rather than worked around: the box is not a transcript of
+  the queue, and the number is not live across tabs — the page is event-driven, and a sleeping or parked wait
+  emits nothing at all (measured: a send from a second client left the box on `held: 2` for the rest of a
+  parked wait while the daemon was already counting 3, and it corrected itself when the hold ended). A send
+  from *this* tab does not wait for an event, because the reply to `POST …/send` carries the whole status and a
+  `queued` that went up is the message arriving in the box. `asleep → 14:32` beside the phase is the same
+  `status.wakeAt`, drawn as a moment rather than a countdown: nothing re-renders while a session is asleep, and
+  a figure that goes stale next to a promise is a lie about the promise.
 
 Below 860px the UI is one column: the session list becomes a drawer (☰, closed by the scrim, by picking a
 session or by Escape) and the side panel becomes a bottom sheet. Heights use `dvh` because on a phone
@@ -535,6 +638,21 @@ parts are independent, so they can be summarised in parallel and merged.
 
 **`CompactResult` does not report `summaryMode`.** The mode that actually ran is recorded on the compaction
 entry - which is what replay and the inspector read - but the result of a manual compact still omits it.
+
+**No ceiling on the queue held off the path.** A message sent while a tool call is unanswered goes into
+`s.queue`, which only ever appends: there is no length at which the daemon says no, drops the oldest, or writes
+one somewhere durable instead. A run that goes all night with somebody pressing send is enough to ask the
+question, and nothing has been measured about what the queue costs or where it would hurt. Revisit with a
+number, and with an answer to the harder half — refusing is honest but loses the message unless the client
+learns to keep its draft, and `web/js/composer.js` clears the composer before the request answers.
+
+**A parked handover leaves nothing for replay to read.** The `asleep` badge on a tool card comes from the live
+`tool_result` frame whose status is `parked`, and there is no entry behind it to draw from: the whole point of
+the handover is that the result has not been written. Reload during a parked wait and the badge is simply
+gone — measured — while the status line still says `asleep → 14:32`. So the only place a re-loaded page learns
+about a wait is a session-level field, which cannot say which call was handed over; the entry carrying the call
+keeps its arguments and nothing about what the daemon decided with them. Recording it anywhere durable is a
+bigger question than a UI field, since a `tool_call` entry has no such field today for anything.
 
 ## Go version
 
