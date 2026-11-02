@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"bareloop/internal/asm"
+	"bareloop/internal/builtin"
 	"bareloop/internal/compact"
 	"bareloop/internal/ir"
 	"bareloop/internal/llm"
@@ -22,10 +23,46 @@ import (
 // only way to stop it is Stop()/Interrupt(). That is what makes "instant abort" work even
 // when the browser tab that started the run is gone.
 func (s *Session) startRunLocked(ctx context.Context, _ int) {
+	s.beginRunLocked(ctx, runStart{})
+}
+
+// runStart is what a run is built from when it is not the ordinary "the user sent a message" run —
+// which today means one thing: a wake (park.go). Every field is about the call the wake exists to
+// answer, and each is empty for a run that is not a wake.
+type runStart struct {
+	// tail is the part of the path that was never finished: the assistant entry holding the unanswered
+	// call and anything after it. It is the whole tail rather than the one call because a model can ask
+	// for `wait` next to another tool in one turn, and the wake is the last chance those other calls get.
+	tail []*ir.Entry
+	// w is why this run exists — what was waited for, and whether anybody got tired of waiting.
+	w wake
+	// resume is the call this run exists to answer, together with the two facts about it that the call
+	// cannot witness: the moment it was asked, and this daemon's explanation for answering late — "the
+	// daemon restarted". nil for every run a message starts. One value addressed to one call rather than
+	// ambient fields, because the run keeps working after that answer is written, and a wait the model
+	// asks for later in the same run has nothing of either to explain (see resumeCall).
+	resume *resumeCall
+}
+
+// beginRunLocked is the one place a run comes into existence. Everything about a run's start is here —
+// the phase, the context, the tool snapshot — so a wake cannot forget one of them and produce a run
+// that the rest of the session does not know about.
+func (s *Session) beginRunLocked(ctx context.Context, st runStart) {
 	if s.phase != phaseIdle {
 		return
 	}
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	if st.w.callID != "" {
+		// Only the call that was waiting is told it ended early, and not by cancelling this run: that
+		// run could no longer answer the message the interrupt brought (see endedCallKey).
+		runCtx = withEndedCall(runCtx, st.w.callID, st.w.cause)
+	}
+	if st.resume != nil {
+		// Put on the run rather than handed to the calls, because it is not the run that has to know where it
+		// belongs: it carries the call it is about, and runTools is what reads it back off for that one call
+		// (see resumeCall).
+		runCtx = withResumeCall(runCtx, *st.resume)
+	}
 	s.phase = phaseRunning
 	s.cancel = cancel
 	s.done = make(chan struct{})
@@ -35,23 +72,41 @@ func (s *Session) startRunLocked(ctx context.Context, _ int) {
 	// invalidate the KV prefix of everything already generated — and could not be undone anyway,
 	// because turn one's request is long gone. Changes made now take effect when this run is over
 	// (an abort counts as over); see Session.SetToolPolicy.
+	s.snapshotToolsLocked()
+	go s.run(runCtx, cancel, st)
+}
+
+// snapshotToolsLocked takes the run's tool array, which has to be the one it starts publishing at its
+// first request — so it happens at the same moment the phase changes, under the same lock, rather than
+// somewhere the registry cannot tell a run's first turn from its third.
+func (s *Session) snapshotToolsLocked() {
 	s.tmu.Lock()
 	s.toolSnapshot = s.reg.Tools()
 	s.tmu.Unlock()
-	go s.run(runCtx, cancel)
 }
 
 // Stop aborts whatever this session is doing right now. The partial assistant message is
 // kept and marked interrupted — the user asked to stop output, not to lose it.
+//
+// For a session parked on a wait there is nothing generating, and Stop does the only thing "stop" can
+// mean: it ends the wait. The run that answers says so and carries on, because ending a wait is a
+// decision the model has to be told about rather than left to discover.
 func (s *Session) Stop() error {
 	s.mu.Lock()
-	cancel, doing := s.cancel, phaseToString(s.phase)
-	s.mu.Unlock()
-	if cancel == nil {
-		return fmt.Errorf("agent: nothing running in session %s (phase %s)", s.ID, doing)
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		// No cause, deliberately: nobody ended this run in order to say something, so a wait that was
+		// sleeping in it reports a bare "interrupted" (see builtin.interruptReason).
+		s.cancel(nil)
+		return nil
 	}
-	cancel()
-	return nil
+	if s.park != nil {
+		// An early wake with no cause: the wait says "interrupted" and names nobody, because nothing of
+		// anybody's is coming after it.
+		s.askWakeLocked(nil)
+		return nil
+	}
+	return fmt.Errorf("agent: nothing running in session %s (phase %s)", s.ID, phaseToString(s.phase))
 }
 
 // Interrupt aborts the current generation and, when a message is supplied, appends it and
@@ -59,6 +114,21 @@ func (s *Session) Stop() error {
 func (s *Session) Interrupt(msg Message) error {
 	has := strings.TrimSpace(msg.Text) != "" || len(msg.Images) > 0
 	s.mu.Lock()
+	if s.park != nil {
+		// Waiting rather than generating: the message cannot go on the path (it would land in front of
+		// the call's result), so it is queued and the wait ends as what it is. The order the model reads
+		// is the wait saying "user interrupt", then this message, then the answer to it. If a run still
+		// owns the session for a moment, askWakeLocked leaves the wake to a timer rather than starting a
+		// second run, and the message stays held with everything else until that wake lands.
+		if has {
+			s.holdMessageLocked(msg)
+		} else {
+			s.logf("interrupt without a message: ending the wait")
+		}
+		s.askWakeLocked(builtin.ErrUserInterrupt)
+		s.mu.Unlock()
+		return nil
+	}
 	if s.phase == phaseRunning && has {
 		m := msg
 		s.forceMsg = &m
@@ -74,7 +144,9 @@ func (s *Session) Interrupt(msg Message) error {
 	if !has {
 		s.logf("interrupt without a message: aborting the run")
 	}
-	cancel()
+	// The cause is what lets a `wait` that dies here say who killed it, which matters because the very
+	// next thing in the payload is that person's message.
+	cancel(builtin.ErrUserInterrupt)
 	return nil
 }
 
@@ -132,13 +204,13 @@ func (s *Session) takeForceMsg() *Message {
 // another pass. That last pass is the auto-injection of a message sent while the loop was
 // busy (spec §6: "a new message during compaction is queued and sent as soon as the lock is
 // released"; the same mechanism covers a busy loop).
-func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
+func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st runStart) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.emit(Event{Type: EvtError, Info: fmt.Sprintf("panic in run: %v", r)})
 			s.logf("panic in run: %v", r)
 		}
-		cancel()
+		cancel(nil)
 		// A tool policy that waited for this run is applied here, before the session reports itself
 		// idle again: a run started by the very next message must not pick up the previous tool
 		// array. The registry only re-filters the tools/list results it already cached, so running
@@ -151,7 +223,14 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 		s.toolSnapshot = nil
 		s.tmu.Unlock()
 		s.mu.Lock()
-		s.phase = phaseIdle
+		// why the guard: this run may be ending by handing a wait to the daemon (park.go), and a session
+		// that is asleep is not idle — its wake-up is already armed, and idle would let a second run start
+		// next to it. Everything else here still happens, which is the point of ending the run instead of
+		// holding it: a parked session is reported, snapshotted and closed exactly like one that is
+		// working, and the wait is all that differs.
+		if s.park == nil {
+			s.phase = phaseIdle
+		}
 		s.cancel = nil
 		force := s.forceMsg
 		s.forceMsg = nil
@@ -161,10 +240,25 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 		if done != nil {
 			close(done)
 		}
+		// A wake that never reached the end of its tail — aborted on the way, or handed a wait straight
+		// back — still has the messages it was built holding. Unless the wait is being held again (in which
+		// case the hold belongs to it, and the next wake is the one that owes those messages their place),
+		// they go on the path now rather than staying in a memory nobody owns any more: the call they were
+		// waiting for has been given up on by whoever aborted this run, the assembler says so on its own
+		// terms, and losing a message that was already accepted is not this run's decision to make.
+		if !s.isParked() {
+			s.flushHeld()
+		}
 		if force != nil {
-			// The run ended before the forced message could be appended: append it now.
-			if e, err := s.appendEntry(s.userEntry(*force)); err == nil {
-				s.emit(Event{Type: EvtEntry, Entry: e})
+			// The run ended before the forced message could be appended. It goes the way of every message
+			// that finds a call still unanswered — into the queue rather than onto the path — because the
+			// run that answers that call is exactly what the message has to wait for. This is the one moment
+			// a message can arrive while the session is parking, and it is why the queue is consulted here
+			// rather than at one caller.
+			if !s.holdMessage(*force) {
+				if e, err := s.appendEntry(s.userEntry(*force)); err == nil {
+					s.emit(Event{Type: EvtEntry, Entry: e})
+				}
 			}
 		}
 		if toolsChanged {
@@ -174,6 +268,25 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc) {
 		s.emitState()
 		s.emitPending()
 	}()
+
+	// A wake starts here rather than at the model, because a wake exists to answer something: the tail
+	// this session was left holding (park.go). Running it is what produces the wait's result — from the
+	// code that actually waited, so the answer says when it resumed — and then the loop below takes over
+	// from the result, which is an ordinary end-of-turn state.
+	if len(st.tail) > 0 {
+		// The run's own context goes in here. What the daemon knows about the call being resumed travels on
+		// it addressed to that call rather than scoped to these few, because a scope would have to end with
+		// the tail and a run does not (see resumeCall).
+		if aborted := s.runTools(ctx, tailCalls(st.tail)); aborted || s.isParked() {
+			// The wake ended the way any run ends when it is aborted, or when the wait it produced is
+			// longer than a run will hold: the next moment belongs to the daemon, not to this goroutine.
+			return
+		}
+		// The turn the wake exists to finish is over, which is the only moment the messages held through
+		// it may be appended: after every result of that turn, so a call and its answer stay next to each
+		// other and the message is the thing the model reads next.
+		s.flushHeld()
+	}
 
 	for {
 		grown := len(s.path())
@@ -342,6 +455,12 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		}
 
 		abortedTools := s.runTools(ctx, entry.ToolCalls)
+		if s.isParked() {
+			// A wait this run handed over is neither the end of the conversation nor a place to compact:
+			// the path ends on a call with no result, and a boundary here would put a summary in front of
+			// an answer that has not been written yet. The run ends — the wake is what continues.
+			return true, nil
+		}
 		if abortedTools {
 			if fm := s.takeForceMsg(); fm != nil {
 				if e, err := s.appendEntry(s.userEntry(*fm)); err == nil {
@@ -575,9 +694,49 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 		onEvent := func(e mcp.Event) {
 			s.emit(Event{Type: EvtInfo, Info: fmt.Sprintf("%s %s %s", e.Server, e.Method, clip(string(e.Params), 300))})
 		}
-		res, ref, err := s.reg.call(ctx, tc.Name, orEmpty(tc.Args), onEvent)
+		// Mostly the run's own context. The exceptions are facts about one call that a whole run must not be
+		// told, because a run outlives all of them: a wait this daemon is resuming on somebody else's behalf
+		// is told it ended, by this cause, while the rest of the run still has an answer to produce for the
+		// message that interrupted it; and what the daemon knows about the call it found unfinished — the
+		// moment it was asked, and why the answer is late — is about that call, not about the next one this
+		// run is asked to sleep.
+		callCtx := ctx
+		if cause, ok := endedCallCause(ctx, tc.ID); ok {
+			var stop context.CancelCauseFunc
+			callCtx, stop = context.WithCancelCause(ctx)
+			// The child is cancelled the moment it exists: that is the whole message to this one call.
+			stop(cause)
+		}
+		if c, ok := resumeCallFor(ctx, tc.ID); ok {
+			// Addressed to this call, and this is where the address is honoured: both facts become part of this
+			// call's context and of no other, which is the only way a builtin can be told which wait it is
+			// continuing rather than starting (registry.builtinInput reads them off per call). A wake with
+			// nothing to explain is the ordinary scheduled one, and withAskedAt and withDaemonNote each hand
+			// back the context unchanged when given nothing.
+			callCtx = withDaemonNote(withAskedAt(callCtx, c.askedAt), c.note)
+		}
+		res, ref, err := s.reg.call(callCtx, tc.Name, orEmpty(tc.Args), onEvent)
 
 		ms := time.Since(start).Milliseconds()
+
+		// A builtin that decided this call outlives the run comes back as a handover rather than as an
+		// answer, and there is nothing to record: the result belongs to the run that wakes, and writing a
+		// second answer to one call is how a wait ends up with two memories.
+		var p *builtin.Parked
+		if errors.As(err, &p) {
+			s.mu.Lock()
+			s.parkWaitLocked(tc.Name, tc.ID, p.Until)
+			s.mu.Unlock()
+			run.Status = "parked"
+			run.Result = p.Error()
+			run.Ms = ms
+			s.emit(Event{Type: EvtToolResult, Run: run})
+			s.emitState()
+			// The calls after this one are not run. They are not lost: they are still in the entry the
+			// wake replays, and running an MCP tool twice is a worse bug than running it four hours late.
+			return aborted
+		}
+
 		text, parts, structured := toolOutput(res)
 		isErr := res != nil && res.IsError
 		if err != nil {
@@ -591,9 +750,12 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 		if ctx.Err() != nil {
 			// The call was killed because the user aborted (or because an input request was
 			// never answered): say so instead of leaving an empty result.
-			isErr = true
 			if text == "" {
 				text = "[tool call aborted before it produced a result]"
+				// why the flag belongs to that branch alone: a tool that had an answer ready when the abort
+				// arrived has one worth reading, and calling it a failure turns a fact about what happened
+				// into a guess about what it meant.
+				isErr = true
 			}
 			aborted = true
 		}

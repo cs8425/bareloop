@@ -50,37 +50,65 @@ type waitResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error) {
+// Deadline is the one answer to "when is this wait due", and it is the same answer for whoever asks
+// it: the call that is about to sleep here, and a daemon that has to answer the same call after a
+// restart, cannot be allowed to disagree about which moment was promised. Every error it returns
+// names the tool, because the caller shows the text to a model as it stands.
+//
+// why it is given the timestamp of the entry that carries the call rather than reading a clock: six
+// hours means six hours from the ask. Computed from now, a wait would restart itself on every
+// restart — which is the one thing a resumed wait must not do.
+func Deadline(args json.RawMessage, calledAt time.Time, zone string) (time.Time, error) {
 	var q waitArgs
-	if err := decodeArgs(raw, &q); err != nil {
-		return ErrText("wait: " + err.Error()), nil
+	if err := decodeArgs(args, &q); err != nil {
+		return time.Time{}, fmt.Errorf("wait: %v", err)
 	}
 	duration, until := argText(q.Duration), argText(q.Until)
 	switch {
 	case duration != "" && until != "":
-		return ErrText(`wait takes either duration or until, not both: duration is a length of time ("5m") and until is a moment ("2026-11-01T22:25:00+08:00").`), nil
+		return time.Time{}, errors.New(`wait takes either duration or until, not both: duration is a length of time ("5m") and until is a moment ("2026-11-01T22:25:00+08:00").`)
 	case duration == "" && until == "":
-		return ErrText(`wait needs to be told when: duration is a length of time ("5m", "30s", "2h") and until is a moment ("2026-11-01T22:25:00+08:00").`), nil
+		return time.Time{}, errors.New(`wait needs to be told when: duration is a length of time ("5m", "30s", "2h") and until is a moment ("2026-11-01T22:25:00+08:00").`)
 	}
 
-	loc, err := LoadTimezone(in.DefaultTimezone)
+	loc, err := LoadTimezone(zone)
 	if err != nil {
 		// The session's own default is what is broken (a hand-edited config.json is enough), so the
 		// message names the setting instead of reading like a bad argument.
-		return ErrText("wait: " + err.Error() + " (this session's timezone setting)"), nil
+		return time.Time{}, fmt.Errorf("wait: %v (this session's timezone setting)", err)
 	}
 
-	now := in.now()
-	scheduled, err := schedule(now, duration, until, loc)
+	moment, err := schedule(calledAt, duration, until, loc)
 	if err != nil {
-		return ErrText("wait: " + err.Error()), nil
+		return time.Time{}, fmt.Errorf("wait: %v", err)
 	}
-	if after := scheduled.Sub(now); after > maxWait {
-		return ErrText("wait: " + scheduled.Format(time.RFC3339) + tooLong), nil
+	if after := moment.Sub(calledAt); after > maxWait {
+		return time.Time{}, fmt.Errorf("wait: %s%s", moment.Format(time.RFC3339), tooLong)
+	}
+	return moment, nil
+}
+
+func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error) {
+	// The moment is computed from when the call was asked, which for a resumed call is not now: see
+	// Input.ResumeCalledAt. A wait that re-counted its own length on every wake would never come due.
+	calledAt := in.now()
+	if !in.ResumeCalledAt.IsZero() {
+		calledAt = in.ResumeCalledAt
+	}
+	scheduled, err := Deadline(raw, calledAt, in.DefaultTimezone)
+	if err != nil {
+		return ErrText(err.Error()), nil
 	}
 	at := scheduled.Format(time.RFC3339)
 
 	if remaining := scheduled.Sub(in.now()); remaining > 0 {
+		// why this is asked before anything else: a call that has already been ended has to answer, not be
+		// rescheduled. Without it, an interrupt that arrives while the daemon is waking this call up would
+		// put the same wait back on the timer forever — and a Stop that wins the race against the sleep
+		// deserves the answer it asked for rather than a wake-up nobody is waiting for.
+		if ctx.Err() != nil {
+			return interrupted(ctx, in, scheduled), nil
+		}
 		// why the limit is checked for being set at all: zero is what every caller that has never
 		// heard of parking passes, and for those the behaviour here is exactly what it always was.
 		if limit := in.MaxInLoopSleep; limit > 0 && remaining > limit {
@@ -105,12 +133,7 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 			// wait that did finish must not be reported as interrupted — on that word the model
 			// would schedule the same wait all over again.
 			if in.now().Before(scheduled) {
-				return in.withNote(ErrText(JSON(waitResult{
-					Status:      "interrupted",
-					ScheduledAt: at,
-					ResumedAt:   in.now().Format(time.RFC3339),
-					Reason:      interruptReason(ctx),
-				}))), nil
+				return interrupted(ctx, in, scheduled), nil
 			}
 		}
 	}
@@ -120,6 +143,19 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 		ScheduledAt: at,
 		ResumedAt:   in.now().Format(time.RFC3339),
 	})}), nil
+}
+
+// interrupted is the answer for a wait that will not be slept: what was promised, when the call gave
+// up, and who ended it. It is one function rather than two copies because the two moments that produce
+// it — already cancelled on arrival, and cancelled during the sleep — must not be able to disagree
+// about what the words are.
+func interrupted(ctx context.Context, in Input, scheduled time.Time) Result {
+	return in.withNote(ErrText(JSON(waitResult{
+		Status:      "interrupted",
+		ScheduledAt: scheduled.Format(time.RFC3339),
+		ResumedAt:   in.now().Format(time.RFC3339),
+		Reason:      interruptReason(ctx),
+	})))
 }
 
 // interruptReason reads who ended the wait from the cause the run's context was cancelled with, and

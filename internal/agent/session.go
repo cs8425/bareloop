@@ -59,9 +59,22 @@ type Session struct {
 	st  *store.State
 	cfg Config
 
-	phase  phase
-	cancel context.CancelFunc
+	phase phase
+	// cancel is a cause-carrying one because a wait has to be able to tell "the clock ended me" from
+	// "a person ended me and their message follows" — see builtin.ErrUserInterrupt and Stop/Interrupt.
+	cancel context.CancelCauseFunc
 	done   chan struct{}
+	// park is the wait this daemon is holding instead of a run (park.go). It is the whole answer to
+	// "is this session asleep", which is why there is no second parked flag to keep in step.
+	park *parked
+	// held is the tool call whose answer has not been written yet, and is why anything sent now is held
+	// rather than appended: appended now it would sit between that call and its result, and the assembler
+	// answers that shape by inventing a failure for a tool that is merely still waiting. It is a separate
+	// field from park because the wake that answers the call is a live run with no park, and the hole a
+	// message could fall into is open for as long as held is set rather than for as long as a timer is.
+	// The queue it protects lives only here: a restart drops it, which is what docs/ says out loud.
+	held  string
+	queue []Message
 	// generating is true only while an LLM stream is open. Compaction may run between turns
 	// of a run (the loop calls it itself) but never while tokens are flowing (§1.1).
 	generating bool
@@ -178,6 +191,10 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 		s.reg.connect(cctx, s.Config().MCP)
 		s.emitState()
 	}()
+	// The previous process may have been holding a wait when it went away, and the log is the only
+	// record of it: this either re-arms the wake-up or answers the call that came due meanwhile. It is
+	// after the tool policy above because the question it asks is "is this an unanswered builtin call".
+	s.recoverPark()
 	s.logStructuredMode(cfg)
 	s.logTLS(cfg)
 	return s, nil
@@ -367,6 +384,17 @@ func (s *Session) Status() *Status {
 	turn := s.turn
 	used, known := s.ctxUsed, s.ctxKnown
 	nctx, cfgN, srvN := s.nctx, s.nctxCfg, s.nctxServer
+	var (
+		waiting bool
+		wakeAt  time.Time
+		queued  int
+	)
+	if s.park != nil {
+		waiting, wakeAt = true, s.park.until
+	}
+	// What is held is reported whenever it exists rather than only while parked: the wake is a live run
+	// with an unanswered call, and a queue nobody can see during those seconds is a queue that reads lost.
+	queued = len(s.queue)
 	s.mu.Unlock()
 
 	_, _, cmp := s.effective()
@@ -402,8 +430,14 @@ func (s *Session) Status() *Status {
 		ToolsEnabled: enabled,
 		ToolsTotal:   total,
 		ToolsPending: pendingTools,
+		Queued:       queued,
 		Servers:      s.reg.statusSnapshot(),
 		UpdatedAt:    time.Now().UTC(),
+	}
+	if waiting && !wakeAt.IsZero() {
+		// UTC whatever the session's timezone is: this is a moment the UI renders in the reader's own
+		// words, and the wait was due at the same instant in every zone on earth.
+		st.WakeAt = wakeAt.UTC().Format(time.RFC3339)
 	}
 	if cmp != nil && cmp.Compaction != nil {
 		st.Broken = cmp.Compaction.Broken
@@ -441,6 +475,13 @@ func (s *Session) emitPending() {
 func (s *Session) Send(ctx context.Context, msg Message) error {
 	if strings.TrimSpace(msg.Text) == "" && len(msg.Images) == 0 {
 		return errors.New("agent: empty message")
+	}
+	// A wait the loop is not holding cannot be answered by anything this message touches, and
+	// appending it now would put a user message between a tool call and its result — which is the one
+	// shape the assembler refuses to leave alone (park.go). So it waits here, in memory, and docs/ says
+	// out loud that a restart drops it.
+	if s.holdMessage(msg) {
+		return nil
 	}
 	e, err := s.appendEntry(s.userEntry(msg))
 	if err != nil {
@@ -981,8 +1022,16 @@ func (s *Session) emitTools() {
 func (s *Session) Close() error {
 	s.mu.Lock()
 	if s.cancel != nil {
-		s.cancel()
+		s.cancel(nil)
 	}
+	// A timer outliving the session would wake a session whose log is already closed, and the wake's
+	// run would find nothing to write to. Abandoning the park is honest about the rest: the wait's call
+	// stays unanswered on the path, which is exactly what the next open looks for.
+	s.stopTimerLocked()
+	s.park = nil
+	// What was held dies with the session rather than being written out on the way: nothing is going to
+	// answer the call it was waiting for, and a restart losing it is the documented cost (docs/).
+	s.held, s.queue = "", nil
 	s.mu.Unlock()
 	s.reg.closeAll()
 	return s.log.Close()

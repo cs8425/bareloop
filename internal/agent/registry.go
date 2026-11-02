@@ -735,7 +735,7 @@ func (r *registry) callBuiltin(ctx context.Context, ref toolRef, args json.RawMe
 		// and what it means is that a newer version of the daemon no longer has this builtin.
 		return nil, ref, fmt.Errorf("builtin tool %q does not exist in this version of bareloopd", ref.Tool)
 	}
-	res, err := tool.Run(ctx, r.builtinInput(), args)
+	res, err := tool.Run(ctx, r.builtinInput(ctx), args)
 	if err != nil {
 		// A builtin that cannot answer says so in text the model can read, so the only thing that can
 		// come back on this channel is a handover to the daemon (builtin.Parked, and nothing else
@@ -751,11 +751,26 @@ func (r *registry) callBuiltin(ctx context.Context, ref toolRef, args json.RawMe
 }
 
 // builtinInput is what a builtin is told about the session that called it: the timezone to answer
-// in, and the log to say "I am parking for five minutes" in.
-func (r *registry) builtinInput() builtin.Input {
+// in, the log to say "I am parking for five minutes" in, the length a call may hold the loop for, and
+// the two things this daemon knows about the call that the call itself cannot witness (see resumeCall).
+//
+// It is rebuilt per call rather than once per run, which is what makes the addressing work: the facts
+// live on the call's own context, so the one call a wake is answering is the only one that is told it is
+// a continuation.
+//
+// The sleep cap is the package constant rather than a setting: it is the number park.go arms its timer
+// by, and a tool that handed over at a different moment than the daemon wakes for would be wrong in a
+// way nobody could see.
+func (r *registry) builtinInput(ctx context.Context) builtin.Input {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return builtin.Input{DefaultTimezone: r.builtinTZ, Logf: r.logf}
+	return builtin.Input{
+		DefaultTimezone: r.builtinTZ,
+		Logf:            r.logf,
+		MaxInLoopSleep:  parkAfter,
+		DaemonNote:      daemonNote(ctx),
+		ResumeCalledAt:  askedAt(ctx),
+	}
 }
 
 // counts reports (published now, enabled by policy, offered in total) for the status line. The

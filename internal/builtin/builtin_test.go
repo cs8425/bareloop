@@ -411,6 +411,92 @@ func TestTheLimitLeavesAShorterWaitAlone(t *testing.T) {
 	cancel()
 }
 
+// TestAResumedWaitIsContinuedRatherThanRestarted is the regression for the bug that made every resumed
+// wait unanswerable. The moment a wait is due is computed from the moment it was asked; on a resumed call
+// "when it was asked" is a fact about an entry in the log, and a process that re-counts the length from its
+// own clock instead finds a wait that is due six hours from now, hands itself over, is woken, and finds
+// itself six hours from then. The shape is TestALongWaitIsHandedOverNotSlept's — the same frozen clock and a
+// wait longer than the sleep cap — with one fact added: when the call was asked. That addition is what turns
+// a handover into an answer.
+func TestAResumedWaitIsContinuedRatherThanRestarted(t *testing.T) {
+	in := clockAt()
+	in.MaxInLoopSleep = time.Minute
+	// Asked an hour before it was due: six hours from the ask is in the past, so there is nothing left to
+	// wait for and the call answers for itself.
+	in.ResumeCalledAt = at.Add(-7 * time.Hour)
+
+	got := call(t, "wait", `{"duration":"6h"}`, in)
+	if got.IsError {
+		t.Fatalf("a wait that had already come due failed: %s", got.Text)
+	}
+	var res waitResult
+	if err := json.Unmarshal([]byte(got.Text), &res); err != nil {
+		t.Fatalf("the answer is not JSON: %v (%s)", err, got.Text)
+	}
+	if res.Status != "completed" {
+		t.Fatalf("status = %q, want completed: %s", res.Status, got.Text)
+	}
+	if want := at.Add(-time.Hour).Format(time.RFC3339); res.ScheduledAt != want {
+		t.Errorf("scheduled_at = %q, want the ask plus six hours (%s): counted from this wake it is a promise nobody made",
+			res.ScheduledAt, want)
+	}
+	if res.ResumedAt != at.Format(time.RFC3339) {
+		t.Errorf("resumed_at = %q, want the clock it answered on (%s)", res.ResumedAt, at.Format(time.RFC3339))
+	}
+}
+
+// TestDeadlineIsTheSameAnswerTheCallGives is the invariant the recovery path stands on: the moment
+// this function reports for a call is the moment the call itself slept to. A daemon that finds the
+// call in a log after a restart re-arms the wait that was asked for, not a new one it invented.
+func TestDeadlineIsTheSameAnswerTheCallGives(t *testing.T) {
+	for _, args := range []string{`{"duration":"1ms"}`, `{"until":"2020-01-01T00:00:00Z"}`} {
+		got, err := Deadline(json.RawMessage(args), at, "Asia/Taipei")
+		if err != nil {
+			t.Fatalf("Deadline(%s): %v", args, err)
+		}
+		res := call(t, "wait", args, clockAt())
+		var asked waitResult
+		if err := json.Unmarshal([]byte(res.Text), &asked); err != nil {
+			t.Fatalf("%s did not answer with the JSON the tool promises: %v (%s)", args, err, res.Text)
+		}
+		slept, err := time.Parse(time.RFC3339, asked.ScheduledAt)
+		if err != nil {
+			t.Fatalf("scheduled_at %q is not RFC3339: %v", asked.ScheduledAt, err)
+		}
+		// Asked at the resolution the answer is able to carry: scheduled_at is written with time.RFC3339,
+		// which spells whole seconds, so the answer of a one-millisecond wait cannot say it was due a
+		// millisecond past 22:25:00 and the two would differ by that much as text forever. Nothing computes
+		// from the sentence — a daemon re-derives the moment from the call's arguments and the entry's own
+		// timestamp, at full precision — so what is lost is in the words, not in the promise.
+		if !got.Truncate(time.Second).Equal(slept) {
+			t.Fatalf("%s: Deadline says %s and the call slept to %s — two answers to one promise",
+				args, got.Format(time.RFC3339), slept.Format(time.RFC3339))
+		}
+	}
+}
+
+// TestDeadlineRefusesWhatIsNotASchedule is for a log somebody edited by hand: the daemon reading it
+// must not be told a promise it cannot keep, and the answer it gets has to name its tool because a
+// person is the one who will read the line.
+func TestDeadlineRefusesWhatIsNotASchedule(t *testing.T) {
+	for _, args := range []string{
+		`{}`,
+		`{"duration":"5m","until":"2030-01-01T00:00:00Z"}`,
+		`{"duration":"1000000h"}`,
+		`{"until":"sometime after lunch"}`,
+		`{"duration":`,
+	} {
+		_, err := Deadline(json.RawMessage(args), at, "")
+		if err == nil {
+			t.Errorf("Deadline(%s) answered a call the tool would have refused", args)
+			continue
+		}
+		if !strings.HasPrefix(err.Error(), "wait") {
+			t.Errorf("Deadline(%s) = %q: an error a model or a log reads has to name its tool", args, err)
+		}
+	}
+}
+
 // TestResumeNoteSaysWhatWasMissed pins the words the daemon puts under a wait it had to answer for:
 // what was missed and why, in the voice of a wait rather than of a log line. It deliberately does
 // not repeat the moment the wait resumed — resumed_at is that timestamp, and a second one printed a
@@ -512,6 +598,32 @@ func TestInterruptedNamesWhoEndedIt(t *testing.T) {
 		t.Fatalf("a stop nobody attributed still named a reason: %q", gotStop.Text)
 	}
 	cancelStop()
+}
+
+// TestACallThatArrivedEndedIsNotRescheduled is the rule the daemon's interrupt rests on: a wait handed a
+// context that is already ended has to answer instead of handing itself over again, because every wake
+// would park it again and the wait would then outlive the person who ended it. It is the check in front
+// of the sleep limit that makes that true, which is why the order of the two is asserted here rather
+// than left to reading.
+func TestACallThatArrivedEndedIsNotRescheduled(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(ErrUserInterrupt)
+
+	tool, _ := Get("wait")
+	got, err := tool.Run(ctx, Input{MaxInLoopSleep: time.Minute}, json.RawMessage(`{"duration":"6h"}`))
+	if err != nil {
+		var parked *Parked
+		if errors.As(err, &parked) {
+			t.Fatalf("an ended wait handed itself over to %s: it will be woken for nobody", parked.Until.Format(time.RFC3339))
+		}
+		t.Fatalf("an ended wait failed instead of answering: %v", err)
+	}
+	if !strings.Contains(got.Text, `"status":"interrupted"`) {
+		t.Fatalf("an ended wait is not interrupted: %q", got.Text)
+	}
+	if !strings.Contains(got.Text, `"reason":"user interrupt"`) {
+		t.Fatalf("an ended wait did not say who ended it: %q", got.Text)
+	}
 }
 
 // TestWaitIsInterruptedByCancel is the escape hatch the session has: Stop() ends the wait, and the

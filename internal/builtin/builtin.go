@@ -60,10 +60,18 @@ type Input struct {
 	// DaemonNote is an aside about this call that only the daemon can witness — "the daemon
 	// restarted between this call and its answer". A tool that can be interrupted like that puts it
 	// after its own answer and never inside it: the JSON stays the tool's account of what it did,
-	// the note stays the daemon's account of what happened around it. It is set for the calls being
-	// resumed, not for the rest of the run, and of the tools here only a wait has anything to say
+	// the note stays the daemon's account of what happened around it. It is addressed to the one call
+	// being resumed, not to the rest of the run, and of the tools here only a wait has anything to say
 	// with it — get_datetime has no past to explain.
 	DaemonNote string
+	// ResumeCalledAt is the moment this call was first asked, for the one case where a process is answering
+	// a call that somebody else left unanswered: a resumed wait. Zero means "the call is being asked now",
+	// which is every other call there is.
+	//
+	// why it exists: a wait is a promise about a moment, not a length to be re-counted. Computed from now,
+	// the call a wake re-runs would find itself six hours from now, hand itself over again, and be woken to
+	// find itself six hours from then — a wait that restarts itself forever and never comes due.
+	ResumeCalledAt time.Time
 }
 
 func (in Input) now() time.Time {

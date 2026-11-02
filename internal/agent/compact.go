@@ -107,6 +107,13 @@ func (s *Session) CompactNow(ctx context.Context, instruction string) (CompactRe
 	if s.isGenerating() {
 		return res, errors.New(string(compact.ReasonNotStreaming) + " — abort the run first, then compact")
 	}
+	// why a session holding an unanswered tool call is refused rather than allowed: it reports "running"
+	// and is not generating, so nothing else stops a compaction from cutting the path at that call — and
+	// the wake would then find the call it exists to answer sitting behind a summary boundary, with the
+	// result it produces a second answer to a call that already has one.
+	if s.isAnswering() {
+		return res, errors.New(string(compact.ReasonUnanswered) + " — let it answer or interrupt it, then compact")
+	}
 	if !s.compMu.TryLock() {
 		return res, errors.New(string(compact.ReasonAlreadyActive))
 	}

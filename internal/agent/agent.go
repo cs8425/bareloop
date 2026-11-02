@@ -123,7 +123,14 @@ type Status struct {
 	Summary      bool   `json:"summary,omitempty"`
 	Broken       bool   `json:"boundaryBroken,omitempty"`
 	Pending      int    `json:"pending,omitempty"`
-	Turn         int    `json:"turn,omitempty"`
+	// WakeAt is the moment a scheduled wait is due (UTC, RFC3339), and Queued counts what the user
+	// sent while waiting for it. They are the only sign that a "running" session has no run in it:
+	// a parked session says "running" on purpose (the composer's Enter must keep meaning "queue",
+	// and an unanswered call is not a safe place for a compaction), so the two extra fields rather
+	// than a fourth phase.
+	WakeAt string `json:"wakeAt,omitempty"`
+	Queued int    `json:"queued,omitempty"`
+	Turn   int    `json:"turn,omitempty"`
 	// Tools is what a request would carry right now; ToolsEnabled is what the session's policy
 	// says it will carry once any run in flight has finished. The two differ only while a tool
 	// change is waiting (§tools), and ToolsTotal is what the servers offer in total — the gap
