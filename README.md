@@ -79,8 +79,9 @@ not there says so and puts the current one back into the address bar.
 
 The transcript is the log: what you see is what is stored. In the composer **Enter** sends, **Shift+Enter**
 adds a line, and you can **paste or drop images** (and files) next to your text. While a run is going **Enter
-still just sends**: the message joins the path as *pending*, unless a tool call is still owed its answer, in
-which case the daemon holds it and appends it right after that answer
+still just sends**: the message joins the path as *pending*, unless an answer is owed - for a tool call whose
+result has not arrived, or for a request the model has been sent and has not answered - in which case the daemon
+holds it and appends it right after that answer
 ([two moments for a message](#two-moments-for-a-message)). **stop** keeps what was produced, and
 **interrupt** - the bolt, and the only gesture that reaches it - aborts the generation in progress and starts
 the loop again on what you just typed. Scrolling up unpins the view from the streaming output, and
@@ -98,7 +99,10 @@ Per session you can:
 - **run again from any legal break point** - a user message or a tool result. That
   moves the path to that entry and continues the loop **without appending anything**: the tool result that
   already arrived is reused, not redone. This is what to press when a run died half way (output stopped
-  mid-reasoning, a tool result with no answer after it, "the context was compacted, please send again").
+  mid-reasoning, a tool result with no answer after it, "the context was compacted, please send again"), and
+  also after **stop**: pressing it on the message nobody answered asks that message again, without writing a
+  second copy of it. A run that ended at `maxTurns` stops on an unanswered tool call, which is a legal place to
+  stop but not one to ask from - there, the button on the run's last tool result is the one that works.
   Everything that followed leaves the path - the transcript draws the path only, and the confirm box counts
   what you are giving up; it stays in the log either way;
 - **re-make a compaction summary** - the same button on a summary entry means "make this summary again from
@@ -507,13 +511,24 @@ other entry, which makes it *pending* — on disk the moment it is accepted, cou
 at the next turn boundary: after the tool result belonging to the current turn, or as soon as a compaction
 finishes. A restart cannot lose it.
 
-**A tool call is still owed its answer.** That is the stretch between a `tool_call` reaching
-`data/<id>/log.jsonl` and its result being written — while a slow tool runs, while a `wait` sleeps, while a
-parked session waits on a timer with no goroutine held open for it. Appending into that gap would put a user
-message between the call and its result, and the assembler answers that shape by inventing a failure for a
-tool that is merely still waiting. So `bareloopd` takes the message **into memory instead**: the request is
-accepted, `status.queued` counts it, no entry is written, and no event names it. When the answer is finally
-written the held messages are appended in arrival order, and the model reads them after it.
+**An answer is owed.** Two shapes of the same debt. A `tool_call` reached `data/<id>/log.jsonl` and its result
+has not been written - while a slow tool runs, while a `wait` sleeps, while a parked session waits on a timer
+with no goroutine held open for it. Or a request went to the model and has not come back: nothing is on disk
+yet, so the entry that would answer it does not exist.
+
+Appending into the first gap would put a user message between the call and its result, and the assembler answers
+that shape by inventing a failure for a tool that is merely still waiting. Appending into the second would put
+the message *before* the answer that was already being written: the path then ends on that answer, nothing is owed
+any more, and the message is never read, because the answer beside it was written before it existed. So
+`bareloopd` takes the message **into memory instead**: the request is accepted, `status.queued` counts it, no
+entry is written, and no event names it. When the answer is finally written the held messages are appended behind
+it, in the order they arrived, and the model reads them after it - and a message sent while that flush is running
+either joins it ahead of the queue or lands after everything in it, never between two.
+
+**Stopping is not an answer.** `/stop` aborts the generation, writes what it had produced, and lets the held
+messages join the path; it does not ask the model anything. What is left is a question at the end of the path, and
+the way to continue it is the button on that message
+([run again from any legal break point](#using-it)), not a second copy of the same words.
 
 Ending a wait early flushes what was waiting rather than leaving it behind. `/interrupt` ends it as itself, so
 the model reads the wait saying `user interrupt` and then reads the message; `/stop` ends it too, and keeps

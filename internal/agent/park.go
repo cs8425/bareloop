@@ -458,26 +458,46 @@ func (s *Session) holdMessageLocked(msg Message) bool {
 // flushHeld releases what this session was holding off the path and puts it on the path, which are the
 // only two things worth doing with it together: a queue that is released must not be kept, and a queue
 // that is kept must not be half-appended.
+//
+// The whole drain happens in one critical section, and that is the ordering rather than a detail. These
+// messages arrived before whatever a concurrent Send is asking for, and appendEntry takes this same lock
+// once per entry, so putting the lock down between two of them let a message that arrived later reach the
+// path first - a conversation rewritten by nothing but timing. So the queue is emptied and written under
+// s.mu: a Send that arrives meanwhile is waiting for this same lock to ask whether anything is owed, and by
+// the time it gets it the queue is gone, so its message lands after every message in the drain. A message
+// that arrived before the drain is already in the queue and is what this function is writing.
+//
+// The events go out after the lock is put down, which is not a preference: emitState reads the status and
+// emitPending the pending list, and both take this lock.
 func (s *Session) flushHeld() {
 	s.mu.Lock()
 	s.held = ""
 	queue := s.queue
 	s.queue = nil
-	s.mu.Unlock()
-
+	written := make([]*ir.Entry, 0, len(queue))
+	var failed []string
 	for _, m := range queue {
-		e, err := s.appendEntry(s.userEntry(m))
+		e, err := s.appendLocked(s.userEntry(m))
 		if err != nil {
 			// The message is dropped rather than held again: a write that failed is a storage failure,
-			// and keeping it for a quieter moment would only make it vanish unnoticed.
-			s.logf("held message could not join the path: %v", err)
-			s.emit(Event{Type: EvtError, Info: "held message: " + err.Error()})
+			// and keeping it for a quieter moment would only make it vanish unnoticed. The rest of the
+			// queue is still written, because one bad entry is not a reason to lose the others.
+			failed = append(failed, err.Error())
 			continue
 		}
+		written = append(written, e)
+	}
+	s.mu.Unlock()
+
+	for _, reason := range failed {
+		s.logf("held message could not join the path: %s", reason)
+		s.emit(Event{Type: EvtError, Info: "held message: " + reason})
+	}
+	for _, e := range written {
 		s.emit(Event{Type: EvtEntry, Entry: e})
 	}
-	if len(queue) > 0 {
-		s.logf("%d held message(s) joined the path after the tool result they waited for", len(queue))
+	if len(written) > 0 {
+		s.logf("%d held message(s) joined the path after the tool result they waited for", len(written))
 		s.emitPending()
 		s.emitState()
 	}

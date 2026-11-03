@@ -364,13 +364,43 @@ invents one — `[no result recorded — turn was interrupted]`, marked as an er
 wait therefore does not merely read out of order; it destroys the result before it exists, and what the model
 gets handed is a failure for a tool that was merely still running.
 
-One predicate decides whether anything is owed (`answeringLocked`, `internal/agent/park.go`), and it asks about
-the **call** rather than about any sleep: an ordinary tool call in flight leaves the same window open for the
-length of the call, with nothing scheduled and no timer anywhere. While it says yes, `POST …/send` is accepted
-and the message is **held in memory** instead of appended: it joins the path in arrival order once the answer
-is written, `status.queued` is the only sign it exists, and nothing is emitted meanwhile. `Close()` drops that
+One predicate decides whether anything is owed (`answeringLocked`, `internal/agent/park.go`), and it asks three
+questions in order: is the owed call a parked `wait`, is a request **on the wire** with its answer not yet
+committed, does the path itself end on a call with no result. None of them mentions a sleep, because an ordinary
+tool call in flight leaves the same window open for the length of the call, with nothing scheduled and no timer
+anywhere - and so does a request that has left the process and not come back. While it says yes,
+`POST …/send` is accepted and the message is **held in memory** instead of appended: it joins the path in
+arrival order once the answer is written, `status.queued` is the only sign it exists, and nothing is emitted
+meanwhile. `Close()` drops that
 memory, so a restart loses those messages — the documented cost of the arrangement, whose alternative is a path
 with a hole in it, and a hole is precisely what the assembler has to invent an answer for.
+
+**A request on the wire is a debt too**, and not for the reason above: nothing has been written yet, so there is
+no hole for a message to fall into. What breaks is the ledger. A message appended while the request is in flight
+lands *before* the answer the model had already written, because the answer is committed only when it finishes,
+and so the path ends on that answer - a shape that owes nothing, which is what the run looks at when it decides
+whether to ask again. The message is never read: the answer beside it was written before it existed. Held, it
+lands behind that answer instead, and the loop that just wrote the answer finds a question at the end of the
+path and asks about it. `awaitingReply` is what the session remembers during that window: the id of the entry
+the request will become, set before the payload is built and cleared at every way out - committed, refused,
+error, aborted, overflow, panic. A debt needs a creditor, so the flag is always cleared when the run holding it
+stops being able to pay, and the path answers for the case where no run is left (a process that died mid-request
+is a path ending on a question, which is exactly what a restart finds and re-arms).
+
+**Ordering is the other half of the rule**, and flushing the queue is what could break it: `flushHeld` appends
+what it just emptied while a concurrent `Send` appends whatever arrives meanwhile. So the drain holds the same
+lock the debt is checked under, and emits only after releasing it (`Status` and `pendingIDs` take that lock
+themselves). A message sent mid-flush either joins the queue ahead of it or reaches the path after everything
+in it; it cannot slip between two held messages and rewrite the conversation.
+
+**Stopping is not an answer.** `Stop` aborts the request, lands what was held, and leaves the path ending on a
+question nobody answered; that is the intended state, not a dangling one. The way to continue is the button on
+that message - "run again from here" - which moves nothing, appends nothing, and asks for the run to be picked
+up (`POST …/resume`), rather than making the person write the same words twice. The same exit serves a run that
+stopped at `maxTurns`, with one detail worth knowing: that path ends on the assistant's unanswered call, which is
+a legal place to stop (`repair` only invents a result for a call that has something after it) but not a place a
+request may be built from - `Resume` takes a user message, a tool result or a summary and refuses anything else.
+So the button that works there is the one on the last tool result of the run.
 
 ### Two ways to spend a wait
 

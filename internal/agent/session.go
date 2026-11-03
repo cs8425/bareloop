@@ -254,6 +254,13 @@ func (s *Session) path() []*ir.Entry {
 func (s *Session) appendEntry(e *ir.Entry) (*ir.Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendLocked(e)
+}
+
+// appendLocked is appendEntry with s.mu already held, which exists so one caller can commit more than
+// one entry in a single critical section: flushHeld writes the queue it has just emptied, and a message
+// sent meanwhile has to land after all of them rather than between two (ordering, park.go).
+func (s *Session) appendLocked(e *ir.Entry) (*ir.Entry, error) {
 	if e.ParentID == "" {
 		e.ParentID = s.st.Tip
 	}
