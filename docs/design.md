@@ -195,11 +195,17 @@ fixed marker prefix. `Inspect` shows the exact numbers the decisions were made f
 **A summary belongs to the session, not to whoever asked for it.** The manual trigger runs on a context of its
 own, because nothing it produces depends on the caller still being there: a closed tab and a proxy that gave up
 waiting are not a change of mind. While it runs it is announced - the phase says `compacting`, so status shows
-it, the composer offers the square, and a message sent meanwhile joins the path instead of starting a run in
-the middle of a summary. `Stop` is the only hand on one, and stopping it commits nothing: the summary is one
-entry written at the end or nothing written at all, so the path is still the one it was and the next compaction
-starts from scratch. The three-option gate waits on that same context, so a card nobody is left to answer is a
-`skip` - which is what its own timeout had already decided.
+it and the composer offers the square - and the path is held for the duration, for a reason that is not the one
+behind the other two holding moments (*Three moments for a message* in `README.md`): the entry about to be
+appended **is** the boundary, and the plan for it was made from a path without the new message in it. So a send
+meanwhile waits in memory, and is appended behind the boundary the moment the summary lands; the run that
+message earns is what answers it. `Stop` is the only hand on one, and stopping it commits nothing: the summary
+is one entry written at the end or nothing written at all, so the path is still the one it was and the next
+compaction starts from scratch. An interrupt is refused for the duration, and it is the only place the bolt does
+not get what it wants: an interrupt aborts a generation so a new message can be answered, and a summary has
+neither a generation to abort - it writes nothing until it finishes - nor an answer owed to anything. The error
+names `/stop`, and after it the interrupt works. The three-option gate waits on that same context, so a card
+nobody is left to answer is a `skip` - which is what its own timeout had already decided.
 
 ## What is actually sent
 
@@ -549,7 +555,7 @@ were bugs first.
   that newest entry's date.
 - **A message that is not on the path still has to be shown.** One box carries both kinds of waiting:
   `pending: N` for user entries that are on the path and not answered yet, and `held: N` for the ones the
-  daemon is keeping off it (`park.go`, and *Two moments for a message* in `README.md`) — up to four of them,
+  daemon is keeping off it (`park.go`, and *Three moments for a message* in `README.md`) — up to four of them,
   oldest first, each with its words collapsed onto one line, then `+ N more` for whatever the count covers and
   the box cannot name, then one line saying what it is: not in the log yet, a restart drops these. The count is
   the server's and the words are this tab's, because the daemon reports how many it is holding and never what

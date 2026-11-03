@@ -422,11 +422,11 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
 | PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared. The name of a session is a config field, so this is also how it is renamed |
 | DELETE | `/api/session/{id}` | close and delete the session |
-| POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now: the message is appended, or held in memory until nothing is owed an answer ([two moments](#two-moments-for-a-message)) |
-| POST | `/api/session/{id}/interrupt` | `{text, images[], files[], label}` - abort the current generation - or end a wait that has been handed to the daemon - and send this message immediately after. **The body has to carry a message**, by exactly the rule `send` applies (whitespace alone is nothing; a picture is one), and both answer 400 `agent: empty message` - aborting without saying anything is what `/stop` is for |
+| POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now: the message is appended, or held in memory until the path is free again ([three moments](#three-moments-for-a-message)) |
+| POST | `/api/session/{id}/interrupt` | `{text, images[], files[], label}` - abort the current generation - or end a wait that has been handed to the daemon - and send this message immediately after. **The body has to carry a message**, by exactly the rule `send` applies (whitespace alone is nothing; a picture is one), and both answer 400 `agent: empty message` - aborting without saying anything is what `/stop` is for. While a manual summary is running it is **refused** - a summary is not a generation to abort, so `/stop` ends it first and this works after |
 | POST | `/api/session/{id}/stop` | abort what is in flight: a run keeps what it produced, a parked wait is ended (that is all there is to stop on a session that is asleep), and a manual summary is abandoned - it writes nothing until it finishes, so stopping one loses nothing |
 | POST | `/api/session/{id}/resume` | continue from the current tip without appending anything; the path must end on a user message, a tool result or a compaction summary |
-| POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold. The summary belongs to the session rather than to this request: disconnecting does not end it, and `/stop` is what ends it |
+| POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold. The summary belongs to the session rather than to this request: disconnecting does not end it, and `/stop` is what ends it. While it runs, a `send` is held in memory and written behind the boundary it commits (which is what earns the next run), and an `interrupt` is refused |
 | POST | `/api/session/{id}/gate` | `{id, answer}` - `accept` / `retry` / `skip` for an oversized summary |
 | POST | `/api/session/{id}/elicit` | `{id, behavior, content}` - answer a tool's input request |
 | POST | `/api/session/{id}/entry/patch` | `{id, content}` - rewrite one entry's content **in place**: every path through it changes too, and it does not branch |
@@ -503,15 +503,15 @@ Event types: `hello`, `entry`, `delta`, `tool_call`, `tool_result`, `state`, `pe
 `request`, `request_done`, `log`, `info`, `error`, `removed`, `tools` (the tool set was rebuilt; the body is
 the same view `GET .../tools` returns).
 
-### Two moments for a message
+### Three moments for a message
 
-A message can arrive at two moments, and they are not the same transaction.
+A message can arrive at three moments, and they are not the same transaction.
 
-**Nothing is owed.** The path ends somewhere a model can be asked again: the session is idle, or the last
-entry is a user message, a tool result, or a compaction summary. `POST .../send` appends the message like any
-other entry, which makes it *pending* — on disk the moment it is accepted, counted by `status.pending`, read
-at the next turn boundary: after the tool result belonging to the current turn, or as soon as a compaction
-finishes. A restart cannot lose it.
+**Nothing is owed.** The path ends somewhere a model can be asked again: the session is idle and not writing a
+summary, or the last entry is a user message, a tool result, or a compaction summary. `POST .../send` appends
+the message like any other entry, which makes it *pending* - on disk the moment it is accepted, counted by
+`status.pending`, read at the next turn boundary: after the tool result belonging to the current turn, or as
+soon as a compaction finishes. A restart cannot lose it.
 
 **An answer is owed.** Two shapes of the same debt. A `tool_call` reached `data/<id>/log.jsonl` and its result
 has not been written - while a slow tool runs, while a `wait` sleeps, while a parked session waits on a timer
@@ -526,6 +526,17 @@ any more, and the message is never read, because the answer beside it was writte
 entry is written, and no event names it. When the answer is finally written the held messages are appended behind
 it, in the order they arrived, and the model reads them after it - and a message sent while that flush is running
 either joins it ahead of the queue or lands after everything in it, never between two.
+
+**A summary is being written.** A manual `/compact` holds the path for a different reason: the entry it is
+about to append *is the boundary*, and the plan for that boundary was made from the path as it was when the
+summary started. Appending now would put the message **under** a summary that cannot know it exists — it is not
+lost (the boundary records an entry id, not "everything before this entry"), but it would sit inside a region
+nothing summarised, counted by a plan that never saw it. So it waits, counted by `status.queued` rather than
+`status.pending`, and the moment the summary lands — or is stopped, which writes nothing — it is appended
+behind the boundary, and the run that message earns is started for it. A summary the loop asked for itself is
+not this moment: a run owns that one, and a message sent to it is held or appended by exactly the rule that
+applied a moment before the summary started - the summary adds no rule of its own, because there is a run to
+read whatever it leaves on the path.
 
 **Stopping is not an answer.** `/stop` aborts the generation, writes what it had produced, and lets the held
 messages join the path; it does not ask the model anything. What is left is a question at the end of the path, and

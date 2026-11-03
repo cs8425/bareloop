@@ -96,9 +96,12 @@ function renderAttachments() {
 // syncComposer is the single place that decides what the composer's right-hand slot offers:
 // idle -> send (dim until there is a draft), running -> the red square and the bolt, compacting -> the
 // square alone. A manual summary is not a generation, so it does not get the bolt, whose promise is
-// "abort this generation and send this message instead"; typing still works, and a message sent during a
-// summary joins the path and waits for the next run. Stop is the only hand on a summary (agent.CompactNow),
-// which is why the square appears for it at all.
+// "abort this generation and send this message instead": a summary has written nothing to keep and no answer
+// is owed to anything. Typing still works, and what is typed is not lost - agent.holdMessageLocked keeps it off
+// the path until the boundary the summary is writing exists, then it lands behind that boundary and earns its
+// own run - but an interrupt sent meanwhile is refused (agent.Interrupt), so hiding the bolt keeps the promise
+// instead of spending a message on an error. Stop is the only hand on a summary (agent.CompactNow), which is
+// why the square appears for it at all.
 //
 // It runs on every keystroke, on every attachment change and on every status frame, so the glyph is
 // never a guess about the server: `draft()` maps base64 blobs and is far too expensive to call here,
