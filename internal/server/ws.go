@@ -11,7 +11,6 @@ import (
 	"github.com/coder/websocket"
 
 	"bareloop/internal/agent"
-	"bareloop/internal/ir"
 )
 
 // wsClient is one browser websocket connection.
@@ -142,17 +141,13 @@ func (c *wsClient) reply(req string, v any, err error) {
 	}
 }
 
-// command is one websocket message from the browser.
+// command is one websocket message from the browser: the frame that asks for one of the three transport
+// verbs. Nothing a session does is asked for here, so nothing a session does can arrive with a field this
+// file forgot about.
 type command struct {
-	Type    string          `json:"type"`
-	Session string          `json:"session"`
-	Req     string          `json:"req,omitempty"`
-	Text    string          `json:"text,omitempty"`
-	Images  []ir.Part       `json:"images,omitempty"`
-	Body    json.RawMessage `json:"body,omitempty"`
-	Answer  string          `json:"answer,omitempty"`
-	Id      string          `json:"id,omitempty"`
-	Content map[string]any  `json:"content,omitempty"`
+	Type    string `json:"type"`
+	Session string `json:"session"`
+	Req     string `json:"req,omitempty"`
 }
 
 func (c *wsClient) readLoop(ctx context.Context) {
@@ -169,17 +164,18 @@ func (c *wsClient) readLoop(ctx context.Context) {
 			c.reply("", nil, fmt.Errorf("bad message: %w", err))
 			continue
 		}
-		c.handle(ctx, cmd)
+		c.handle(cmd)
 	}
 }
 
-// handle executes one client command. Actions resolve the session on demand, so a browser may
-// open the socket before any session exists.
-func (c *wsClient) handle(ctx context.Context, cmd command) {
+// handle executes one client command. There are three of them, and none touches a session: this socket
+// carries events out, and an action that arrives here is pointed at REST rather than quietly served by a
+// second implementation of it (which is how a websocket send used to lose the message's label and files -
+// one job, two decoders, only one of them used).
+func (c *wsClient) handle(cmd command) {
 	switch cmd.Type {
 	case "ping":
 		c.reply(cmd.Req, map[string]any{"pong": time.Now().UTC().Format(time.RFC3339)}, nil)
-		return
 	case "subscribe":
 		var sessions []string
 		if cmd.Session != "" {
@@ -187,121 +183,14 @@ func (c *wsClient) handle(ctx context.Context, cmd command) {
 		}
 		c.sess.setSessions(sessions...)
 		c.reply(cmd.Req, map[string]any{"ok": true}, nil)
-		return
 	case "snapshot":
 		for _, e := range c.srv.hub.Snapshot(cmd.Session) {
 			push(c.sess, e)
 		}
 		c.reply(cmd.Req, map[string]any{"ok": true}, nil)
-		return
-	}
-
-	if cmd.Session == "" {
-		c.reply(cmd.Req, nil, fmt.Errorf("message %q needs a session id", cmd.Type))
-		return
-	}
-	sess, err := c.srv.mgr.Get(ctx, cmd.Session)
-	if err != nil {
-		c.reply(cmd.Req, nil, err)
-		return
-	}
-
-	switch cmd.Type {
-	case "send":
-		err = sess.Send(ctx, cmd.message())
-	case "interrupt":
-		err = sess.Interrupt(cmd.message())
-	case "stop":
-		err = sess.Stop()
-	case "resume":
-		err = sess.Resume(ctx)
-	case "compact":
-		res, cerr := sess.CompactNow(ctx, cmd.textOrBody("instruction"))
-		c.reply(cmd.Req, res, cerr)
-		return
-	case "gate":
-		err = sess.AnswerGate(cmd.Id, agent.GateAnswer(cmd.Answer))
-	case "elicit":
-		err = sess.AnswerElicitation(cmd.Id, cmd.Answer, cmd.Content)
-	case "inspect":
-		c.reply(cmd.Req, sess.Inspect(), nil)
-		return
-	case "tools":
-		c.reply(cmd.Req, sess.Tools(), nil)
-		return
-	case "toolsSet":
-		// Same three fields as POST /api/session/{id}/tools: absent means "not a change", so the
-		// drawer can flip one switch without resending the rest.
-		var b struct {
-			Server        string   `json:"server"`
-			DisabledTools []string `json:"disabledTools"`
-			ToolPrefix    *string  `json:"toolPrefix"`
-		}
-		_ = json.Unmarshal(cmd.Body, &b)
-		if strings.TrimSpace(b.Server) == "" {
-			b.Server = cmd.textOrBody("server")
-		}
-		view, verr := sess.SetToolPolicy(strings.TrimSpace(b.Server), b.DisabledTools, b.ToolPrefix)
-		c.reply(cmd.Req, view, verr)
-		return
-	case "status":
-		c.reply(cmd.Req, sess.Status(), nil)
-		return
-	case "pending":
-		c.reply(cmd.Req, sess.PendingIDs(), nil)
-		return
-	case "entryPatch":
-		var b struct {
-			Id      string `json:"id"`
-			Content string `json:"content"`
-		}
-		_ = json.Unmarshal(cmd.Body, &b)
-		err = sess.PatchEntry(b.Id, b.Content)
-	case "entryDelete":
-		var b struct {
-			Id string `json:"id"`
-		}
-		_ = json.Unmarshal(cmd.Body, &b)
-		err = sess.DeleteEntry(b.Id)
-	case "tip":
-		var b struct {
-			Id string `json:"id"`
-		}
-		_ = json.Unmarshal(cmd.Body, &b)
-		err = sess.SetTip(b.Id)
-	case "name":
-		var b struct {
-			Name string `json:"name"`
-		}
-		_ = json.Unmarshal(cmd.Body, &b)
-		err = sess.SetName(b.Name)
 	default:
-		err = fmt.Errorf("unknown command %q", cmd.Type)
+		c.reply(cmd.Req, nil, fmt.Errorf(
+			"ws command %q does not exist: this socket carries events, ping, subscribe and snapshot, and every action is REST (POST /api/session/{id}/…)",
+			cmd.Type))
 	}
-	c.reply(cmd.Req, nil, err)
-}
-
-func (q command) message() agent.Message {
-	m := agent.Message{Text: q.Text}
-	for _, img := range q.Images {
-		p := img
-		if p.Type == "" {
-			p.Type = ir.PartImage
-		}
-		m.Images = append(m.Images, p)
-	}
-	return m
-}
-
-// textOrBody reads one string field out of the optional body object, falling back to Text.
-func (q command) textOrBody(field string) string {
-	if len(q.Body) > 0 {
-		var m map[string]any
-		if json.Unmarshal(q.Body, &m) == nil {
-			if v, ok := m[field].(string); ok {
-				return v
-			}
-		}
-	}
-	return q.Text
 }
