@@ -192,6 +192,15 @@ compaction can be undone by moving the tip back. Acceptance is size-based (with 
 three-option gate), failures fall open, and the summary enters the payload as one `user` message with a
 fixed marker prefix. `Inspect` shows the exact numbers the decisions were made from.
 
+**A summary belongs to the session, not to whoever asked for it.** The manual trigger runs on a context of its
+own, because nothing it produces depends on the caller still being there: a closed tab and a proxy that gave up
+waiting are not a change of mind. While it runs it is announced - the phase says `compacting`, so status shows
+it, the composer offers the square, and a message sent meanwhile joins the path instead of starting a run in
+the middle of a summary. `Stop` is the only hand on one, and stopping it commits nothing: the summary is one
+entry written at the end or nothing written at all, so the path is still the one it was and the next compaction
+starts from scratch. The three-option gate waits on that same context, so a card nobody is left to answer is a
+`skip` - which is what its own timeout had already decided.
+
 ## What is actually sent
 
 `GET /api/session/{id}/inspect` answers the size question (per-message tokens, budget, plan, tool list)

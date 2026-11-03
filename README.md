@@ -420,13 +420,13 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/sessions` | every session with its status, and what each one adds up to - how many entries its path holds, how many records its log holds, and what that log costs the disk. Answered from the index: listing sessions reads no transcript, and a session with no index is listed without those numbers rather than with zeroes. `lastTs` is the newest timestamp any entry of the log carries - the log's newest entry, not the entry the path is standing on, so moving a path backwards never makes it look fresh |
 | POST | `/api/sessions` | create a session (body: a config; `id` is required, lowercase, and becomes the directory name - 400 without it, 409 if the directory exists) |
 | GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
-| PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared |
+| PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared. The name of a session is a config field, so this is also how it is renamed |
 | DELETE | `/api/session/{id}` | close and delete the session |
 | POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now: the message is appended, or held in memory until nothing is owed an answer ([two moments](#two-moments-for-a-message)) |
 | POST | `/api/session/{id}/interrupt` | abort the current generation - or end a wait that has been handed to the daemon - and send this message immediately after |
-| POST | `/api/session/{id}/stop` | abort the current run, keep what was produced; on a session parked on a wait it ends the wait, since that is all there is to stop |
+| POST | `/api/session/{id}/stop` | abort what is in flight: a run keeps what it produced, a parked wait is ended (that is all there is to stop on a session that is asleep), and a manual summary is abandoned - it writes nothing until it finishes, so stopping one loses nothing |
 | POST | `/api/session/{id}/resume` | continue from the current tip without appending anything; the path must end on a user message, a tool result or a compaction summary |
-| POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold |
+| POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold. The summary belongs to the session rather than to this request: disconnecting does not end it, and `/stop` is what ends it |
 | POST | `/api/session/{id}/gate` | `{id, answer}` - `accept` / `retry` / `skip` for an oversized summary |
 | POST | `/api/session/{id}/elicit` | `{id, behavior, content}` - answer a tool's input request |
 | POST | `/api/session/{id}/entry/patch` | `{id, content}` - rewrite one entry's content **in place**: every path through it changes too, and it does not branch |
@@ -485,10 +485,12 @@ Text frames, JSON. The server sends one object per frame: `{type, session, seq, 
 `{type:"reply", req, data}` / `{type:"reply_error", req, error}` answers. The read limit is switched off,
 because images travel as base64 inside one message.
 
-Commands a browser may send: `ping`, `subscribe` (`{session: "a,b"}`, empty means all), `snapshot`, `send`,
-`interrupt`, `stop`, `resume`, `compact`, `gate`, `elicit`, `inspect`, `status`, `pending`, `entryPatch`,
-`entryDelete`, `tip`, `name`, `tools`, `toolsSet`. Every action also exists as REST, which is what the
-bundled UI uses - so a button never waits on the event transport.
+Three commands come in, and none of them touches a session: `ping`, `subscribe` (`{session: "a,b"}`, empty
+means all) and `snapshot` (replay what the hub is still holding for one session). **Every action is REST**, so
+a button never waits on the event transport and `curl` can do everything the page can - the socket that
+carries events is deliberately not a second way to run a session, because two decoders for one action is how a
+frame ends up losing a field the other one kept. Anything else arriving on the socket is answered with an
+error that says where to go instead.
 
 If the websocket drops the UI does not give up on it: it retries with a 0.6 s to 15 s backoff forever and,
 after a few failures, subscribes to SSE (or a 1.5 s poll) as a second channel, saying which of the two it is
