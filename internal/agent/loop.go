@@ -91,6 +91,13 @@ func (s *Session) snapshotToolsLocked() {
 // For a session parked on a wait there is nothing generating, and Stop does the only thing "stop" can
 // mean: it ends the wait. The run that answers says so and carries on, because ending a wait is a
 // decision the model has to be told about rather than left to discover.
+//
+// A manual summary is the third thing this session can be doing, and the only one of the three with
+// nothing to keep: it writes its one entry at the end or nothing at all, so stopping it loses no half
+// answer - the path is simply still the one it was. Stop is the only hand on one (CompactNow runs on a
+// context of its own, so no disconnect ends it), which is why it answers for it here instead of replying
+// "nothing running". A run wins when both exist: stopping the run is what the button means, and a second
+// press then reaches the summary.
 func (s *Session) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +105,11 @@ func (s *Session) Stop() error {
 		// No cause, deliberately: nobody ended this run in order to say something, so a wait that was
 		// sleeping in it reports a bare "interrupted" (see builtin.interruptReason).
 		s.cancel(nil)
+		return nil
+	}
+	if s.compactCancel != nil {
+		s.logf("stop: ending the summary this session was writing; nothing was committed")
+		s.compactCancel(context.Canceled)
 		return nil
 	}
 	if s.park != nil {

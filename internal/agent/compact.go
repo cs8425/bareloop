@@ -102,6 +102,12 @@ func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force b
 // CompactNow is trigger T3: the user pressed the button. Manual compaction bypasses the
 // trigger condition and the need for real usage, never the safety floors and never the cut
 // itself (§1.1), and it still runs the full acceptance gate.
+//
+// The summary belongs to the session rather than to the request that asked for it: nothing the work
+// produces depends on the caller still being there, and a closed tab or a proxy that gave up is not a
+// change of mind. So it runs on a context of its own, and the only hand on its cancellation is Stop() -
+// which is also the only way to end one early, and ends it by committing nothing (the path is simply
+// still the one it was, and the next compaction starts from scratch).
 func (s *Session) CompactNow(ctx context.Context, instruction string) (CompactResult, error) {
 	res := CompactResult{Trigger: compact.TriggerManual, Manual: true}
 	if s.isGenerating() {
@@ -118,8 +124,38 @@ func (s *Session) CompactNow(ctx context.Context, instruction string) (CompactRe
 		return res, errors.New(string(compact.ReasonAlreadyActive))
 	}
 	defer s.compMu.Unlock()
+
+	ctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancel(nil)
+	// Announced the way doCompact announces its own, for the same three reasons: status says so, the
+	// composer has something to press, and Send starts no run in the middle of a summary. Deliberately
+	// not leaveCompaction, which continues a run when the path ends on a question - asking for a summary
+	// is not asking for another turn.
+	s.mu.Lock()
+	s.compactCancel = cancel
+	s.compacting = true
+	if s.phase == phaseIdle {
+		s.phase = phaseCompacting
+	}
+	s.mu.Unlock()
+	s.emitState()
+	defer s.endManualCompaction()
+
 	r := s.runCompact(ctx, compact.TriggerManual, true, instruction)
 	return r, nil
+}
+
+// endManualCompaction puts back what CompactNow announced, in the order leaveCompaction uses: the flags
+// first and the state event after, so no reader is told about a summary by the event that ends it.
+func (s *Session) endManualCompaction() {
+	s.mu.Lock()
+	s.compactCancel = nil
+	s.compacting = false
+	if s.phase == phaseCompacting {
+		s.phase = phaseIdle
+	}
+	s.mu.Unlock()
+	s.emitState()
 }
 
 // enterCompaction takes the compaction lock. Spec §1.4 requires the lock to be taken before
@@ -293,7 +329,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		}
 		// Oversized after maxAttempts: the three-option gate (§3.4). The compaction lock is
 		// still held while waiting, so nothing else can write during the wait.
-		decision := s.askGate(&res)
+		decision := s.askGate(ctx, &res)
 		switch decision {
 		case GateAccept:
 			res.Gate = string(GateAccept)
@@ -476,8 +512,10 @@ func (s *Session) commitCompaction(cfg Config, p compact.Params, plan *compact.P
 	return res
 }
 
-// askGate shows the three-option card and waits (§3.4). Aborting the wait counts as skip.
-func (s *Session) askGate(res *CompactResult) GateAnswer {
+// askGate shows the three-option card and waits (§3.4). Aborting the wait counts as skip: so does the
+// timeout, and so does the context this summary is running on dying (Stop ends a manual one, an interrupt
+// ends an automatic one) - a card nobody can answer any more is a decision nobody is waiting for.
+func (s *Session) askGate(ctx context.Context, res *CompactResult) GateAnswer {
 	id := fmt.Sprintf("gate-%d", time.Now().UnixNano())
 	ch := make(chan gateDecision, 1)
 	s.mu.Lock()
@@ -505,6 +543,8 @@ func (s *Session) askGate(res *CompactResult) GateAnswer {
 	select {
 	case d := <-ch:
 		decision = d.answer
+	case <-ctx.Done():
+		decision = GateSkip
 	case <-time.After(30 * time.Minute):
 		decision = GateSkip
 	}

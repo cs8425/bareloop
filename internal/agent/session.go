@@ -109,8 +109,13 @@ type Session struct {
 	// compaction lock (§1.4): taken before the first await, covers summary + gate wait.
 	compMu     sync.Mutex
 	compacting bool
-	gate       chan gateDecision
-	gateID     string
+	// compactCancel is the one hand on a manual summary that is in flight, and Stop() is the only
+	// fingers on it. It exists because a summary belongs to the session rather than to the request
+	// that asked for it (CompactNow), and a thing that outlives its request needs somebody else to be
+	// able to end it. Nil while nothing is summarising.
+	compactCancel context.CancelCauseFunc
+	gate          chan gateDecision
+	gateID        string
 
 	// pendingElicit waits for the UI to answer an MCP input request.
 	pmu           sync.Mutex
@@ -638,27 +643,14 @@ func (s *Session) reload() error {
 	return nil
 }
 
-// SetName renames the session. The name lives in config.json and nowhere else: that file is
-// rewritten whole on every save, so a rename needs no log record and leaves no stale copy for
-// Replay to resurrect. The config snapshot is taken under the lock so the disk write is not.
-func (s *Session) SetName(name string) error {
-	s.mu.Lock()
-	s.cfg.Name = name
-	cfg := s.cfg
-	s.mu.Unlock()
-	if err := s.mgr.SaveConfig(cfg); err != nil {
-		return err
-	}
-	s.emitState()
-	return nil
-}
-
-// SetFlags is this session's pin and archive pair, written the way SetName writes a name: the snapshot is
-// taken under the lock and the disk write is not, and applyFlags is the one door the pair goes through.
+// SetFlags is this session's pin and archive pair: the config snapshot is taken under the lock and the
+// disk write is not, and applyFlags is the one door the pair goes through. Renaming goes the same way,
+// through UpdateConfig - both rewrite config.json whole, so neither needs a log record and neither leaves
+// a stale copy for Replay to resurrect.
 //
-// There is no emitState at the end, whatever SetName does: a `state` event carries the status, and neither
-// flag is in it. The session list is the thing that shows these two, and it is re-read by whoever asked -
-// an event that had nothing new in it would only be a second way for the two to disagree.
+// There is no emitState at the end: a `state` event carries the status, and neither flag is in it. The
+// session list is the thing that shows these two, and it is re-read by whoever asked - an event that had
+// nothing new in it would only be a second way for the two to disagree.
 func (s *Session) SetFlags(pinned, archived *bool) error {
 	s.mu.Lock()
 	applyFlags(&s.cfg, pinned, archived)
@@ -888,7 +880,7 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 			s.emitState()
 		}()
 	}
-	// No SetName here: the merged patch — whose Name was filled from old.Name above — is exactly
+	// No separate rename here: the merged patch — whose Name was filled from old.Name above — is exactly
 	// what SaveConfig just wrote, so the rename is already persisted.
 	s.emitState()
 	if patch.StructuredContent != "" || len(patch.MCP) > 0 {
