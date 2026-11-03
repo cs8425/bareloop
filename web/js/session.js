@@ -844,9 +844,10 @@ export function renderStatus(st) {
   phase.textContent = st.phase;
   phase.className = 'badge ' + st.phase;
   // The composer's right-hand slot belongs to the phase: send while idle, the red square and the bolt
-  // while a run is live. One owner for that decision (composer.js), because the glyph and the Enter key
-  // have to agree - Enter interrupts mid-run, so a send arrow sitting there would be a lie.
-  syncComposer(st.phase === 'running');
+  // while a run is live, and the square alone while a manual summary is in flight (Stop is the only hand
+  // on one). One owner for that decision (composer.js), because the glyph and the Enter key have to agree
+  // about what a send is worth right now - and Enter always sends, queued by a busy session or not.
+  syncComposer(st.phase === 'running', st.phase === 'compacting');
   // And the one fact `running` cannot carry: that this session is asleep on a tool call the daemon owns the
   // wake-up for (js/park). It is shown as the moment the wait is due, never as a countdown — nothing
   // re-renders while a session is asleep, and a figure that goes stale next to a promise is a lie about the

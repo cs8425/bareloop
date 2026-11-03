@@ -94,19 +94,28 @@ function renderAttachments() {
 }
 
 // syncComposer is the single place that decides what the composer's right-hand slot offers:
-// idle -> send (dim until there is a draft), running -> the red square and the bolt.
+// idle -> send (dim until there is a draft), running -> the red square and the bolt, compacting -> the
+// square alone. A manual summary is not a generation, so it does not get the bolt, whose promise is
+// "abort this generation and send this message instead"; typing still works, and a message sent during a
+// summary joins the path and waits for the next run. Stop is the only hand on a summary (agent.CompactNow),
+// which is why the square appears for it at all.
 //
 // It runs on every keystroke, on every attachment change and on every status frame, so the glyph is
 // never a guess about the server: `draft()` maps base64 blobs and is far too expensive to call here,
 // which is why the emptiness test looks at the textarea and the attachment list directly.
-export function syncComposer(running) {
+export function syncComposer(running, compacting) {
   const r = running ?? state.status?.phase === 'running';
+  const c = compacting ?? state.status?.phase === 'compacting';
   const has = !!input().value.trim() || !!state.attachments.length;
   const send = $('#btn-send');
   const stop = $('#btn-stop');
   const interrupt = $('#btn-interrupt');
   send.classList.toggle('hidden', r);
-  stop.classList.toggle('hidden', !r);
+  stop.classList.toggle('hidden', !(r || c));
+  // The square ends whatever is in flight, and what is in flight is what the button is promising: a run
+  // has half an answer worth keeping, a summary has written nothing yet. The words are set here because
+  // this function is the only thing that knows which of the two it is showing.
+  stop.title = c && !r ? 'stop this summary - nothing is written until it finishes' : 'stop the run';
   interrupt.classList.toggle('hidden', !r);
   send.disabled = !has || !state.id;
   interrupt.disabled = !has || !state.id;
