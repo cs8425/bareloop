@@ -75,11 +75,20 @@ type Session struct {
 	// The queue it protects lives only here: a restart drops it, which is what docs/ says out loud.
 	held  string
 	queue []Message
+	// awaitingReply is the third shape of the debt park.go describes: a payload has gone out and its
+	// reply is not on the path yet. Appending anything in that window puts the message in front of the
+	// answer that never saw it — and when that turn ends without tool calls nothing answers it at all,
+	// because the reply is committed at the tip and the loop's own "is an answer owed" test reads only
+	// the tip. Opened by markSent, closed the moment that reply exists (loop.go stopAwaiting).
+	awaitingReply bool
 	// generating is true only while an LLM stream is open. Compaction may run between turns
 	// of a run (the loop calls it itself) but never while tokens are flowing (§1.1).
 	generating bool
-	forceMsg   *Message // set when the user interrupts with a message to send now
-	turn       int
+	// forceRun is a promise made to an interrupting message: the run being aborted cannot be the run
+	// that answers it, because that run's context is about to be dead and every request built from it
+	// fails on the way out. Its epilogue starts the run that does.
+	forceRun bool
+	turn     int
 	// sentTip is the path tip that was included in the payload we last sent. Everything on
 	// the path after it is "pending": a message the user typed while the loop was running.
 	sentTip  string
@@ -366,9 +375,22 @@ func (s *Session) pendingLocked() []string {
 	return out
 }
 
+// markSent records that this payload covered the path up to the tip — and opens the debt it creates:
+// from here until its reply is committed, the path is standing on a request whose answer does not
+// exist yet, so a message appended now would travel ahead of it (Session.awaitingReply).
 func (s *Session) markSent() {
 	s.mu.Lock()
 	s.sentTip = s.st.Tip
+	s.awaitingReply = true
+	s.mu.Unlock()
+}
+
+// stopAwaiting closes the debt one request opened. It is called the moment that request's reply is on
+// the path, and also when it is certain no reply is coming — never earlier, because the reply is what
+// anything held in the queue is waiting to be behind.
+func (s *Session) stopAwaiting() {
+	s.mu.Lock()
+	s.awaitingReply = false
 	s.mu.Unlock()
 }
 
@@ -1045,7 +1067,7 @@ func (s *Session) Close() error {
 	s.park = nil
 	// What was held dies with the session rather than being written out on the way: nothing is going to
 	// answer the call it was waiting for, and a restart losing it is the documented cost (docs/).
-	s.held, s.queue = "", nil
+	s.held, s.queue, s.awaitingReply, s.forceRun = "", nil, false, false
 	s.mu.Unlock()
 	s.reg.closeAll()
 	return s.log.Close()

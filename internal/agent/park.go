@@ -23,6 +23,11 @@ package agent
 // The predicate that decides it is answeringLocked, and it asks about the call rather than about the wait:
 // an ordinary tool call leaves the same window open for the length of the call, with nothing parked and no
 // timer anywhere, and the messages that arrive in it are held by this file all the same.
+//
+// The third window is not a call at all: it is a request that has left this process, whose answer is not on
+// the path yet. Nothing committed points at it, so no entry can be walked back to find it — which is why
+// awaitingReply is a field rather than another question asked of the path. It holds the same thing for the
+// same reason: a message appended in that window travels in front of a reply that never saw it.
 
 import (
 	"context"
@@ -190,11 +195,17 @@ func (s *Session) isParked() bool {
 	return s.park != nil
 }
 
-// isAnswering reports that the path is owed an answer to a tool call — the wait is on a timer, or a run is
-// between committing the call and writing its result. Anything that would put an entry between a call and
-// its result has to ask this rather than isParked, because the wake is exactly the moment a park stops being
-// visible and the hole does not.
+// isAnswering reports that the path is owed an answer — to a tool call (the wait is on a timer, or a run is
+// between committing the call and writing its result) or to a request that is still on the wire. Anything that
+// would put an entry between a call and its result has to ask this rather than isParked, because the wake is
+// exactly the moment a park stops being visible and the hole does not.
 func (s *Session) isAnswering() bool { return s.answering() != "" }
+
+// awaitingReplyOwed is what answering reports for the one debt that has no entry to name: the request we
+// have sent and whose reply is not committed yet. It is a sentence rather than an id because the only thing
+// read out of it is a log line, and inventing an id for an entry that does not exist yet would be worse than
+// admitting the answer has no address yet.
+const awaitingReplyOwed = "the request in flight"
 
 // answering names the call the path is owed an answer for, and "" when it is owed none. Two things read it:
 // a message that would otherwise fall into the hole (Send), and a compaction that would otherwise cut the
@@ -205,8 +216,8 @@ func (s *Session) answering() string {
 	return s.answeringLocked()
 }
 
-// answeringLocked is that question with the lock held. Two shapes owe an answer, and the second is the
-// one this file used to miss:
+// answeringLocked is that question with the lock held. Three shapes owe an answer, and the third is the one
+// this file used to miss:
 //
 //   - s.held: a wait this daemon owns, asleep on a timer or handed over by the process that died;
 //   - a run is in flight and one of the calls of the last entry that asked for tools has no result yet —
@@ -215,11 +226,20 @@ func (s *Session) answering() string {
 //     appended in that window leaves the model reading its tool answer after the person's new message,
 //     and it answered by inventing the output. Nothing in this project reorders a path, so the order
 //     written in that window is the order every later turn sends.
+//   - s.awaitingReply: a payload has gone out and its reply is not on the path. The hole is the mirror
+//     image of the second shape — there is nothing unanswered to walk back to, and what a message
+//     appended now overtakes is a reply that has not been written. Worse, when that turn asks for no
+//     tools the reply is the last entry of all, so nothing is left at the tip saying an answer is owed:
+//     needsRun reads the tip, finds an assistant message, and the message nobody has ever asked the
+//     model about stays unasked about — in this run, and in every later one, since Resume refuses an
+//     assistant tip too.
 //
 // why the run is part of the second shape and the shape alone is not enough: an unanswered call at the tip
 // is also what an abort or a restart leaves behind, and then nothing in this process intends to answer it.
 // Holding a message for a promise nobody is going to keep parks it in memory until the next restart, and
-// the person pressing send is the only answer such a call is ever going to get.
+// the person pressing send is the only answer such a call is ever going to get. The same reason puts
+// awaitingReply after the phase test rather than before it: the flag is a fact about a request, and the
+// phase is the promise that somebody here is on their way to its answer.
 func (s *Session) answeringLocked() string {
 	if s.held != "" {
 		return s.held
@@ -229,6 +249,12 @@ func (s *Session) answeringLocked() string {
 	// way to that answer.
 	if s.phase != phaseRunning {
 		return ""
+	}
+	// The request in flight owes the most and is the hardest one to see, because the path says nothing
+	// about it: the payload is gone, the reply is not here yet, and every message sent meanwhile would
+	// be committed in front of an answer that cannot include it any more.
+	if s.awaitingReply {
+		return awaitingReplyOwed
 	}
 	// why this walks back over the results instead of only reading the tip: a turn is answered one call at a
 	// time, so between one result and the next the calls after it are still owed an answer, and a message

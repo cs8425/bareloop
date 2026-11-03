@@ -109,8 +109,19 @@ func (s *Session) Stop() error {
 	return fmt.Errorf("agent: nothing running in session %s (phase %s)", s.ID, phaseToString(s.phase))
 }
 
-// Interrupt aborts the current generation and, when a message is supplied, appends it and
-// continues immediately ("force interrupt and early send").
+// Interrupt aborts the current generation and, when a message is supplied, makes sure that message both
+// reaches the path and gets an answer — "force interrupt and early send".
+//
+// The message is not appended here. The path it would join is exactly the shape the assembler cannot use:
+// half an assistant reply, or a call whose result is on its way. So it joins the queue — the same place every
+// other message sent into a hole goes, reached directly rather than through holdMessageLocked because that
+// function's job is to answer "is there a hole?", and here the answer is already known — and forceRun promises
+// it a run.
+//
+// forceRun is not a courtesy to the impatient. Cancelling is not polite: from the cancel below this line
+// onward, every request the aborted run builds dies in the HTTP client on its way out, so the loop staying in
+// this run could only ever produce another error entry. A force-interrupt that kept its message in the run it
+// had just killed was answered by nothing at all.
 func (s *Session) Interrupt(msg Message) error {
 	has := strings.TrimSpace(msg.Text) != "" || len(msg.Images) > 0
 	s.mu.Lock()
@@ -120,6 +131,9 @@ func (s *Session) Interrupt(msg Message) error {
 		// is the wait saying "user interrupt", then this message, then the answer to it. If a run still
 		// owns the session for a moment, askWakeLocked leaves the wake to a timer rather than starting a
 		// second run, and the message stays held with everything else until that wake lands.
+		//
+		// No forceRun here, unlike the running branch below: a wake is already coming, and it is the run
+		// that owes this message its answer.
 		if has {
 			s.holdMessageLocked(msg)
 		} else {
@@ -129,13 +143,25 @@ func (s *Session) Interrupt(msg Message) error {
 		s.mu.Unlock()
 		return nil
 	}
+	queued := false
 	if s.phase == phaseRunning && has {
-		m := msg
-		s.forceMsg = &m
+		// Queued and promised a run, in that order, under the lock the epilogue needs to see both.
+		// Appending rather than overwriting: two presses are two messages the person wrote, and the
+		// single slot this used to be had the second one swallow the first without a word.
+		s.queue = append(s.queue, msg)
+		s.forceRun = true
+		queued = true
 	}
 	cancel := s.cancel
 	s.mu.Unlock()
 	if cancel == nil {
+		if queued {
+			// A running session with no way to cancel it is not a state today's fields allow (a run owns
+			// phase and cancel together, and a park answers to the branch above). Should it ever exist, the
+			// message has still been accepted: falling through to Send would put a second copy of it on the
+			// path, and a duplicate is a worse answer than a surprising one.
+			return nil
+		}
 		if !has {
 			return errors.New("agent: nothing running and no message to send")
 		}
@@ -191,19 +217,13 @@ func (s *Session) Resume(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) takeForceMsg() *Message {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	m := s.forceMsg
-	s.forceMsg = nil
-	return m
-}
-
 // run is the outer loop: agentic turns until the model answers without tool calls, then the
-// end-of-turn compaction check, then — only if a user message arrived in the meantime —
-// another pass. That last pass is the auto-injection of a message sent while the loop was
-// busy (spec §6: "a new message during compaction is queued and sent as soon as the lock is
-// released"; the same mechanism covers a busy loop).
+// end-of-turn compaction check, then — only if the path now ends with something unanswered —
+// another pass. That last pass is how a message sent while the loop was busy gets its answer: it is
+// either already on the path (a message that found no debt open appends like any other) or it was
+// queued and has just been flushed behind the reply it was held for, and either way it is the entry
+// needsRun reads here (spec §6: "a new message during compaction is queued and sent as soon as the lock
+// is released"; the same mechanism covers a busy loop).
 func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st runStart) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -232,8 +252,14 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 			s.phase = phaseIdle
 		}
 		s.cancel = nil
-		force := s.forceMsg
-		s.forceMsg = nil
+		// The debt one request opened dies with the run, however the run ended: the reply is on the path
+		// (turns() closed it at the commit) or it is never coming. Left open, it would keep holding the next
+		// message for a request no goroutine in this process is waiting for any more.
+		s.awaitingReply = false
+		// The promise made to an interrupting message is collected here rather than kept: whether it turns
+		// into a run is decided below, once the path holds everything it is going to hold.
+		answer := s.forceRun
+		s.forceRun = false
 		done := s.done
 		s.done = nil
 		s.mu.Unlock()
@@ -249,17 +275,21 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 		if !s.isParked() {
 			s.flushHeld()
 		}
-		if force != nil {
-			// The run ended before the forced message could be appended. It goes the way of every message
-			// that finds a call still unanswered — into the queue rather than onto the path — because the
-			// run that answers that call is exactly what the message has to wait for. This is the one moment
-			// a message can arrive while the session is parking, and it is why the queue is consulted here
-			// rather than at one caller.
-			if !s.holdMessage(*force) {
-				if e, err := s.appendEntry(s.userEntry(*force)); err == nil {
-					s.emit(Event{Type: EvtEntry, Entry: e})
-				}
+		// The run that was aborted cannot be the one that answers what aborted it: its context is cancelled,
+		// and every request built from it is refused on the way out of the process. So the message that came
+		// in by interrupt is answered by a run started right here — fresh context, payload assembled from a
+		// path that now ends with that message.
+		//
+		// Asked rather than assumed, twice over: a session that parked on the way out is asleep with its wake
+		// armed, and a path ending in anything but a user message or a tool result is not asking a question.
+		// beginRunLocked holds the real veto, which is why this is allowed to be a guess.
+		if answer && !s.isParked() && s.needsRun() {
+			s.mu.Lock()
+			if s.phase == phaseIdle {
+				s.logf("the run that was interrupted cannot answer the message that interrupted it: starting the run that can")
+				s.startRunLocked(context.Background(), 0)
 			}
+			s.mu.Unlock()
 		}
 		if toolsChanged {
 			s.logf("tool policy applied now that the run is over")
@@ -359,10 +389,11 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		}
 
 		// Rebuild the payload from storage on every turn. This is the mechanism that injects a message the
-		// user sent mid-run: it is already on the path, so it becomes part of this turn's payload. The
-		// exception has a name: a message that arrived while a tool call was outstanding is held (see
-		// answeringLocked) and joins the path after that call's answer, so it reaches this turn the same
-		// way — just never between a call and its result.
+		// user sent mid-run: it is already on the path, so it becomes part of this turn's payload. What is kept
+		// off the path is the other half of the mechanism: a message that arrives while the path is owed an
+		// answer — a tool call with no result yet, or this very request's own reply — waits in the queue until
+		// the answer it belongs behind has been written, and joins the path there (answeringLocked). So no
+		// turn is ever assembled from a message that jumped ahead of the thing it was sent after.
 		built, sizes, tools := s.build()
 		s.markSent()
 		s.emitPending()
@@ -397,6 +428,11 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 
 		entry, streamID, aborted := s.generate(ctx, built, tools, turn)
 		if entry == nil {
+			// No reply, and none coming: the request was refused on its way out, which in practice means the
+			// context was cancelled while it was on the wire. The debt closes here rather than waiting for the
+			// run, because a hold outlasting the request it holds for is how a message gets stuck behind an
+			// answer that was never going to exist.
+			s.stopAwaiting()
 			return aborted, nil
 		}
 		if aborted {
@@ -404,6 +440,9 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			entry.Label = "interrupted by user"
 		}
 		committed, err := s.appendEntry(entry)
+		// Whether or not that worked, this request has its final answer: on the path, or refused by storage.
+		// Closing the debt before the returns below is what keeps the hold a debt with a fixed end.
+		s.stopAwaiting()
 		if err != nil {
 			return false, fmt.Errorf("commit assistant entry: %w", err)
 		}
@@ -436,23 +475,28 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		}
 
 		if aborted {
-			// Force-interrupt: keep the half output, append the user's message and keep
-			// going. Any tool call that never ran gets a synthetic result from the assembler
-			// (spec §5.1: an assistant message with tool_calls must never be sent bare).
-			if fm := s.takeForceMsg(); fm != nil {
-				if e, err := s.appendEntry(s.userEntry(*fm)); err == nil {
-					s.emit(Event{Type: EvtEntry, Entry: e})
-					s.emitPending()
-					continue
-				}
-			}
+			// The person stopped this output, and the half reply is kept and marked. Anything they sent while
+			// doing so is in the queue, and nothing is appended from here: this context is cancelled, so the run
+			// that reads a payload containing that message is the next one, and forceRun is what promises it.
+			// Any tool call that never ran gets its synthetic result from the assembler (spec §5.1: an
+			// assistant message with tool_calls must never be sent bare).
 			return true, nil
 		}
 		if len(entry.ToolCalls) == 0 {
+			// Normal stop. Nothing is outstanding any more — not this reply, not a call — so what was held
+			// behind it stops being held right here, before the loop is asked whether it owes another turn.
+			// That question reads the path, and a message still sitting in memory when it is asked is a
+			// message this run will never answer: the path ends on this reply, so needsRun says no, and the
+			// reply at the tip is the reason nobody ever asks again.
+			s.flushHeld()
 			return false, nil // normal stop
 		}
 		if cfg.MaxTurns > 0 && s.turnCount() >= cfg.MaxTurns {
 			s.emit(Event{Type: EvtInfo, Info: fmt.Sprintf("stopped after %d turns (session maxTurns)", s.turnCount())})
+			// This run is finished, and the call it stops on is a legal place to leave a path: the assembler
+			// writes that call's result as the interruption it was. A message held behind it has nothing left
+			// to be held for, so it joins the path before this function stops asking questions about it.
+			s.flushHeld()
 			return false, nil
 		}
 
@@ -469,12 +513,9 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		// turns with them, and the run would finish answering a question the person had already amended.
 		s.flushHeld()
 		if abortedTools {
-			if fm := s.takeForceMsg(); fm != nil {
-				if e, err := s.appendEntry(s.userEntry(*fm)); err == nil {
-					s.emit(Event{Type: EvtEntry, Entry: e})
-					continue
-				}
-			}
+			// Every call of this turn has its answer, and the messages that interrupted it are behind them
+			// (flushed just above). Staying in this run would ask the model on a cancelled context, so the
+			// answer is the next run's — promised, if the interrupt came with a message.
 			return true, nil
 		}
 	}
