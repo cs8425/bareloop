@@ -194,6 +194,7 @@ default:
 | `builtinTools` | absent = **every one of them off** — the list is what switches a builtin on | any list of real names (`["wait"]`); `[]` is a decision meaning "all off", and a name that is not a builtin is a 400 rather than a quiet no |
 | `timezone` | absent = UTC | any zone the daemon can resolve — `Asia/Taipei`, `+08:00`, `UTC-5`, `Local`. Getting back to UTC means sending `"UTC"`, because empty means unchanged |
 | `structuredContent` | absent = **`auto`** (fold the tool's JSON in, but never twice) | `fallback` / `always` / `drop`, per server in `mcp[]` ([the four words](#structured-content-in-four-words)) |
+| `structuredMaxBytes` | absent = **16 384 bytes** of a tool's JSON are shown, then a note naming what was left out | any positive byte count; only a negative is refused, because it is what someone types for "no limit" and it decodes back as the default. Unlike the word above it, `defaults` does not carry it: the ceiling is one session's own. `0` means unchanged, so the shipped default only comes back by being typed |
 | `llm.insecureTLS` | absent = verify, like anyone else | `false` is the same as absent; **`true` is a different endpoint** and is logged every time it applies |
 | `llm.caFile` | absent = the system trust store | a PEM bundle to verify against — and the only thing it is verified against |
 
@@ -338,12 +339,41 @@ so when it starts, and `inspect`/`payload` show the truth before the request goe
 then switched back does not hand the prefix back, which is why the settings dialog offers one dropdown rather
 than a per-turn choice.
 
+How much of that JSON reaches the model is one more number per session — `structuredMaxBytes`, beside
+the word and not inside the `asm` block — and it defaults to **16 384 bytes**, read on this project's ruler
+of four bytes per token: a capped result is four thousand tokens on the same scale that decides
+compaction and the pre-send fit check. It exists because the size of that field is chosen by somebody
+else: one server answering a directory listing with ten megabytes of JSON spends a window on raw data,
+and the session discovers that as a refusal. It is one number for the session and not one per server,
+because a token budget is easier to hold in your head than a budget per server.
+
+```
+[structuredContent truncated: the first 16384 bytes of a 10485760-byte document are shown above, and it is
+missing its last 10469376 bytes. What is above is cut off mid-document and will not parse; answer only from
+what is shown, and say what you cannot see.]
+```
+
+What survives the cut is the **beginning**, because a prefix of the same JSON is byte-identical on every
+rebuild of this session and costs the prompt cache nothing after the turn that first showed it — which is
+why this is a head and not a head-and-tail clip like the one the summariser falls back to. The note goes
+with it, worded as an instruction for the same reason the note about an unsent image is: a fragment that
+reads like a document gets answered as one.
+
+The ceiling is on the **wire only**. `data/<id>/log.jsonl`, `GET /api/session/{id}` and the transcript
+keep the whole document, so raising the number later means a bigger payload rather than a repair — the
+same property that makes the four words reversible. A ceiling has no floor to type past: one small enough to
+show almost nothing is a decision about a chatty server — obvious in the first tool result and one PATCH from
+fixed — while a negative is refused where it is written, because it is what people type for "no limit" and
+would be stored as a number the session reads back as the default. What it does not cap is the tool's
+`content` text: a server can spend a window with prose just as easily, and cutting a tool's own answer is a
+different decision from deciding how much of its JSON to quote.
+
 On screen the word is not applied: **both channels are always shown**. A tool result that carries the second
 channel gets one more fold inside its card, labelled `structuredContent` and — once opened — how many
 characters it holds. It is closed like the output fold above it, and its JSON is formatted and laid out only
 on the first open, so a server that answers every call with 100 KB of JSON costs the transcript one 24 px row
-until someone asks to read it. The four words are chosen in the settings dialog, where the paragraph above is
-repeated in one sentence — this is the only row in that dialog whose price is a whole KV prefix rather than a
+until someone asks to read it. The four words and the ceiling are both set in the settings dialog, where
+the cost of both is repeated in one sentence — each can be priced in a whole KV prefix rather than a
 handful of tokens.
 
 ### Compaction, in short

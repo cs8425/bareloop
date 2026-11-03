@@ -320,6 +320,27 @@ be changed later without rewriting `data/<id>/log.jsonl`
 with the tool definition; nothing here re-validates a result against it — the server is the one that
 promised, and bareloop stores what it answered.
 
+How much of that field a session is willing to put in front of the model is the other half of the same
+decision, taken at the same moment: `structuredMaxBytes`, 16 384 bytes by default, applied on the way
+out. What survives is the document's **beginning** rather than a clip of its ends, because a prefix of
+the same JSON is byte-identical across every rebuild of a session, while a head-plus-tail clip changes
+which bytes are shown every time a budget moves — the difference between a capped result that costs the
+prompt cache nothing after its first turn and one that costs a fresh prefill on every turn. What follows
+the fragment reports how much was shown, how much there was, and that the piece will not parse: a
+truncation the model cannot see is answered with an invention, which is the same lesson `imageNote`
+carries for an image whose pixels were never sent.
+
+The estimate has to be handed the same number, or the ceiling is a trap worse than the overflow it
+prevents. A message that has never been part of a request is priced at bytes over four, and a tool result
+is by construction in that set for as long as it is the newest thing on the path; `status.contextKnown` is
+a memory-only fact that a restart clears, so the first send after a restart has nothing but those
+estimates for the fit check to refuse with. Ten megabytes priced as ten megabytes is two and a half
+million tokens on that ruler, no window holds that, and the session would answer `context will not fit`
+to everything it was asked for the rest of its life over a payload of 16 384 bytes. So
+`Estimate` bounds the field by the fragment plus the widest note it can produce — a ceiling stays a
+ceiling — while the per-entry `entryBytes` of `inspect` goes on counting what is **stored**: one figure
+is what the disk holds and the other is what the wire can cost, and merging them would make both wrong.
+
 ### The name builtin is taken
 
 The tools this daemon answers itself go through the same registry as MCP tools and are recorded under the
