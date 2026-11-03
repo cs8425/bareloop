@@ -201,7 +201,10 @@ appended **is** the boundary, and the plan for it was made from a path without t
 meanwhile waits in memory, and is appended behind the boundary the moment the summary lands; the run that
 message earns is what answers it. `Stop` is the only hand on one, and stopping it commits nothing: the summary
 is one entry written at the end or nothing written at all, so the path is still the one it was and the next
-compaction starts from scratch. An interrupt is refused for the duration, and it is the only place the bolt does
+compaction starts from scratch. Every summary is cancellable by somebody, and every one is asked one last
+time at the commit: the loop's own - including the forced compaction the pre-send fit check runs, which used
+to run on a context of nobody's - dies with the run, and a manual one with `Stop`. An interrupt is refused for
+the duration, and it is the only place the bolt does
 not get what it wants: an interrupt aborts a generation so a new message can be answered, and a summary has
 neither a generation to abort - it writes nothing until it finishes - nor an answer owed to anything. The error
 names `/stop`, and after it the interrupt works. The three-option gate waits on that same context, so a card

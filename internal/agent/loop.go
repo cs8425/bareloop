@@ -419,8 +419,24 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		s.markSent()
 		s.emitPending()
 
-		if err := s.guardFit(sizes); err != nil {
+		shrunk, err := s.guardFit(ctx, sizes)
+		if err != nil {
 			return false, err
+		}
+		if shrunk {
+			// The fit check had to compact, so this turn's payload describes a path that no longer exists:
+			// it was measured before the boundary, and sending it anyway would send exactly the request the
+			// check refused while reporting a smaller path as "the last thing sent". Assembling again from
+			// storage is the only honest answer, and it is the same three lines the in-loop trigger below
+			// uses for the same reason.
+			//
+			// Once, not until it stops shrinking: forcing a second summary on a path that just got one is
+			// the redundant-compaction pattern the triggers exist to avoid, and a request the provider then
+			// refuses for size is the accepted end of a turn that genuinely cannot fit (see the overflow
+			// rescue below, and "Refusing one request is the accepted design").
+			built, sizes, tools = s.build()
+			s.markSent()
+			s.emitPending()
 		}
 
 		// In-loop trigger (spec §1.1 T2), on unless compact.inLoop is false.
@@ -430,8 +446,15 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 				built, sizes, tools = s.build()
 				s.markSent()
 				s.emitPending()
-				if err := s.guardFit(sizes); err != nil {
+				shrunk, err := s.guardFit(ctx, sizes)
+				if err != nil {
 					return false, err
+				}
+				if shrunk {
+					// Again: the check shrank the path after this payload was assembled.
+					built, sizes, tools = s.build()
+					s.markSent()
+					s.emitPending()
 				}
 			}
 		}
@@ -963,10 +986,24 @@ func (s *Session) lastSentPayload() ([]asm.Message, []llm.Tool) {
 // guardFit is the last line of defence before a send (spec §3.10): refuse to send a payload
 // that cannot fit instead of corrupting the history with a truncated request. It is
 // deliberately conservative (98%) and tells the user what to do next.
-func (s *Session) guardFit(sizes *asm.Sizes) error {
+//
+// It reports whether the path changed underneath the caller. When its forced compaction commits, the
+// payload held by the caller is a description of a path that no longer exists - and the numbers it was
+// measured with are gone with it - so the turn has to be assembled again from storage. Skipping that was a
+// real bug: the guard measured the shrunken path, declared it fits, and let the oversized request go out
+// anyway, then remembered it as "the last payload actually sent". A second opinion from the same ruler is
+// not a courtesy to the impatient, it is the difference between a guard and a formality.
+//
+// The forced compaction it may run is given the caller's context, because it belongs to this run.
+// It used to run on context.Background(), which made it the one compaction no hand could reach: it is
+// not the manual summary Stop also knows about (nothing writes compactCancel), and it was not tied to
+// the run either - so stop answered "aborted" while a summary kept generating and then committed its
+// boundary into a path the person had just stopped. Now it dies with the run like the request it was
+// meant to prevent, and a summary writes nothing until it finishes, so nothing is lost.
+func (s *Session) guardFit(ctx context.Context, sizes *asm.Sizes) (bool, error) {
 	nctx := s.nctxLocked()
 	if nctx <= 0 {
-		return nil // unknown window: fail open, the provider will complain if it must
+		return false, nil // unknown window: fail open, the provider will complain if it must
 	}
 	used, known := s.usedNow()
 	if !known {
@@ -974,10 +1011,10 @@ func (s *Session) guardFit(sizes *asm.Sizes) error {
 		used = sizes.Total()
 	}
 	if used < nctx*98/100 {
-		return nil
+		return false, nil
 	}
 	// It does not fit: try one forced compaction before refusing.
-	res := s.compactHere(context.Background(), compact.TriggerManual, true)
+	res := s.compactHere(ctx, compact.TriggerManual, true)
 	if res.Committed {
 		s.emit(Event{Type: EvtCompact, Data: res})
 		used, known = s.usedNow()
@@ -986,14 +1023,14 @@ func (s *Session) guardFit(sizes *asm.Sizes) error {
 			used = s2.Total()
 		}
 		if used < nctx*98/100 {
-			return nil
+			return true, nil
 		}
 	}
 	msg := fmt.Sprintf("context will not fit: %d tokens used, model window %d, threshold %d%%", used, nctx, s.Config().Compact.ThresholdPct)
 	if res.Skipped != "" {
 		msg += ": " + res.Skipped
 	}
-	return errors.New(msg)
+	return res.Committed, errors.New(msg)
 }
 
 // usedNow returns the real context usage of the last completed turn (spec §0: the trigger

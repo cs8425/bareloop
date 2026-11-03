@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"bareloop/internal/compact"
 	"bareloop/internal/ir"
 	"bareloop/internal/llm"
 )
@@ -682,7 +683,6 @@ func TestASendAndAnInterruptRefuseAnEmptyMessageInTheSameWay(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------- a manual summary holds the path too
 
 // TestAMessageSentWhileASummaryIsRunningWaitsForTheBoundaryItIsWriting is the send half of the rule a manual
@@ -778,4 +778,33 @@ func TestAnInterruptIsRefusedWhileASummaryIsRunning(t *testing.T) {
 	waitForPath(t, s, 1)
 	f.waitForRequest(t, 1)
 	waitForIdle(t, s)
+}
+
+// ---------------------------------------------------------------- a stopped summary writes nothing
+
+// TestASummaryStoppedOnTheWayToTheCommitWritesNothing covers the one promise every summary makes - one entry
+// at the end, or nothing at all - in the moment that used to slip through it: the stop landed after the last
+// token arrived, while the text was already in hand. It is worth naming because of the pre-send guard, whose
+// forced compaction now runs on the run's own context (guardFit) and can therefore be stopped at all: a
+// boundary arriving in a path the person just stopped was the bug, and this is the line that refuses it.
+func TestASummaryStoppedOnTheWayToTheCommitWritesNothing(t *testing.T) {
+	s, _ := awaitingFixture(t, Config{ID: "commit-after-stop"})
+
+	// This is what the context looks like when the run that asked for the summary was stopped on the way
+	// here: the summary text exists, and nobody is waiting for it any more.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res := s.commitCompaction(ctx, s.Config(), compact.Params{}, &compact.Plan{},
+		"the summary nobody is waiting for", 12, "fake", CompactResult{Trigger: compact.TriggerManual})
+
+	if res.Skipped == "" {
+		t.Errorf("a summary committed on an ended context reported no reason: %+v", res)
+	}
+	if res.Committed || res.EntryID != "" {
+		t.Errorf("a summary was committed on an ended context (entry %q): the path changed after the stop", res.EntryID)
+	}
+	if n := len(s.path()); n != 0 {
+		t.Errorf("the path holds %d entries after a summary stopped before its commit: %s", n, describePath(s.path()))
+	}
 }

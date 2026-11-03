@@ -337,7 +337,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 			res.SummaryTokens = size
 			res.SummaryText = text
 			if p.Accepts(nctx, size) {
-				return s.commitCompaction(cfg, p, plan, text, size, summaryModel, res)
+				return s.commitCompaction(ctx, cfg, p, plan, text, size, summaryModel, res)
 			}
 			// The cap is SummaryCap, i.e. keepTarget% of n_ctx, so the percentage printed beside it has
 			// to be KeepTargetPct. Printing SummaryMaxPct here (max_tokens of the summary call, a
@@ -362,7 +362,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		switch decision {
 		case GateAccept:
 			res.Gate = string(GateAccept)
-			return s.commitCompaction(cfg, p, plan, res.SummaryText, res.SummaryTokens, summaryModel, res)
+			return s.commitCompaction(ctx, cfg, p, plan, res.SummaryText, res.SummaryTokens, summaryModel, res)
 		case GateRetry:
 			tries = p.MaxAttempts
 			if tries < 1 {
@@ -500,7 +500,18 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 }
 
 // commitCompaction writes the entry and advances the path tip in one storage write (§3.8).
-func (s *Session) commitCompaction(cfg Config, p compact.Params, plan *compact.Plan, text string, size int, model string, res CompactResult) CompactResult {
+//
+// It checks the context first because a summary is one entry written at the end or nothing at all, and the
+// gap between the last token and this line is a moment somebody could have spent stopping it: a boundary
+// arriving after a stop is a change to a path whose owner just said stop, and the text in hand is worth
+// nothing to a session that stopped asking. This is what makes "nothing is written until it finishes" true
+// even for a stop that lands on the final turn of the summary - which is the promise the composer's square
+// and the summary row of the API both make.
+func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan, text string, size int, model string, res CompactResult) CompactResult {
+	if err := ctx.Err(); err != nil {
+		res.Skipped = "nothing was written: the summary was ended before it could be committed"
+		return res
+	}
 	meta := compact.MetaOf(p, plan, model, res.Before, size)
 	content := p.Prefix(text)
 	entry, err := s.appendEntry(&ir.Entry{
