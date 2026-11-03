@@ -626,3 +626,58 @@ func TestMaxTurnsStopsOnAnUnansweredCallAndStillLandsTheMessage(t *testing.T) {
 	}
 	assertReadsBefore(t, asked, "no result recorded", "added while you were busy")
 }
+
+// TestEmptyMessageIsOneRule covers the rule itself, which is now written once (emptyMessage) rather than
+// once per verb: whitespace is nothing, and a picture is a message even with no words next to it.
+func TestEmptyMessageIsOneRule(t *testing.T) {
+	picture := []ir.Part{{Type: ir.PartImage}}
+	for _, c := range []struct {
+		what  string
+		in    Message
+		empty bool
+	}{
+		{"words", Message{Text: "hello"}, false},
+		{"nothing at all", Message{}, true},
+		{"spaces", Message{Text: "   "}, true},
+		{"a newline and a tab", Message{Text: "\n\t"}, true},
+		{"a picture alone", Message{Images: picture}, false},
+		{"a picture and spaces", Message{Text: "   ", Images: picture}, false},
+	} {
+		if got := emptyMessage(c.in); got != c.empty {
+			t.Errorf("%s: emptyMessage = %v, want %v", c.what, got, c.empty)
+		}
+	}
+}
+
+// TestASendAndAnInterruptRefuseAnEmptyMessageInTheSameWay is the whole of F8. The bolt and Enter are two
+// gestures and "you sent nothing" is one answer: an interrupt of nothing used to abort the run, answer ok and
+// throw away whatever whitespace the body carried, while the same body sent to Send was refused.
+func TestASendAndAnInterruptRefuseAnEmptyMessageInTheSameWay(t *testing.T) {
+	s, f := awaitingFixture(t, Config{ID: "empty-draft"})
+
+	if err := s.Send(context.Background(), Message{}); err != errEmptyMessage {
+		t.Errorf("send of nothing: %v, want %v", err, errEmptyMessage)
+	}
+	if err := s.Send(context.Background(), Message{Text: "   "}); err != errEmptyMessage {
+		t.Errorf("send of spaces: %v, want %v", err, errEmptyMessage)
+	}
+	if err := s.Interrupt(Message{}); err != errEmptyMessage {
+		t.Errorf("interrupt of nothing: %v, want %v", err, errEmptyMessage)
+	}
+	if err := s.Interrupt(Message{Text: " \t\n "}); err != errEmptyMessage {
+		t.Errorf("interrupt of spaces: %v, want %v", err, errEmptyMessage)
+	}
+
+	// Refusing is all it does: nothing reached the path, nothing was queued, and no model was asked -
+	// an interrupt in particular used to abort whatever was running before anyone looked at the body.
+	if n := len(s.path()); n != 0 {
+		t.Errorf("the path holds %d entries after four refusals: %s", n, describePath(s.path()))
+	}
+	wantQueued(t, s, 0)
+	if got := f.count(); got != 0 {
+		t.Errorf("the provider was asked %d times, want 0", got)
+	}
+	if st := s.Status(); st.Phase != PhaseIdle {
+		t.Errorf("phase = %q after four refusals, want %q", st.Phase, PhaseIdle)
+	}
+}

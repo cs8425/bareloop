@@ -448,8 +448,10 @@ A handed-over wait can also be ended, and the two ways of doing it are the two w
 `Stop()` does the only thing stop can mean when nothing is generating, answering the call `interrupted` and
 naming nobody, because nothing of anybody's is coming after it; `Interrupt(msg)` holds the message like any
 message sent into a debt and then ends the wait as `user interrupt`, so the model reads the wait's own sentence
-about who ended it and then reads the message. Either way what was held is written out rather than left behind,
-because once nothing is owed to the tool the messages the user sent are owed to the conversation.
+about who ended it and then reads the message - and it always has a message, since a body with neither words nor
+pictures is refused there by the very rule send applies (ending a wait while saying nothing is what `Stop` is
+for). Either way what was held is written out rather than left behind, because once nothing is owed to the tool
+the messages the user sent are owed to the conversation.
 
 ### Why a parked session still reports running
 

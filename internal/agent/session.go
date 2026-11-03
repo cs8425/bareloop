@@ -504,12 +504,24 @@ func (s *Session) emitPending() {
 
 // ---------------------------------------------------------------- user input
 
+// errEmptyMessage is what the two verbs that take a message answer when it carries nothing, and it is the
+// same value in both so the two can never drift into meaning different things again.
+var errEmptyMessage = errors.New("agent: empty message")
+
+// emptyMessage is the one rule that decides what "nothing" is: whitespace alone is nothing, and a picture is
+// a message by itself (a screenshot with no caption is a complete thing to send). Send refuses such a
+// message because the path has no shape for it; Interrupt refuses it because an interrupt with nothing in it
+// is a stop, and Stop exists.
+func emptyMessage(m Message) bool {
+	return strings.TrimSpace(m.Text) == "" && len(m.Images) == 0
+}
+
 // Send appends a user message. If the loop is idle it starts a run; otherwise the message
 // simply becomes part of the path and is picked up by the next turn (that is the whole
 // point of "the path is truth"): it becomes pending, then is injected at the proper moment.
 func (s *Session) Send(ctx context.Context, msg Message) error {
-	if strings.TrimSpace(msg.Text) == "" && len(msg.Images) == 0 {
-		return errors.New("agent: empty message")
+	if emptyMessage(msg) {
+		return errEmptyMessage
 	}
 	// Whatever the path is owed an answer for — the wait the loop handed over, or a call this run is between
 	// committing and answering — cannot be answered by anything this message touches, and appending it now

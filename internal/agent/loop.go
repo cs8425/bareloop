@@ -121,21 +121,31 @@ func (s *Session) Stop() error {
 	return fmt.Errorf("agent: nothing running in session %s (phase %s)", s.ID, phaseToString(s.phase))
 }
 
-// Interrupt aborts the current generation and, when a message is supplied, makes sure that message both
-// reaches the path and gets an answer — "force interrupt and early send".
+// Interrupt aborts the current generation and makes sure the message it carries both reaches the path and
+// gets an answer - "force interrupt and early send".
+//
+// A message is required, by the very rule a send is held to (emptyMessage): an interrupt that carries nothing
+// is not an interrupt, it is a stop, and Stop is the verb that means that. It used to be otherwise - a body of
+// spaces arrived here, aborted the run and threw the words away with one line in the daemon log, while the
+// identical body sent to send was refused. One question, two answers.
 //
 // The message is not appended here. The path it would join is exactly the shape the assembler cannot use:
-// half an assistant reply, or a call whose result is on its way. So it joins the queue — the same place every
+// half an assistant reply, or a call whose result is on its way. So it joins the queue - the same place every
 // other message sent into a hole goes, reached directly rather than through holdMessageLocked because that
-// function's job is to answer "is there a hole?", and here the answer is already known — and forceRun promises
+// function's job is to answer "is there a hole?", and here the answer is already known - and forceRun promises
 // it a run.
 //
 // forceRun is not a courtesy to the impatient. Cancelling is not polite: from the cancel below this line
 // onward, every request the aborted run builds dies in the HTTP client on its way out, so the loop staying in
 // this run could only ever produce another error entry. A force-interrupt that kept its message in the run it
 // had just killed was answered by nothing at all.
+//
+// With nothing running and nothing parked there is nothing to interrupt, and the honest answer is the message
+// itself: it goes out as a send, which is what pressing the bolt on an idle session means.
 func (s *Session) Interrupt(msg Message) error {
-	has := strings.TrimSpace(msg.Text) != "" || len(msg.Images) > 0
+	if emptyMessage(msg) {
+		return errEmptyMessage
+	}
 	s.mu.Lock()
 	if s.park != nil {
 		// Waiting rather than generating: the message cannot go on the path (it would land in front of
@@ -146,17 +156,13 @@ func (s *Session) Interrupt(msg Message) error {
 		//
 		// No forceRun here, unlike the running branch below: a wake is already coming, and it is the run
 		// that owes this message its answer.
-		if has {
-			s.holdMessageLocked(msg)
-		} else {
-			s.logf("interrupt without a message: ending the wait")
-		}
+		s.holdMessageLocked(msg)
 		s.askWakeLocked(builtin.ErrUserInterrupt)
 		s.mu.Unlock()
 		return nil
 	}
 	queued := false
-	if s.phase == phaseRunning && has {
+	if s.phase == phaseRunning {
 		// Queued and promised a run, in that order, under the lock the epilogue needs to see both.
 		// Appending rather than overwriting: two presses are two messages the person wrote, and the
 		// single slot this used to be had the second one swallow the first without a word.
@@ -174,13 +180,7 @@ func (s *Session) Interrupt(msg Message) error {
 			// path, and a duplicate is a worse answer than a surprising one.
 			return nil
 		}
-		if !has {
-			return errors.New("agent: nothing running and no message to send")
-		}
 		return s.Send(context.Background(), msg)
-	}
-	if !has {
-		s.logf("interrupt without a message: aborting the run")
 	}
 	// The cause is what lets a `wait` that dies here say who killed it, which matters because the very
 	// next thing in the payload is that person's message.
