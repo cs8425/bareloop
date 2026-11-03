@@ -425,7 +425,7 @@ func (s *Session) wakeLocked() {
 	s.beginRunLocked(context.Background(), runStart{tail: tail, w: w, resume: rc})
 }
 
-// holdMessage takes a message sent while a tool call is unanswered off the sender's hands, taking the
+// holdMessage takes a message that must not reach the path right now off the sender's hands, taking the
 // lock itself. Send() uses this; Interrupt() uses holdMessageLocked, because queueing and waking have to
 // be one decision there — a wake that starts in between would leave the message on a path whose tool
 // call is still unanswered.
@@ -435,29 +435,41 @@ func (s *Session) holdMessage(msg Message) bool {
 	return s.holdMessageLocked(msg)
 }
 
-// holdMessageLocked holds a message sent while a tool call is unanswered, and reports whether it did.
-// False is the caller's signal to append the message like any other message.
+// holdMessageLocked holds a message that must not reach the path right now, and reports whether it did.
+// False is the caller's signal to append the message like any other message. There are two reasons it must
+// not, and they are different reasons:
 //
-// Holding is not a courtesy: appended now, the message would sit between the call and its result, and
-// the assembler answers that shape by inventing a failure for a tool that is merely still waiting. The
-// question is answeringLocked rather than s.park, because of the wake: that run answers the call and
-// then asks the model, and the wait it was built from is over by then — while the hole a message could
-// fall into is not. And rather than s.held, because of the call a run is in the middle of: the same
+// Holding behind an owed answer is not a courtesy: appended now, the message would sit between the call and
+// its result, and the assembler answers that shape by inventing a failure for a tool that is merely still
+// waiting. The question is answeringLocked rather than s.park, because of the wake: that run answers the
+// call and then asks the model, and the wait it was built from is over by then — while the hole a message
+// could fall into is not. And rather than s.held, because of the call a run is in the middle of: the same
 // hole, with nothing parked and nothing holding.
+//
+// Holding behind a running manual summary is the other shape of the same problem, and it is about the
+// boundary rather than a hole: the summary is about to write an entry whose plan was made from a path that
+// does not contain this message, so appending now puts the message *under* a summary that cannot know it
+// exists. It costs the same to wait, and endManualCompaction writes it the moment the boundary is on disk
+// (or the moment the summary is abandoned, which must not strand a message either).
 func (s *Session) holdMessageLocked(msg Message) bool {
-	call := s.answeringLocked()
-	if call == "" {
-		return false
+	if call := s.answeringLocked(); call != "" {
+		s.queue = append(s.queue, msg)
+		s.logf("message held in memory instead of appended: it joins the path after the answer to %s, and a restart drops it",
+			call)
+		return true
 	}
-	s.queue = append(s.queue, msg)
-	s.logf("message held in memory instead of appended: it joins the path after the answer to %s, and a restart drops it",
-		call)
-	return true
+	if s.manualSummaryLocked() {
+		s.queue = append(s.queue, msg)
+		s.logf("message held in memory instead of appended: the summary running now plans a boundary it is not part of, and a restart drops it")
+		return true
+	}
+	return false
 }
 
 // flushHeld releases what this session was holding off the path and puts it on the path, which are the
 // only two things worth doing with it together: a queue that is released must not be kept, and a queue
-// that is kept must not be half-appended.
+// that is kept must not be half-appended. It reports how many messages reached the path, which is the
+// difference between "nothing was waiting" and "a person asked something that nobody has answered yet".
 //
 // The whole drain happens in one critical section, and that is the ordering rather than a detail. These
 // messages arrived before whatever a concurrent Send is asking for, and appendEntry takes this same lock
@@ -469,7 +481,7 @@ func (s *Session) holdMessageLocked(msg Message) bool {
 //
 // The events go out after the lock is put down, which is not a preference: emitState reads the status and
 // emitPending the pending list, and both take this lock.
-func (s *Session) flushHeld() {
+func (s *Session) flushHeld() int {
 	s.mu.Lock()
 	s.held = ""
 	queue := s.queue
@@ -497,10 +509,11 @@ func (s *Session) flushHeld() {
 		s.emit(Event{Type: EvtEntry, Entry: e})
 	}
 	if len(written) > 0 {
-		s.logf("%d held message(s) joined the path after the tool result they waited for", len(written))
+		s.logf("%d held message(s) joined the path after what they were waiting behind", len(written))
 		s.emitPending()
 		s.emitState()
 	}
+	return len(written)
 }
 
 // dropPark abandons a park that no longer describes the path. Anything already held is appended rather

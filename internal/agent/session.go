@@ -519,6 +519,7 @@ func emptyMessage(m Message) bool {
 // Send appends a user message. If the loop is idle it starts a run; otherwise the message
 // simply becomes part of the path and is picked up by the next turn (that is the whole
 // point of "the path is truth"): it becomes pending, then is injected at the proper moment.
+// Two moments hold it in memory instead of appending it, and holdMessageLocked is where that is decided.
 func (s *Session) Send(ctx context.Context, msg Message) error {
 	if emptyMessage(msg) {
 		return errEmptyMessage
@@ -526,8 +527,9 @@ func (s *Session) Send(ctx context.Context, msg Message) error {
 	// Whatever the path is owed an answer for — the wait the loop handed over, or a call this run is between
 	// committing and answering — cannot be answered by anything this message touches, and appending it now
 	// would put a user message between a tool call and its result, which is the one shape the assembler
-	// refuses to leave alone (answeringLocked, park.go). So it waits here, in memory, and docs/ says out
-	// loud that a restart drops it.
+	// refuses to leave alone (answeringLocked, park.go). A manual summary is the other holder: the boundary
+	// it is about to write was planned from a path without this message in it. Both wait here, in memory,
+	// and docs/ says out loud that a restart drops them.
 	if s.holdMessage(msg) {
 		return nil
 	}
@@ -539,23 +541,19 @@ func (s *Session) Send(ctx context.Context, msg Message) error {
 	s.emitPending()
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	switch s.phase {
 	case phaseIdle:
-		if !s.compacting {
-			s.startRunLocked(ctx, 0)
-			s.mu.Unlock()
-			return nil
-		}
-		// Messages sent while compaction runs are queued and auto-sent when it finishes
-		// (§1.4); the compaction goroutine does that by re-checking needsRun.
-		s.mu.Unlock()
-		s.logf("message queued during compaction")
-		return nil
+		// Nothing is owed and nothing is generating, which is the only moment this message can be answered
+		// now. A summary never reaches this line with a message in hand: holdMessage above has already taken
+		// it, whether the summary announced itself in the phase or is running inside a run that owes an answer.
+		s.startRunLocked(ctx, 0)
 	default:
-		s.mu.Unlock()
-		s.logf("message queued: loop is running (will be sent after the current turn)")
-		return nil
+		// The message is on the path either way, and the loop reads it at the next turn boundary; this is
+		// only a note about when the answer can arrive.
+		s.logf("message joins the path while phase %s: it is read at the next turn boundary", phaseToString(s.phase))
 	}
+	return nil
 }
 
 func (s *Session) userEntry(msg Message) *ir.Entry {

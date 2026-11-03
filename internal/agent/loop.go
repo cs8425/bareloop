@@ -142,11 +142,20 @@ func (s *Session) Stop() error {
 //
 // With nothing running and nothing parked there is nothing to interrupt, and the honest answer is the message
 // itself: it goes out as a send, which is what pressing the bolt on an idle session means.
+//
+// A summary someone asked for is none of these, so it is refused rather than quietly downgraded into a send.
+// The bolt promises "stop what it is doing and answer this instead"; a summary is not generating, has nothing
+// on disk yet to keep, and the only hand on it is Stop - so the honest answer names the button that works.
 func (s *Session) Interrupt(msg Message) error {
 	if emptyMessage(msg) {
 		return errEmptyMessage
 	}
 	s.mu.Lock()
+	if s.manualSummaryLocked() {
+		s.mu.Unlock()
+		return fmt.Errorf("agent: session %s is writing a summary, not generating: POST /api/session/%s/stop ends it (nothing is written until it finishes), then interrupt works",
+			s.ID, s.ID)
+	}
 	if s.park != nil {
 		// Waiting rather than generating: the message cannot go on the path (it would land in front of
 		// the call's result), so it is queued and the wait ends as what it is. The order the model reads

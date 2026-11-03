@@ -147,6 +147,17 @@ func (s *Session) CompactNow(ctx context.Context, instruction string) (CompactRe
 
 // endManualCompaction puts back what CompactNow announced, in the order leaveCompaction uses: the flags
 // first and the state event after, so no reader is told about a summary by the event that ends it.
+//
+// Then it releases whatever waited behind the summary. That is safe here and only here, and the reason is
+// worth keeping next to the line: a manual summary cannot share its session with a debt, because CompactNow
+// refuses to start while a run is generating or while the path owes an answer. So anything in this session's
+// queue is a message a person typed while the summary was running, and draining it cannot be writing
+// between a tool call and its result - the hole flushHeld exists to avoid.
+//
+// If the flush wrote anything, this is the one case where a manual summary asks for a run: not because a
+// summary wants a turn (it never does, which is why this deliberately is not leaveCompaction), but because
+// a message that just landed is a question with no other owner. A summary that was skipped or stopped
+// appended nothing, so a path that was already holding an older unanswered question keeps holding it.
 func (s *Session) endManualCompaction() {
 	s.mu.Lock()
 	s.compactCancel = nil
@@ -156,7 +167,21 @@ func (s *Session) endManualCompaction() {
 	}
 	s.mu.Unlock()
 	s.emitState()
+	if s.flushHeld() == 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.phase == phaseIdle {
+		s.startRunLocked(context.Background(), 0)
+	}
+	s.mu.Unlock()
 }
+
+// manualSummaryLocked reports whether this session is inside a manual summary - the one compaction a person
+// asked for, and the only one whose cancellation the session owns, since compactCancel is written by
+// CompactNow and cleared on every way out of it. A run's own in-loop summary is not this: that session has a
+// run holding its messages, and answeringLocked already covers it. Callers hold s.mu.
+func (s *Session) manualSummaryLocked() bool { return s.compactCancel != nil }
 
 // enterCompaction takes the compaction lock. Spec §1.4 requires the lock to be taken before
 // the first await, so the window "summary generated, entry not yet committed" cannot be
@@ -175,6 +200,10 @@ func (s *Session) enterCompaction() bool {
 	return true
 }
 
+// leaveCompaction puts back what enterCompaction announced. It deliberately does not drain anything held: the
+// run that asked for this summary owns the queue and writes it at its own turn boundary (turns), and draining
+// here would put a message between a tool call and its result. All it does is continue the loop when the path
+// now ends on a question nobody has answered (§1.4/§6), which is the state an end-of-turn compaction leaves.
 func (s *Session) leaveCompaction() {
 	s.mu.Lock()
 	s.compacting = false
@@ -184,8 +213,8 @@ func (s *Session) leaveCompaction() {
 	s.mu.Unlock()
 	s.compMu.Unlock()
 	s.emitState()
-	// Any exit path releases the queued message (§1.4/§6): if the path now ends with a user
-	// message nobody answered, continue.
+	// A path ending on a question nobody answered is the state an end-of-turn compaction leaves behind, and
+	// it needs a run to read it (§1.4/§6).
 	if s.endsWithUserMsg() {
 		s.mu.Lock()
 		if s.phase == phaseIdle {

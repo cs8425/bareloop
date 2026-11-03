@@ -681,3 +681,101 @@ func TestASendAndAnInterruptRefuseAnEmptyMessageInTheSameWay(t *testing.T) {
 		t.Errorf("phase = %q after four refusals, want %q", st.Phase, PhaseIdle)
 	}
 }
+
+
+// ---------------------------------------------------------------- a manual summary holds the path too
+
+// TestAMessageSentWhileASummaryIsRunningWaitsForTheBoundaryItIsWriting is the send half of the rule a manual
+// summary adds: the entry it is about to append *is* the compaction boundary, and the plan for that boundary was
+// made from a path without this message in it. So the message waits in memory and lands behind the boundary,
+// instead of under a summary that cannot know it exists.
+//
+// A real summary cannot be driven from a test — the fake provider has no scripted summary, which is what makes an
+// unplanned one fail loudly — so this stands the summary up exactly the way CompactNow leaves it: compacting on,
+// a hand on the cancellation, the phase announced. What is asserted is the two rules the session keeps around
+// those flags, not the summary itself.
+func TestAMessageSentWhileASummaryIsRunningWaitsForTheBoundaryItIsWriting(t *testing.T) {
+	s, f := awaitingFixture(t, Config{ID: "send-during-summary"}, says("the answer that was waiting"))
+
+	// A summary of this kind cannot be running while a run is — CompactNow refuses that, which is the only
+	// reason what happens when it ends can hand the session straight to a run.
+	s.mu.Lock()
+	s.compacting = true
+	s.compactCancel = func(error) {}
+	s.phase = phaseCompacting
+	s.mu.Unlock()
+
+	send(t, s, "written while you were summarising")
+
+	if n := len(s.path()); n != 0 {
+		t.Errorf("the path grew to %d entries while a summary was writing: %s", n, describePath(s.path()))
+	}
+	wantQueued(t, s, 1)
+	if got := f.count(); got != 0 {
+		t.Errorf("the provider was asked %d time(s) during a summary, want 0: a held message must not start a run in the middle of a boundary", got)
+	}
+
+	// The summary lands. endManualCompaction is what CompactNow defers, so this is the whole of the way out.
+	s.endManualCompaction()
+
+	path := waitForPath(t, s, 1)
+	wantUserAt(t, path, 0, "written while you were summarising")
+	wantQueued(t, s, 0)
+
+	// And it is not left as a question nobody owns: the run it earns is started for it, and reads the message
+	// the summary could not have known about.
+	asked := f.waitForRequest(t, 1)
+	if indexOfMessage(asked, "written while you were summarising") < 0 {
+		t.Errorf("the run started after the summary did not read the message:%s", payloadDump(asked))
+	}
+	waitForIdle(t, s)
+}
+
+// TestAnInterruptIsRefusedWhileASummaryIsRunning is the other half: the bolt during a summary used to be
+// downgraded into a send. It answered ok while doing something else, and left the person who pressed it holding
+// an abort that never happened — the one gesture in this daemon that promises to stop something, meeting the one
+// thing that is not a generation. A summary is stopped, and the refusal names the button.
+func TestAnInterruptIsRefusedWhileASummaryIsRunning(t *testing.T) {
+	s, f := awaitingFixture(t, Config{ID: "interrupt-during-summary"}, says("the answer after the summary"))
+	s.mu.Lock()
+	s.compacting = true
+	s.compactCancel = func(error) {}
+	s.phase = phaseCompacting
+	s.mu.Unlock()
+
+	err := s.Interrupt(Message{Text: "stop and answer this instead"})
+	if err == nil {
+		t.Fatal("an interrupt of a running summary was accepted: it is a send wearing another name")
+	}
+	for _, want := range []string{"summary", "/stop", "interrupt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q, so the reader is left to guess: %v", want, err)
+		}
+	}
+
+	// Refusing costs nothing: nothing was appended, nothing was queued, nothing was aborted, and the summary the
+	// refusal was about is still running.
+	if n := len(s.path()); n != 0 {
+		t.Errorf("a refused interrupt still put %d entries on the path: %s", n, describePath(s.path()))
+	}
+	wantQueued(t, s, 0)
+	if got := f.count(); got != 0 {
+		t.Errorf("a refused interrupt asked the provider %d time(s), want 0", got)
+	}
+	s.mu.Lock()
+	running := s.manualSummaryLocked()
+	s.mu.Unlock()
+	if !running {
+		t.Error("refusing the interrupt ended the summary it was refusing")
+	}
+
+	// Once the summary is over, the same gesture means what it always meant on a session with nothing running:
+	// the message goes out.
+	s.endManualCompaction()
+	if err := s.Interrupt(Message{Text: "stop and answer this instead"}); err != nil {
+		t.Fatalf("interrupt after the summary: %v", err)
+	}
+	waitForPath(t, s, 1)
+	f.waitForRequest(t, 1)
+	waitForIdle(t, s)
+}
