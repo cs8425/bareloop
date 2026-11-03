@@ -101,6 +101,11 @@ func (s *Session) snapshotToolsLocked() {
 func (s *Session) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Stopping is the person answering the question of who owns a message this session took while it was busy
+	// (Session.acceptedWhileBusy): the answer is nobody, because saying nothing more is what the button means.
+	// The message stays on the path, where the button on it continues it. Spent here rather than only in the
+	// branch that finds a run, because a promise is not something only a run can release.
+	s.acceptedWhileBusy = false
 	if s.cancel != nil {
 		// No cause, deliberately: nobody ended this run in order to say something, so a wait that was
 		// sleeping in it reports a bare "interrupted" (see builtin.interruptReason).
@@ -281,6 +286,12 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 		// into a run is decided below, once the path holds everything it is going to hold.
 		answer := s.forceRun
 		s.forceRun = false
+		// And the same for every message that arrived while this run owned the session (Session field
+		// acceptedWhileBusy). Collected in this critical section, which is what makes it complete: a send that
+		// got here first is counted here, and a send that gets here after sees an idle session and starts its
+		// own run.
+		touched := s.acceptedWhileBusy
+		s.acceptedWhileBusy = false
 		done := s.done
 		s.done = nil
 		s.mu.Unlock()
@@ -301,13 +312,26 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 		// in by interrupt is answered by a run started right here — fresh context, payload assembled from a
 		// path that now ends with that message.
 		//
+		// A message that merely arrived while this run was working is the same problem on a smaller scale, and
+		// touched is what notices: the run may have decided it was done around the moment the message was
+		// written, in which case it reads that message at no turn boundary and the session goes back to idle
+		// with the question on the path and nobody holding it. The two cases are decided the same way because
+		// they are the same question: is something still owed, now that the path holds all of it?
+		//
 		// Asked rather than assumed, twice over: a session that parked on the way out is asleep with its wake
 		// armed, and a path ending in anything but a user message or a tool result is not asking a question.
-		// beginRunLocked holds the real veto, which is why this is allowed to be a guess.
-		if answer && !s.isParked() && s.needsRun() {
+		// That second veto is also what keeps a promise from becoming a loop — a turn that failed with the same
+		// error is never asked again by this, because only a person's message sets the flag, and a person's stop
+		// takes it back (Stop). beginRunLocked holds the real veto over starting a run either way, which is why
+		// this is allowed to be a guess.
+		if (answer || touched) && !s.isParked() && s.needsRun() {
+			why := "a message arrived while this run was working, and this run ended without answering it: starting the run that can"
+			if answer {
+				why = "the run that was interrupted cannot answer the message that interrupted it: starting the run that can"
+			}
 			s.mu.Lock()
 			if s.phase == phaseIdle {
-				s.logf("the run that was interrupted cannot answer the message that interrupted it: starting the run that can")
+				s.logf("%s", why)
 				s.startRunLocked(context.Background(), 0)
 			}
 			s.mu.Unlock()

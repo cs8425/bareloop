@@ -452,6 +452,11 @@ func (s *Session) holdMessage(msg Message) bool {
 // exists. It costs the same to wait, and endManualCompaction writes it the moment the boundary is on disk
 // (or the moment the summary is abandoned, which must not strand a message either).
 func (s *Session) holdMessageLocked(msg Message) bool {
+	// Held is not the same as owned, and this line is the difference: the message is now in memory with no
+	// request that saw it and nothing writing it out, so whoever ends the thing that is holding it has to be
+	// the one that asks after it. A run's epilogue and endManualCompaction are the two that can; each clears
+	// the promise as it takes the queue over.
+	s.acceptedWhileBusy = true
 	if call := s.answeringLocked(); call != "" {
 		s.queue = append(s.queue, msg)
 		s.logf("message held in memory instead of appended: it joins the path after the answer to %s, and a restart drops it",

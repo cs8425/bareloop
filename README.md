@@ -527,6 +527,14 @@ entry is written, and no event names it. When the answer is finally written the 
 it, in the order they arrived, and the model reads them after it - and a message sent while that flush is running
 either joins it ahead of the queue or lands after everything in it, never between two.
 
+**Taken is not answered.** A run reads a message at a turn boundary, and a turn boundary is a moment the run
+arrives at by itself, so accepting a message while a run owns the session makes a promise the session keeps
+beside it: when that run ends, the path is looked at once more, and if it still ends on a message with no
+answer, the run that answers it is started there. Without that promise, a message that arrived in the last
+instant of a run — or one written out of the queue behind a summary the person stopped — sits on the path with
+nobody left owing it anything. The one thing that cancels the promise is the stop button, and it cancels it
+because stopping is the person answering the question of who owns the message.
+
 **A summary is being written.** A manual `/compact` holds the path for a different reason: the entry it is
 about to append *is the boundary*, and the plan for that boundary was made from the path as it was when the
 summary started. Appending now would put the message **under** a summary that cannot know it exists — it is not
@@ -539,9 +547,11 @@ applied a moment before the summary started - the summary adds no rule of its ow
 read whatever it leaves on the path.
 
 **Stopping is not an answer.** `/stop` aborts the generation, writes what it had produced, and lets the held
-messages join the path; it does not ask the model anything. What is left is a question at the end of the path, and
+messages join the path; it does not ask the model anything, and it spends any promise the session had made
+about answering what it took. What is left is a question at the end of the path, and
 the way to continue it is the button on that message
-([run again from any legal break point](#using-it)), not a second copy of the same words.
+([run again from any legal break point](#using-it)), not a second copy of the same words. A message sent after
+the stop is a new decision, and earns its answer like any other message.
 
 Ending a wait early flushes what was waiting rather than leaving it behind. `/interrupt` ends it as itself, so
 the model reads the wait saying `user interrupt` and then reads the message; `/stop` ends it too, and keeps

@@ -165,6 +165,11 @@ func (s *Session) endManualCompaction() {
 	if s.phase == phaseCompacting {
 		s.phase = phaseIdle
 	}
+	// A summary holds a queue, and a held queue is a promise (park.go). This is where the promise is paid:
+	// the flush below writes what waited, and the run started after it is the one that answers. Cleared here
+	// rather than left for some run's epilogue to notice, because this function owns the queue from this
+	// moment and a promise kept twice would be a run nobody asked for.
+	s.acceptedWhileBusy = false
 	s.mu.Unlock()
 	s.emitState()
 	if s.flushHeld() == 0 {

@@ -808,3 +808,52 @@ func TestASummaryStoppedOnTheWayToTheCommitWritesNothing(t *testing.T) {
 		t.Errorf("the path holds %d entries after a summary stopped before its commit: %s", n, describePath(s.path()))
 	}
 }
+
+// ---------------------------------------------------------------- a busy session owns what it accepted
+
+// owedRun reads the promise a session leaves itself when it accepts a message it cannot start a run for:
+// whoever ends this busy spell has to look at the path again.
+func owedRun(s *Session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acceptedWhileBusy
+}
+
+// TestAMessageSentIntoABusySessionIsNotLeftWithoutAnOwner is the promise half of the rule. The message that
+// arrived by interrupt could always buy a run at the end of the run it aborted; a message that merely arrived
+// while the session was busy had no such promise, so one that landed while the loop was deciding it was done
+// reached the path with nobody left owing it an answer.
+//
+// What a test can hold still is the promise itself: the send is held in memory, the busy spell has to remember
+// that it took the message, and the run that reads it at its turn boundary spends the promise rather than
+// leaving it behind to start a second run for an answer that has already been given.
+func TestAMessageSentIntoABusySessionIsNotLeftWithoutAnOwner(t *testing.T) {
+	s, f := awaitingFixture(t, Config{ID: "busy-promise"},
+		gatedSays("the first answer"),
+		says("the answer that read the late message"),
+	)
+	send(t, s, "the first question")
+	f.waitForRequest(t, 1)
+
+	send(t, s, "added while you were busy")
+	if !owedRun(s) {
+		t.Error("a message accepted while the session was busy left no promise behind: the run that is ending has no reason to look at the path again")
+	}
+
+	f.gate(t, 1).release()
+	asked := f.waitForRequest(t, 2)
+	if indexOfMessage(asked, "added while you were busy") < 0 {
+		t.Errorf("the run that was already going did not read the message it was holding:%s", payloadDump(asked))
+	}
+	waitForIdle(t, s)
+
+	if owedRun(s) {
+		t.Error("the run that ended kept a promise it had already kept: the next thing that ends would ask the model about an answered message")
+	}
+	// Exactly two asks: the answer that was on the wire and the one that read the held message. A third would
+	// mean the promise outlived the message it was made for.
+	if got := f.count(); got != 2 {
+		t.Errorf("the provider was asked %d times, want 2: %s", got, describePath(s.path()))
+	}
+	wantQueued(t, s, 0)
+}

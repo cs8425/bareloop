@@ -88,7 +88,21 @@ type Session struct {
 	// that answers it, because that run's context is about to be dead and every request built from it
 	// fails on the way out. Its epilogue starts the run that does.
 	forceRun bool
-	turn     int
+	// acceptedWhileBusy is the same promise for every other message: one reached this session from a
+	// person while a run owned it, so the end of that run is not allowed to be the end of its story.
+	// Without it only an interrupting message was ever answered at run end, and any other accepted message
+	// - a plain send that landed in the last instant of a run, or one written out of the queue behind a
+	// summary the person stopped - reached the path with nobody left owing it an answer.
+	//
+	// It is written and collected under s.mu, and that is the whole argument that a message cannot fall
+	// between the two: a send either happens while the phase still names a run, and is then counted before
+	// that run's epilogue puts the phase back to idle, or it happens after and starts a run of its own.
+	//
+	// Three hands spend it, because those are the three things that can own the message: the run's epilogue
+	// (which may start the run that answers), endManualCompaction (which flushes and starts one), and Stop -
+	// stopping is the person deciding that nobody says anything more.
+	acceptedWhileBusy bool
+	turn              int
 	// sentTip is the path tip that was included in the payload we last sent. Everything on
 	// the path after it is "pending": a message the user typed while the loop was running.
 	sentTip  string
@@ -550,7 +564,10 @@ func (s *Session) Send(ctx context.Context, msg Message) error {
 		s.startRunLocked(ctx, 0)
 	default:
 		// The message is on the path either way, and the loop reads it at the next turn boundary; this is
-		// only a note about when the answer can arrive.
+		// only a note about when the answer can arrive. "At the next turn boundary" is a promise this
+		// session has to keep, though: the run being joined may already have decided it is done, so the
+		// promise is recorded here and collected when that run ends (Session.acceptedWhileBusy).
+		s.acceptedWhileBusy = true
 		s.logf("message joins the path while phase %s: it is read at the next turn boundary", phaseToString(s.phase))
 	}
 	return nil
