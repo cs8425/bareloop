@@ -109,10 +109,35 @@ type Options struct {
 	// It is a pointer so that Options stays comparable — manager.Create still asks whether a config
 	// carried an asm block at all by comparing against the zero Options — and nil simply means auto.
 	Structured *StructuredTargets `json:"-"`
+	// StructuredMaxBytes is how many bytes of a tool's structuredContent the model is shown before the
+	// rest is cut off, with a note saying how much of it there was. 0 means DefaultStructuredMaxBytes.
+	//
+	// It sits beside the modes rather than inside the asm block because it belongs to the same
+	// question — what is this field allowed to cost on the wire — and because it is session-wide by
+	// design: a ceiling per server would be a second number for whoever is counting tokens to explain.
+	// The tag is "-" for the same reason Structured's is, and with the same consequence: the only wire
+	// spelling of this number is the session's own top-level field. A key inside "asm" would be
+	// inherited whole by defaults.asm and then overwritten by cfgOptions a moment later — two doors,
+	// one of them a lie about which one is in force. ValidateStructuredMax is what refuses a
+	// nonsensical value before it is ever stored.
+	StructuredMaxBytes int `json:"-"`
 }
 
 // structuredFor is the mode of the server that produced an entry ("" = the session default).
 func (o Options) structuredFor(server string) StructuredMode { return o.Structured.For(server) }
+
+// structuredMax is the byte ceiling in force for this payload.
+//
+// A negative number cannot reach here through the API, because ValidateStructuredMax refuses it when
+// the config is written; a hand-edited config.json can still carry one, and it is read as the default
+// rather than as "no limit". That choice is deliberate: the direction that mistake travels in is ten
+// megabytes of context, which is the exact thing this ceiling exists to prevent.
+func (o Options) structuredMax() int {
+	if o.StructuredMaxBytes > 0 {
+		return o.StructuredMaxBytes
+	}
+	return DefaultStructuredMaxBytes
+}
 
 // SendReasoningOn is the effective value of SendReasoning: on unless explicitly disabled.
 func (o Options) SendReasoningOn() bool { return o.SendReasoning == nil || *o.SendReasoning }
@@ -124,6 +149,12 @@ func (o Options) SendImagesOn() bool { return o.SendImages == nil || *o.SendImag
 type Built struct {
 	// System is the system head (may be "").
 	System string
+	// StructuredCap is the byte ceiling this payload was assembled with. It rides on the result so that
+	// a reader holding only the payload — DeriveSizes — counts the bytes the wire will actually carry.
+	// Without it the size table prices a tool's JSON at its stored size, and every decision built on
+	// that table (the pre-send guard, the compaction cut) charges a capped twenty kilobytes for what
+	// the server really sent.
+	StructuredCap int
 	// Messages are the non-system messages, parallel to Entries.
 	Messages []Message
 	// Entries are the payload entries in send order. The compaction entry (summary) is
@@ -155,7 +186,7 @@ type Payload struct {
 
 // Assemble is the choke point. It must stay a pure function of (Payload, Options).
 func Assemble(p Payload, opts Options) *Built {
-	b := &Built{System: p.System}
+	b := &Built{System: p.System, StructuredCap: opts.structuredMax()}
 	if p.Summary != nil {
 		s := *p.Summary
 		s.Role = "user" // spec §3.7: the summary travels with the user role
@@ -178,7 +209,7 @@ func messageFor(e *ir.Entry, opts Options) Message {
 	case "tool":
 		// The structuredContent fold happens here and nowhere else: it is a tool-result field, so an
 		// entry of another role that carries one is left alone rather than guessed at.
-		m.Content = content(foldStructured(e, opts.structuredFor(e.Server)), opts.SendImagesOn())
+		m.Content = content(foldStructured(e, opts.structuredFor(e.Server), opts.structuredMax()), opts.SendImagesOn())
 		m.ToolCallID = e.ToolCallID
 		if !opts.OmitToolResultName && e.Server != "" {
 			m.Name = e.Server
@@ -396,7 +427,12 @@ func join(xs []string, sep string) string {
 
 // Estimate is the bytes/4 fallback size for a message with no real server data (spec §2.4:
 // only for the unsent tail). Attachments use fixed reference costs: image ~1000.
-func Estimate(e *ir.Entry) int {
+//
+// structuredMax is the ceiling this payload's assembler will apply to a tool's structuredContent; 0
+// asks for the default. It is a parameter instead of a constant because the estimate has to answer
+// the same question the assembler answers — what can this entry cost on the wire — and that answer
+// now depends on what the session asked to be shown.
+func Estimate(e *ir.Entry, structuredMax int) int {
 	if e == nil {
 		return 0
 	}
@@ -418,8 +454,14 @@ func Estimate(e *ir.Entry) int {
 	// estimate is a ceiling on what the entry can cost, and under-counting a 200 KB JSON is how a
 	// request reaches the pre-send guard instead of the compaction trigger that would have made
 	// room for it. Over-counting under "drop" only makes the unsent tail look bigger than it is.
-	if len(e.Structured) > 0 {
-		n += len(e.Structured) / 4
+	//
+	// What it counts is the ceiling the assembler actually honours, not the stored document: the fold
+	// cannot put more than the cap plus its note on the wire, so pricing ten megabytes here would not
+	// be conservative, it would be false — a session holding one huge result would read as a
+	// multi-million-token session, and after a restart (which forgets the real usage) its first send
+	// would be refused by a guard costing a payload that is really the cap.
+	if wire := structuredWireBytes(len(e.Structured), structuredMax); wire > 0 {
+		n += wire / 4
 	}
 	if n == 0 {
 		n = 1

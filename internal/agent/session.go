@@ -297,6 +297,7 @@ func (s *Session) cfgOptions() asm.Options {
 	o := s.cfg.ASM
 	t := structuredTargets(s.cfg)
 	o.Structured = &t
+	o.StructuredMaxBytes = s.cfg.StructuredMaxBytes
 	return o
 }
 
@@ -671,6 +672,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if _, err := asm.ParseStructuredMode(patch.StructuredContent); err != nil {
 		return err
 	}
+	// The ceiling is checked from the body alone, exactly like the mode above it, and what has to come
+	// back is the negative that meant "no limit" to whoever typed it and means the default here. Too
+	// small a ceiling is not a refusal: it shows in the first tool result, and this call is the undo.
+	if err := asm.ValidateStructuredMax(patch.StructuredMaxBytes); err != nil {
+		return err
+	}
 	for _, mc := range patch.MCP {
 		if _, err := asm.ParseStructuredMode(mc.StructuredContent); err != nil {
 			return fmt.Errorf("mcp server %q: %w", mc.Name, err)
@@ -762,6 +769,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	// "unset" over the API either — send "auto", which is what unset means.
 	if patch.StructuredContent == "" {
 		patch.StructuredContent = old.StructuredContent
+	}
+	// Same rule as the fields around it: a ceiling the body does not carry is not a change. The cost of
+	// that rule is that 0 is already spent on "unchanged", so there is no wire spelling for "back to the
+	// factory default" — whoever wants the default types the default's number.
+	if patch.StructuredMaxBytes == 0 {
+		patch.StructuredMaxBytes = old.StructuredMaxBytes
 	}
 	if patch.MCP == nil {
 		// An empty list is a change ("remove every server"); an absent key is not.

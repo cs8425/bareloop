@@ -323,6 +323,12 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 	if _, err := asm.ParseStructuredMode(cfg.StructuredContent); err != nil {
 		return nil, err
 	}
+	// The ceiling on structuredContent goes through the same door, and it refuses exactly one thing: a
+	// negative, which is what people type for "no limit" and what this process then reads back as the
+	// default. A ceiling typed too small is a visible mistake one PATCH wide, not a stored lie, so it stays.
+	if err := asm.ValidateStructuredMax(cfg.StructuredMaxBytes); err != nil {
+		return nil, err
+	}
 	for _, mc := range cfg.MCP {
 		if _, err := asm.ParseStructuredMode(mc.StructuredContent); err != nil {
 			return nil, fmt.Errorf("session %q: mcp server %q: %w", cfg.ID, mc.Name, err)

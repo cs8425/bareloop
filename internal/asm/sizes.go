@@ -37,7 +37,7 @@ func DeriveSizes(b *Built) *Sizes {
 	s := &Sizes{per: map[string]Size{}}
 	// Mark all entries as estimates first (also covers the unsent tail).
 	for _, e := range b.Entries {
-		s.per[e.ID] = Size{Tokens: Estimate(e), Real: false, Bytes: entryBytes(e)}
+		s.per[e.ID] = Size{Tokens: Estimate(e, b.StructuredCap), Real: false, Bytes: entryBytes(e)}
 		s.order = append(s.order, e.ID)
 	}
 
@@ -71,7 +71,7 @@ func DeriveSizes(b *Built) *Sizes {
 			// No data: keep the estimates for this window (do not write real zeros).
 			for j := windowStart; j < i; j++ {
 				id := b.Entries[j].ID
-				s.per[id] = Size{Tokens: Estimate(b.Entries[j]), Real: false, Bytes: entryBytes(b.Entries[j])}
+				s.per[id] = Size{Tokens: Estimate(b.Entries[j], b.StructuredCap), Real: false, Bytes: entryBytes(b.Entries[j])}
 			}
 		}
 		pred := 0
@@ -142,6 +142,9 @@ func entryBytes(e *ir.Entry) int {
 		n += len(p.Text) + len(p.Data)
 	}
 	// Stored bytes include a tool's structuredContent, mode or no mode: it is in the log either way.
+	// This column is therefore the weight of the entry in the log, which a capped structuredContent
+	// can legitimately exceed — the number that follows what goes on the wire is the token estimate,
+	// which is the one the guard and the compaction cut read.
 	n += len(e.Structured)
 	return n
 }

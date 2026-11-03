@@ -91,7 +91,7 @@ func TestFoldStructuredModes(t *testing.T) {
 			if tc.noJSON {
 				e.Structured = nil
 			}
-			out := foldStructured(e, tc.mode)
+			out := foldStructured(e, tc.mode, 0)
 			if out.Content != tc.want {
 				t.Errorf("content = %q, want %q", out.Content, tc.want)
 			}
@@ -225,7 +225,7 @@ func TestEstimateCountsStructured(t *testing.T) {
 	plain := &ir.Entry{Role: "tool", Content: "ok"}
 	big := structuredEntry("ok")
 	big.Structured = json.RawMessage(strings.Repeat("x", 4000))
-	if got, base := Estimate(big), Estimate(plain); got <= base {
+	if got, base := Estimate(big, 0), Estimate(plain, 0); got <= base {
 		t.Errorf("Estimate with the JSON = %d, want more than the %d without it", got, base)
 	}
 	if got, base := entryBytes(big), entryBytes(plain); got <= base {

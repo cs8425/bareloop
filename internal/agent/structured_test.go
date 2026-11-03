@@ -119,3 +119,68 @@ func TestStructuredModeIsValidatedWhereItIsWritten(t *testing.T) {
 		t.Fatalf("an unrelated patch reset the mode: %q", got)
 	}
 }
+
+// TestStructuredMaxIsValidatedWhereItIsWritten is the mode's rule again, for the number: a stored
+// config must not be able to lie, and a negative ceiling does exactly that — it is what gets typed for
+// "no limit" and what the assembler reads back as the default. So that is refused at Create and at
+// PATCH, a ceiling of any size is not, and a PATCH that does not carry one is not a change to it.
+func TestStructuredMaxIsValidatedWhereItIsWritten(t *testing.T) {
+	const base = "http://127.0.0.1:1/v1"
+	m := NewManager(t.TempDir(), false, Config{StructuredMaxBytes: 40000}, nil, nil)
+
+	// The one thing this pins that the mode above does not: the ceiling is not inherited from the
+	// daemon. The mode is, because it is a word about a server; this is a token budget, and the
+	// number only has to be looked up in one place — the session's own config. The assertion is here
+	// so that "make the two fields behave alike" has to be a decision rather than an oversight.
+	if got := m.MergeDefaults(Config{ID: "s"}).StructuredMaxBytes; got != 0 {
+		t.Fatalf("a fresh session was handed %d bytes by MergeDefaults, want 0 so the package default %d applies", got, asm.DefaultStructuredMaxBytes)
+	}
+
+	// The one refused shape, and it is refused because nothing after the write can reveal it: a negative
+	// says "no limit" to whoever typed it and says the default to the assembler.
+	for _, bad := range []int{-1, -8192} {
+		if _, err := m.Create(context.Background(), Config{ID: "sbad", LLM: llm.Config{BaseURL: base}, StructuredMaxBytes: bad}); err == nil {
+			t.Fatalf("a ceiling of %d bytes was stored; it promises no limit and delivers the default", bad)
+		}
+	}
+
+	s, err := m.Create(context.Background(), Config{ID: "smax", LLM: llm.Config{BaseURL: base}, StructuredMaxBytes: 30000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Config().StructuredMaxBytes; got != 30000 {
+		t.Fatalf("Create stored a ceiling of %d, want 30000", got)
+	}
+	// The number is only worth storing if it reaches the assembler, which is where the cut happens.
+	if got := s.cfgOptions().StructuredMaxBytes; got != 30000 {
+		t.Fatalf("cfgOptions passed %d to the assembler, want the session's own 30000", got)
+	}
+
+	// An unrelated patch leaves the ceiling alone, and a patch carrying one changes it.
+	if err := s.UpdateConfig(context.Background(), Config{MaxTurns: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Config().StructuredMaxBytes; got != 30000 {
+		t.Fatalf("an unrelated patch reset the ceiling to %d", got)
+	}
+	if err := s.UpdateConfig(context.Background(), Config{StructuredMaxBytes: 8192}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Config().StructuredMaxBytes; got != 8192 {
+		t.Fatalf("after PATCH the ceiling is %d, want 8192", got)
+	}
+	if err := s.UpdateConfig(context.Background(), Config{StructuredMaxBytes: -1}); err == nil {
+		t.Fatal("a PATCHed negative ceiling was accepted: it stores a number the assembler reads as the default")
+	}
+	if got := s.Config().StructuredMaxBytes; got != 8192 {
+		t.Fatalf("the refused patch changed the ceiling to %d", got)
+	}
+	// A ceiling small enough to starve the model is somebody else's call. It is obvious in the first
+	// tool result, this endpoint is how it gets undone, and refusing it here would only lock the door.
+	if err := s.UpdateConfig(context.Background(), Config{StructuredMaxBytes: 16}); err != nil {
+		t.Fatalf("a ceiling of 16 bytes was refused: %v", err)
+	}
+	if got := s.Config().StructuredMaxBytes; got != 16 {
+		t.Fatalf("the small ceiling did not land: %d", got)
+	}
+}

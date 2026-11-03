@@ -88,7 +88,11 @@ func (t *StructuredTargets) For(server string) StructuredMode {
 // foldStructured returns a copy of e whose text carries the structuredContent per mode. The entry
 // itself is never modified: Built.Entries, the log behind it and the UI all keep the stored bytes,
 // and a rebuild with a different mode produces the new bytes from the same entry.
-func foldStructured(e *ir.Entry, mode StructuredMode) *ir.Entry {
+//
+// maxBytes is how much of that document the model may be shown; a document past it arrives as its
+// head plus truncationNote, and the bytes kept are a prefix, so every rebuild of the same result
+// sends the same bytes (KV prefix). 0 asks for the default ceiling.
+func foldStructured(e *ir.Entry, mode StructuredMode, maxBytes int) *ir.Entry {
 	if e == nil || len(e.Structured) == 0 {
 		return e
 	}
@@ -110,11 +114,14 @@ func foldStructured(e *ir.Entry, mode StructuredMode) *ir.Entry {
 	default:
 		return e // StructuredDrop
 	}
+	// The ceiling is applied here and not where the tool answered: the log keeps the whole document,
+	// so changing one's mind about the ceiling later is a re-send rather than a repair.
 	c := *e
+	shown := truncateStructured(raw, maxBytes)
 	if e.Content != "" {
-		c.Content = e.Content + "\n" + StructuredMarker + "\n" + raw
+		c.Content = e.Content + "\n" + StructuredMarker + "\n" + shown
 	} else {
-		c.Content = StructuredMarker + "\n" + raw
+		c.Content = StructuredMarker + "\n" + shown
 	}
 	return &c
 }

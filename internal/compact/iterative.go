@@ -102,7 +102,10 @@ func entryTokens(e *ir.Entry, sizes *asm.Sizes) int {
 			return t
 		}
 	}
-	return asm.Estimate(e)
+	// 0 asks for the default ceiling: compaction does not know the session's assembler options, and
+	// the only decision a smaller number can change here is "fewer chunks" — whose worst case (a chunk
+	// that turns out too big) is caught by the oversized-summary gate, not by this arithmetic.
+	return asm.Estimate(e, 0)
 }
 
 // RegionTokens is the size of a region under the same rule.

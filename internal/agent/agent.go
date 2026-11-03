@@ -302,6 +302,20 @@ type Config struct {
 	// data/<id>/log.jsonl.
 	StructuredContent string `json:"structuredContent,omitempty"`
 
+	// StructuredMaxBytes is how many bytes of a tool's structuredContent this session puts in front of
+	// the model before the rest is cut off, with a note naming the size that was left out. 0 is not a
+	// size but "unset", and unset means asm.DefaultStructuredMaxBytes: 16 384 bytes, which reads as
+	// four thousand tokens on the same 4-bytes-per-token ruler this project estimates with. Raise it to
+	// give a chatty server more of its own JSON; it is one number for the session rather than one per
+	// server, because a token budget is easier to reason about than a budget per server.
+	//
+	// Only the wire is cut. data/<id>/log.jsonl and the UI keep the whole document, so this can be
+	// raised or lowered later and the next request is simply assembled differently — the same reason
+	// switching the mode above never needs a hand-edit of the log. What it cannot do is go back to the
+	// factory default over the API, because 0 already means "unchanged" in a PATCH body; set the
+	// number you want instead.
+	StructuredMaxBytes int `json:"structuredMaxBytes,omitempty"`
+
 	// Pinned and Archived are where this session sits in a list, and the only two fields here that say
 	// nothing about what gets sent to the model: pinned keeps it above the rest, archived takes it out of
 	// the way. They live in config.json beside Name because they are a fact about the session and not a
