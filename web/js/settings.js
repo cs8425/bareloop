@@ -72,6 +72,9 @@ export async function openSettings() {
   // The structuredContent word is a plain string on the server and absent means "auto", so the picker
   // starts from the word the session is actually running rather than from an empty choice.
   fld(f, 'structuredContent').value = cfg.structuredContent || 'auto';
+  // The ceiling is a number the server reads 0 as "unset", so an empty field is not a zero: it means
+  // "this session never said", and the placeholder carries what is in force instead of the value box.
+  fld(f, 'structuredMaxBytes').value = cfg.structuredMaxBytes || '';
   // Prices are three numbers or nothing, and the difference between "0" and "no price at all" has to
   // survive a round trip through a form: an empty field stays empty, a stored zero shows a zero.
   const price = cfg.llm?.pricing;
@@ -207,6 +210,11 @@ export async function saveSettings() {
     // narrow assembler switches. A select cannot come back empty, which is good — the server reads an
     // empty word here as "keep what is stored", so this row always answers.
     structuredContent: fld(f, 'structuredContent').value,
+    // An empty field goes back as 0, which is what the server reads as "unchanged" — the same
+    // compromise the word above it lives with. The one number the server refuses is a negative,
+    // because it promises no limit and would be read back as the default; its reason arrives here as
+    // the dialog's error rather than as a saved setting.
+    structuredMaxBytes: Number(fld(f, 'structuredMaxBytes').value || 0),
     mcp,
   };
   // Fields this dialog does not have are dropped rather than guessed at: absent means "unchanged",

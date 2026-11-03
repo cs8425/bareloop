@@ -253,6 +253,14 @@
               <option value="drop">drop — never send it</option>
             </select>
           </label>
+          <!-- The ceiling is a number and not a switch: 0 / empty means "unset", and the server's own
+               default is written in the placeholder so an untouched row still tells you what is in force.
+               Cut short is not the same as lost — the log keeps the whole JSON. -->
+          <label>
+            show at most
+            <input name="structuredMaxBytes" type="number" min="0" placeholder="16 384 bytes (default)" />
+            of that JSON
+          </label>
         </div>
         <p class="hint">
           A tool may answer twice: once as text, and once as <code>structuredContent</code> — a JSON value
@@ -266,6 +274,13 @@
           request and the server reads the whole history again instead of reusing its KV cache. Pick one
           and leave it. One server may use a different word than the session by adding a
           <code>structuredContent</code> key to its own entry in the list below.
+          <!-- The second half of the same cost question: which of the two channels the model sees, and
+               how much of it when one channel is a megabyte. -->
+          A JSON longer than <em>show at most</em> is sent as its beginning only, and the message then says
+          how many bytes were left out — the model is told rather than left guessing. The log and this
+          screen always keep all of it, so the number can be raised or lowered later: what changes is the
+          next request, not what was stored. An empty box is <em>no change</em> rather than
+           <em>back to the default</em>: write <code>16384</code> to put the default back on purpose.
         </p>
         <label>system prompt <textarea name="systemPrompt" rows="4" spellcheck="false"></textarea></label>
         <label>
