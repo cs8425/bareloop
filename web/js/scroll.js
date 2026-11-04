@@ -11,6 +11,13 @@ const PIN_PX = 48;
 let pinned = true;
 let unseen = 0;
 let lastScrollWrite = 0;
+// The exact offset our own follow asked for. `lastScrollWrite` alone is a timer, and a timer loses to a busy
+// main thread: a follow that lands while a large image is being decoded can have its own `scroll` event
+// delivered more than 150 ms later, by which time the picture has grown the page below the viewport — and
+// the handler reads that as "the reader scrolled away" and stops following for the rest of the run. Images
+// make it a coin toss (which is exactly how it was reported), but the rule was always wrong: our write is
+// identified by the position it wrote, and the timer is only the fall-back for a write that did not move.
+let lastScrollTop = -1;
 
 // A reload restores the old scroll offset of #log, which looks exactly like the user scrolling away
 // from the bottom. On a fresh page the newest message is the right place, so opt out.
@@ -49,6 +56,9 @@ export function scrollDown(force = false) {
   unseen = 0;
   lastScrollWrite = Date.now();
   box.scrollTop = box.scrollHeight;
+  // Read back, not assumed: a box already at its bottom clamps the write, and what the handler has to
+  // recognise is the offset the browser settled on, not the one we asked for.
+  lastScrollTop = box.scrollTop;
   renderJump();
 }
 
@@ -84,7 +94,10 @@ export function wireScroll() {
   box.addEventListener(
     'scroll',
     () => {
-      if (Date.now() - lastScrollWrite < 150) return; // our own follow, not the user's scroll
+      // Our own follow, not the user's scroll — by offset first (it survives a late delivery) and by time
+      // as a fall-back (a write that moved nothing produces no offset to match).
+      if (box.scrollTop === lastScrollTop) return;
+      if (Date.now() - lastScrollWrite < 150) return;
       const atBottom = distanceFromBottom(box) <= PIN_PX;
       if (atBottom === pinned) return;
       pinned = atBottom;
@@ -92,6 +105,20 @@ export function wireScroll() {
       renderJump();
     },
     { passive: true },
+  );
+  // A picture arrives after the text that asked for it, and it arrives with a height the transcript did not
+  // budget: the follow scrolled to what was the bottom, then the image grew the page below it and "latest"
+  // looks like it stopped working — until the next token scrolls it again, which on a finished answer may
+  // never come. `load` does not bubble, but it does run through the capture phase, so one listener on the
+  // box sees every image inside it. scrollDown() is the only hand on the viewport and it already refuses to
+  // follow a reader who scrolled away, or to move a parked page, so asking here costs nothing when the
+  // answer is no.
+  box.addEventListener(
+    'load',
+    (e) => {
+      if (e.target instanceof HTMLImageElement) scrollDown();
+    },
+    true,
   );
   // Wheeling up while already at the bottom fires no scroll event, so read the intent itself.
   box.addEventListener(

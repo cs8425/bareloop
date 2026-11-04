@@ -350,6 +350,13 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 @media (prefers-reduced-motion: no-preference) { .msg.flash { animation: flash 1.4s ease-out 1; } }
 @media (prefers-reduced-motion: reduce) { .msg.flash { outline-color: var(--accent); } }
 .msg img.attach { max-width: 220px; max-height: 160px; border-radius: 6px; margin: 4px 6px 0 0; border: 1px solid var(--border); }
+/* A markdown image the model wrote (`![](...)`, not an attachment) arrives at its own size, and a 1 600px-wide
+   one from a screenshot tool puts a horizontal scrollbar under the whole transcript — the text you were reading
+   is then off to the right, and a transcript is supposed to be one column you scroll down. Capping the width at
+   the column's width costs nothing a viewer wants back: the aspect ratio is what `height:auto` keeps, and
+   click-to-enlarge is what shows the pixels in full. Measured before this rule: an inline 1600x1000 image laid
+   out at 1600x1000 with `max-width: none`. */
+.msg .body img { max-width: 100%; height: auto; }
 /* An attachment with no bytes is a reference — a path or URI. Worth printing: "the tool wrote
    /tmp/shot.png" is information, a broken image icon is not. */
 .msg .attach-path { display: block; margin: 6px 0 0; padding: 4px 7px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font: var(--t-1) var(--mono); word-break: break-all; }
@@ -1343,3 +1350,126 @@ button,
     margin-left: 0;
   }
 }
+
+/* --------------------------------------------------------------------------- zooming a picture
+   A viewer, not a card. The dialog is nearly the whole window because the thing it shows is a screenshot
+   someone wanted to read, and every pixel the chrome takes is a pixel of that screenshot lost (web/app.css
+   draws the same bytes at 220×160). The stage is a grid with the image centred so the transform's origin is
+   the centre of the box — the one point js/lightbox.js does its pointer-anchored maths against.
+   `touch-action: none` is what makes a two-finger pinch belong to the viewer instead of to the browser's own
+   page zoom, and `user-select`/`-webkit-user-drag` are why a drag moves the picture rather than starting a
+   text selection or dropping the image onto the page. */
+dialog.zoom {
+  width: 96vw;
+  height: 92dvh;
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: #05070a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+dialog.zoom::backdrop { background: rgba(2, 4, 7, 0.88); }
+dialog.zoom:not([open]) { display: none; }
+.zoom-bar {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  padding: 5px 9px; border-bottom: 1px solid var(--border);
+  font: var(--t-1) var(--mono); color: var(--muted);
+}
+.zoom-name { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.zoom-dim, .zoom-scale { white-space: nowrap; }
+.zoom-scale { color: var(--accent); min-width: 4.5ch; text-align: right; }
+.zoom-spacer { flex: 1 1 auto; }
+.zoom-bar button { min-height: 0; padding: 3px 8px; font: var(--t-1) var(--mono); }
+/* The two mode buttons say which of them is already true — 1:1 highlighted means "you are looking at it
+   pixel for pixel", which is the only way to know without pressing it and finding out. */
+.zoom-bar button.on { color: var(--accent); border-color: var(--accent); }
+.zoom-stage {
+  flex: 1 1 auto; min-height: 0;
+  display: grid; place-items: center; overflow: hidden;
+  touch-action: none; cursor: zoom-in;
+}
+.zoom-stage.dragging { cursor: grabbing; }
+/* No max-width and no max-height on purpose: the thumbnail's ceiling belongs to the transcript, and inheriting
+   it here would put a 220px picture in a 96vw window. The scale starts at "fit", which is computed from the
+   natural size in js/lightbox.js — the only party that knows both numbers. */
+#zoom-img {
+  max-width: none; max-height: none;
+  transform-origin: center center;
+  user-select: none; -webkit-user-drag: none;
+  will-change: transform;
+}
+
+/* ===================================================== busy: the summary is being written
+   Compaction used to look like a stalled run: the transcript stopped moving, the phase chip said
+   `compacting`, and the only hint that anything was being asked of a model was a token counter. This badge
+   names the wait and counts the attempts, which is also the answer to “why is it still going”. Same amber
+   as the phase badge — one event, one colour. */
+.badge.busy { color: #f0d6a0; border-color: #6d5626; }
+/* An id outranks the `.hidden` utility; without this rule the badge sits in the bar with the word “busy”
+   in it whether or not anything is being summarised. */
+#busy.hidden { display: none; }
+
+/* ===================================================== settings: two halves, two save buttons
+   The dialog used to be one long grid saved by one button, and the button was a PATCH — so the two client
+   settings at the bottom (redraw rate, Enter) were refused along with the model settings whenever a run held
+   the request shape open. The tabs are the same bargain the tools drawer struck: one container, one `on`. */
+.tabs { display: flex; gap: 3px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.tab {
+  background: none; border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0;
+  padding: 6px 11px; color: var(--muted); font-size: var(--t-2);
+}
+.tab:hover { color: var(--fg); }
+.tab.on { color: var(--fg); background: var(--bg3); border-color: var(--border); }
+.tab small { display: block; color: var(--muted); font-size: var(--t-0); }
+.tab.on small { color: var(--accent); }
+/* The floor is so the two halves do not change the dialog's height when switching — a dialog that jumps
+   by a third of its height under the pointer is how a click lands on the wrong field. */
+.pane { min-height: 46vh; }
+#settings-form menu button.hidden { display: none; }
+
+/* ===================================================== MCP server editor
+   The JSON textarea is the truth and this is a form over it, so the cards read as the config reads: one
+   bordered card per entry, folded when there is more than one, every widget labelled with the daemon's own
+   key name. */
+.mcp { display: grid; gap: 8px; }
+.mcp-tabs { display: flex; gap: 6px; align-items: center; }
+.mcp-tabs button { font-size: var(--t-1); padding: 4px 10px; }
+.mcp-tabs button.on { color: var(--fg); background: var(--bg3); border-color: var(--accent); }
+.mcp-empty { margin: 2px 0; }
+.mcp-server { border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); }
+.mcp-server > summary { display: flex; align-items: center; gap: 8px; padding: 7px 9px; cursor: pointer; list-style: none; }
+.mcp-server > summary::-webkit-details-marker { display: none; }
+.mcp-server > summary::before { content: '\25b8'; color: var(--muted); }
+.mcp-server[open] > summary::before { content: '\25be'; }
+.mcp-nm { font: var(--t-2) var(--mono); }
+.mcp-nm.muted { color: var(--muted); font-style: italic; }
+.mcp-kind { color: var(--muted); font: var(--t-0) var(--mono); }
+/* The buttons ride at the end of the line rather than beside the name, for the reason every other row in this
+   app has them absolutely placed: a control that takes its own width moves the name under the cursor. In a
+   summary that also means clicking near the name can fold the card, so they are pushed past the text instead. */
+.mcp-acts { margin-left: auto; display: flex; gap: 2px; }
+.mcp-acts button { padding: 2px 7px; font-size: var(--t-1); line-height: 1.3; }
+.mcp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px 10px; padding: 4px 10px 10px; }
+.mcp-f { display: grid; gap: 3px; align-content: start; }
+.mcp-f > span { color: var(--muted); font-size: var(--t-1); }
+.mcp-f input, .mcp-f select, .mcp-f textarea { width: 100%; min-width: 0; }
+.mcp-f textarea { resize: vertical; font: var(--t-2)/1.4 var(--mono); }
+/* A checkbox reads backwards when the label is a heading over it (“off — never start” above an empty box is
+   a sentence nobody agrees with), so these go across the bottom of the card with the words beside the box. */
+.mcp-f.check { grid-column: 1 / -1; grid-template-columns: auto 1fr; grid-template-rows: auto; align-items: center; gap: 7px; }
+.mcp-f.check > input { grid-column: 1; width: auto; }
+.mcp-f.check > span { order: 1; font-size: var(--t-2); color: var(--fg); }
+/* The transport decides which half of the card means anything. */
+.mcp-server[data-type='stdio'] .show-http, .mcp-server[data-type='http'] .show-stdio { display: none; }
+/* What an edit has not done yet. The hint is already the sentence that explains the list, so it is the right
+   place to add “and right now it is not stored”. */
+#mcp-hint.dirty::after { content: ' — edited, not saved yet'; color: var(--warn); }
+/* Unloading is a statement about the session this tab is looking at — “close the daemon’s copy of it” — so a
+   row that is not the one on screen gets no button for it. The hover reveal already handles the “only when you
+   reach for the row” half; this is the “only where it means something” half. */
+#session-list li:not(.active) .act.down { display: none; }

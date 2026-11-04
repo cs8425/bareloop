@@ -11,6 +11,7 @@ import { closeNav, navIsOpen } from './nav.js';
 import { icon } from './icons.js';
 import { entryNode, linkToolResults } from './transcript.js';
 import { syncComposer } from './composer.js';
+import { fmtFull, fmtTime } from './clock.js';
 
 // The URL names the session you are looking at: `#/s/<id>`. It is written here and read on boot, which is what
 // makes a reload, a bookmark or a pasted link land on the same conversation instead of whatever the list
@@ -321,7 +322,18 @@ export async function refresh() {
   // Every card this pass created is now old enough to be told how its call ended, because the tool entries
   // that answer them were drawn after the messages that asked.
   linkToolResults();
-  for (const [, s] of state.streams) box.appendChild(s.node);
+  // A stream still in flight survives the rebuild: its node goes back below the committed entries, so a
+  // refresh in the middle of an answer does not blank the answer. Two conditions say a stream does not come
+  // back, and each one is a blank bubble somebody reported:
+  //   - it has finished (`s.done`, set by transcript.js streamFinish): its reply is in the entries above by now.
+  //   - it has drawn nothing yet (no text, no tool card): there is no answer in it to keep, and a header with
+  //     no body under it is exactly the "an empty assistant appeared after the summary / after reconnecting"
+  //     report. Both reports are the same rebuild — a compaction asks for one, a reconnect asks for one, and a
+  //     socket that died never gets the event that would have retired the buffer — and a node with nothing in
+  //     it is not content, it is chrome. A stream that is genuinely mid-answer keeps every character, because
+  //     `content` is what it is judged on, and the next delta puts the node back if it was left out (see
+  //     streamDelta).
+  for (const [, s] of state.streams) if (!s.done && (s.content || s.tools.size)) box.appendChild(s.node);
   state.status = data.status;
   renderStatus(data.status);
   state.pending = data.pending || [];
@@ -512,7 +524,7 @@ function rowTitle(s) {
   if (s.closed) line.push('shut: opening it reads its log again');
   // The one figure the row prints in shorthand, printed in full. It is the newest entry's own timestamp and
   // not the log's mtime: a rewind leaves the entries as old as they were, and this says so.
-  line.push(s.lastTs ? `newest entry ${new Date(s.lastTs).toLocaleString()}` : 'newest entry: this log has no timestamp to read');
+  line.push(s.lastTs ? `newest entry ${fmtFull(s.lastTs)}` : 'newest entry: this log has no timestamp to read');
   if (s.pinned) line.push('pinned');
   if (s.archived) line.push('archived');
   if (s.skipped) {
@@ -616,7 +628,16 @@ function actions(s) {
     }
     loadSessions();
   };
-  box.append(pin, arc, del);
+  // Putting down is drawn on every row and shown on one: which row is open is `state.id`, a fact this window
+  // knows and the list snapshot does not, so a diff rule cannot carry it. app.css hides the button on a row
+  // that is not `.active` (syncActive) instead of the JS rebuilding every row when the open session changes —
+  // on any other row it would be a no-op dressed up as a button anyway.
+  const down = btn('down', 'close', 'put this session down in this window — the transcript goes, the session does not');
+  down.onclick = (e) => {
+    e.stopPropagation();
+    unloadSession();
+  };
+  box.append(pin, arc, down, del);
   return box;
 }
 
@@ -784,6 +805,10 @@ function nodeOf(w) {
 // else in the app, and this module does not get to decide what a key outside the box means.
 export function wireSessions() {
   const box = $('#session-filter');
+  // The top bar's way of letting go. It lives beside the session's own name because that is what the button
+  // is about: the conversation leaves this window, and the row in the list stays exactly where it was.
+  const down = $('#btn-unload');
+  if (down) down.onclick = () => unloadSession();
   if (!box) return;
   box.oninput = () => loadSessions();
   box.onkeydown = (e) => {
@@ -826,6 +851,8 @@ export async function selectSession(id) {
   // queue). Changing session is the only thing that makes those copies somebody else's. The count that
   // trims it belongs to the session being loaded, which is why it goes empty with the entries.
   state.held = [];
+  // And the "waiting on" badge: whatever it was explaining belonged to the session being left behind.
+  clearBusy();
   state.tools.clear();
   state.toolResults.clear();
   state.streams.clear();
@@ -838,11 +865,95 @@ export async function selectSession(id) {
   await refresh();
 }
 
+// unloadSession puts the session down in this window. It is not delete, and it is not the daemon closing a
+// file either: this build has no per-session close to ask for (`Manager.Close` is the whole process's), so
+// what is released is this tab's attention — the transcript, the badges, the queue mirrors and the hash that
+// names the conversation. Nothing is destroyed and one click on the row reads the log again from disk.
+//
+// The empty state is worth having because watching a long run and then wanting the screen back used to have
+// exactly two answers, one of which deleted a session and the other of which was another browser tab.
+export function unloadSession() {
+  if (!state.id) {
+    note('no session is open in this window');
+    return;
+  }
+  const was = state.id;
+  state.id = null;
+  state.cfg = null;
+  state.win = null;
+  state.pathIds = [];
+  state.held = [];
+  state.pending = [];
+  state.status = null;
+  state.attachments = [];
+  emit(EV_SESSION, ''); // the tool drawer keeps a session open of its own; it is told before anything repaints
+  writeHash(''); // the address bar describes what is on screen, and what is on screen is nothing
+  logEl().textContent = '';
+  state.entries.clear();
+  state.tools.clear();
+  state.toolResults.clear();
+  state.streams.clear();
+  for (const [, card] of state.requests) card.remove();
+  state.requests.clear();
+  resetScroll();
+  clearBusy();
+  renderPending();
+  clearStatus();
+  note(`put down ${was} — the session is untouched; click its row to read it again`);
+  loadSessions(); // the row that was highlighted is not the one on screen any more
+}
+
+// clearStatus empties the status bar. renderStatus has no "no session" branch and should not acquire one: the
+// bar is a report about a session, and with no session the honest report is blank.
+function clearStatus() {
+  const phase = $('#phase');
+  phase.textContent = '—';
+  phase.className = 'badge';
+  $('#turn').textContent = '';
+  $('#tools').textContent = '';
+  $('#tools').title = '';
+  $('#ctx-text').textContent = '';
+  $('#ctx-fill').style.width = '0%';
+  $('#session-name').value = '';
+  const wake = $('#wake');
+  wake.textContent = '';
+  wake.title = '';
+  wake.classList.add('hidden');
+}
+
+// showBusy and clearBusy own the one badge in the status bar that answers "why is nothing moving". It is
+// deliberately not a note: a note fades in nine seconds, and the thing it would explain — a summariser
+// thinking — is the longest wait in this product and outlives the note. It is also not derived from the
+// phase, because the phase cannot say it: an automatic compaction runs inside a turn and leaves the phase at
+// `running` for the whole minute its summary is being written, which is exactly the freeze that reads as a
+// hang. So whoever knows writes it (events.js, on a compaction stage) and three hands erase it: that
+// compaction's own result, a phase that can no longer be busy (below), and looking at another session.
+export function showBusy(text, title) {
+  const box = $('#busy');
+  if (!box) return;
+  box.textContent = text;
+  box.title = title || '';
+  box.classList.remove('hidden');
+}
+
+export function clearBusy() {
+  const box = $('#busy');
+  if (!box) return;
+  box.textContent = '';
+  box.title = '';
+  box.classList.add('hidden');
+}
+
 export function renderStatus(st) {
   if (!st) return;
   const phase = $('#phase');
   phase.textContent = st.phase;
   phase.className = 'badge ' + st.phase;
+  // Nobody is owed a "why is this waiting" badge once the loop is neither answering nor summarising. This is
+  // the safety net under showBusy: a stage line from a run that ended on the way (a killed summariser, a
+  // provider that refused the payload) has no fact left to report, and a badge that outlives its run is a
+  // story the daemon stopped telling.
+  if (st.phase !== 'running' && st.phase !== 'compacting') clearBusy();
   // The composer's right-hand slot belongs to the phase: send while idle, the red square and the bolt
   // while a run is live, and the square alone while a manual summary is in flight (Stop is the only hand
   // on one). One owner for that decision (composer.js), because the glyph and the Enter key have to agree
@@ -856,9 +967,9 @@ export function renderStatus(st) {
   const wake = $('#wake');
   const due = st.wakeAt ? new Date(st.wakeAt) : null;
   if (due && !Number.isNaN(due.getTime())) {
-    wake.textContent = `asleep → ${due.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    wake.textContent = `asleep → ${fmtTime(st.wakeAt)}`;
     wake.title =
-      `A tool call is waiting until ${due.toLocaleString()}.\n` +
+      `A tool call is waiting until ${fmtFull(st.wakeAt)}.\n` +
       'The loop is not held open for it: the daemon starts the run that answers it a few seconds before that moment.\n' +
       'Restarting the daemon keeps the wait — it is recomputed from the log — but a message sent while it waits lives in memory, and a restart drops it.';
     wake.classList.remove('hidden');

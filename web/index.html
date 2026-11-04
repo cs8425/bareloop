@@ -35,6 +35,11 @@
         <header id="topbar">
           <button id="menu" type="button" class="ghost icon-btn" title="sessions" aria-label="open the session list"><span data-icon="menu"></span></button>
           <input id="session-name" class="ghost-input" spellcheck="false" title="rename this session" />
+          <!-- Putting a session down is not deleting it, and the difference is the whole reason the button is
+               here rather than being a smaller trash can: the transcript stops being drawn in this window, the
+               daemon is told nothing, and clicking the row again reads the log from disk. A reader who has been
+               watching a run for ten minutes and wants the screen back has had no way to ask for it. -->
+          <button id="btn-unload" type="button" class="icon-btn" title="put this session down in this window — nothing on the server changes" aria-label="put this session down"><span data-icon="close"></span></button>
           <!-- Not decoration: clicking it opens the tool catalogue (descriptions, parameters, cost,
                switches), so it carries a role and a tabindex rather than being mouse-only. -->
           <span id="tools" class="badge" role="button" tabindex="0" aria-label="open the tool catalogue" title="MCP tools"></span>
@@ -51,6 +56,12 @@
                moment the wait is due rather than a countdown, because nothing here re-renders to watch one
                go by, and a figure that quietly goes stale is worse than no figure. -->
           <span id="wake" class="badge hidden"></span>
+          <!-- A run that stops moving is a run a reader has to be told about. Automatic compaction happens
+               inside a run — the phase stays `running` the whole time — and the longest wait in this product is
+               the summariser's own answer, which can sit there for a minute with no token on screen. So the
+               reason goes next to the phase rather than into a note that fades: this badge is the difference
+               between "it is writing a summary" and "it has hung". -->
+          <span id="busy" class="badge busy hidden" role="status"></span>
           <!-- The token bar is the door to the tokens-and-cost panel: it is the one thing in this row
                that is about tokens, and "how full is the window" wants a "what did it cost" behind it.
                It is a span, so it is given the role, the name and the keys a button ships with. -->
@@ -168,7 +179,18 @@
 
     <dialog id="dlg-settings">
       <form id="settings-form">
-        <h3>session settings</h3>
+        <h3>settings</h3>
+        <!-- Two kinds of setting share this dialog and nothing else, so they are two panes now.
+             THIS SESSION is the daemon's: a PATCH it refuses while a run is in flight, because a model, a tool
+             set or an MCP list cannot change under a half-sent request. THIS BROWSER is this tab's, kept in
+             localStorage, and it has no such reason to wait — a redraw rate and a timezone are not properties
+             of a conversation, and until now they were locked behind the same refuse, so a running session
+             also froze the knob whose whole job is helping a slow machine. -->
+        <div class="tabs" role="tablist" aria-label="which settings you are editing">
+          <button type="button" class="tab" id="tab-session" role="tab" aria-controls="pane-session">this session</button>
+          <button type="button" class="tab" id="tab-browser" role="tab" aria-controls="pane-browser">this browser</button>
+        </div>
+        <section id="pane-session" class="pane">
         <div class="grid">
           <label>name <input name="name" /></label>
           <label>model <input name="model" spellcheck="false" /></label>
@@ -261,7 +283,37 @@
             <input name="structuredMaxBytes" type="number" min="0" placeholder="16 384 bytes (default)" />
             of that JSON
           </label>
+          <!-- The other timezone, and the one this dialog has never had a field for. It belongs to the SESSION
+               because it is what the model is told: `get_datetime` answers in it when the call names none, and a
+               `wait` whose `until` arrives without an offset is read in it. It has nothing to do with how the
+               timestamps on this page are drawn, which is the other tab. Empty means the daemon's answer (no
+               zone set anywhere means UTC); to put UTC back on purpose, write UTC — empty here means unchanged.
+          -->
+          <label class="span3">
+            timezone for the time tools
+            <input
+              name="timezone"
+              list="tz-names"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="unchanged when empty — nothing set anywhere means UTC"
+              title="What the daemon's own tools answer in: get_datetime, and a wait whose &quot;until&quot; was written without an offset. An IANA name (Asia/Taipei), a fixed offset (+08:00), or Local for the machine bareloopd runs on. The server refuses a zone it cannot resolve, before it writes anything. This is not the clock the transcript is drawn with — that is the other tab, and it is yours alone."
+            />
+          </label>
         </div>
+        <datalist id="tz-names">
+          <option value="UTC"></option>
+          <option value="Asia/Taipei"></option>
+          <option value="Asia/Tokyo"></option>
+          <option value="Asia/Shanghai"></option>
+          <option value="Asia/Singapore"></option>
+          <option value="Europe/London"></option>
+          <option value="Europe/Berlin"></option>
+          <option value="America/New_York"></option>
+          <option value="America/Los_Angeles"></option>
+          <option value="Australia/Sydney"></option>
+          <option value="Local"></option>
+        </datalist>
         <p class="hint">
           A tool may answer twice: once as text, and once as <code>structuredContent</code> — a JSON value
           the log keeps beside the text, never merged into it. This row says which of the two the model is
@@ -283,57 +335,37 @@
            <em>back to the default</em>: write <code>16384</code> to put the default back on purpose.
         </p>
         <label>system prompt <textarea name="systemPrompt" rows="4" spellcheck="false"></textarea></label>
-        <label>
-          MCP servers (JSON array)
-          <textarea name="mcp" rows="8" spellcheck="false"></textarea>
-        </label>
-        <!-- The rate and the switch that owns it share a row: the switch is a mode of that number. Left to
-             the label's own column layout the box stacked *above* the words belonging to it, which reads as a
-             heading for whatever came next. -->
-        <div class="hz">
-          <label>
-            how often a streaming reply is redrawn
-            <span class="with-unit"><input name="renderHz" type="number" min="0" max="120" step="1" /><span>Hz</span></span>
+        <!-- MCP servers, two editors for one array. The JSON textarea is still the only thing that is saved —
+             the form is an editor over it, parsing on the way in and writing pretty JSON on the way out, so a
+             hand-tuned entry and a form-built one cannot disagree and an unknown key typed into the JSON can
+             survive a trip through the form. The form is the default because the common edits are a URL, a
+             command and three checkboxes, and doing those in JSON means remembering which of nine keys are
+             optional. -->
+        <div class="mcp">
+          <div class="mcp-head">
+            <b>MCP servers</b>
+            <span class="tabs small">
+              <button type="button" class="tab" id="mcp-tab-form" role="tab" aria-controls="mcp-form">form</button>
+              <button type="button" class="tab" id="mcp-tab-json" role="tab" aria-controls="mcp-json">JSON</button>
+            </span>
+            <span class="spacer"></span>
+            <button type="button" class="ghost" id="mcp-add">add a server</button>
+          </div>
+          <div id="mcp-form" class="mcp-form"></div>
+          <label id="mcp-json" class="mcp-json hidden">
+            MCP servers (JSON array)
+            <textarea name="mcp" rows="10" spellcheck="false"></textarea>
           </label>
-          <label class="check">
-            <input name="renderHzAuto" type="checkbox" role="switch" /> pick the rate by itself (auto)
-          </label>
+          <p class="hint" id="mcp-hint">
+            One entry per MCP server, in the daemon’s own keys. <em>name</em> is what a tool is prefixed with when
+            more than one server is on; <em>type</em> is <code>http</code> (a URL, optionally with headers) or empty
+            for <code>stdio</code> (a command this daemon starts, with <em>args</em>, <em>env</em>, <em>dir</em>).
+            The policy on top — <em>disabled</em>, <em>disabledTools</em> (exact names or globs), <em>toolPrefix</em>,
+            <em>structuredContent</em> — costs a reconnect for nothing except a changed <em>type</em>/<em>command</em>/<em>url</em>,
+            and reaches the model on the next run. Everything left empty is the daemon’s default, and the JSON tab
+            carries keys this form does not show — those survive an edit here.
+          </p>
         </div>
-        <p class="hint">
-          <em>This browser</em> asks this one, not the session: it says how much of your machine a growing reply may
-          spend redrawing, so it is stored locally and never sent to the server. Text is never lost by
-          redrawing less — the characters keep arriving and the next frame draws everything up to now. At 0
-          the bubble shows its cursor and the whole reply appears when the stream ends, which is cheaper
-          than 1 Hz on a machine that cannot afford a parse a second; <code>?mode=plain</code> is the
-          readable version of that bargain (text as it arrives, markdown at the end). A <code>?hz=</code>
-          in the address bar wins over this row until the next load, and the streaming message prints the
-          rate it is really managing in its own header.
-        </p>
-        <p class="hint">
-          <em>auto</em> keeps choosing while the reply runs: it starts at 20 Hz and moves one rung at a time
-          — 10, 5, 1, then 0 — down after three redraws in a row cost more than 60% of what the
-          current rate promises, and back up after twenty cheap ones. It is judged on the whole redraw,
-          follow-scroll included, which is the only way to catch the cost that lands after the markdown is
-          drawn. What no rate can do is make a single redraw cheaper: on a long transcript the money goes
-          to laying the document out again, so <em>auto</em> keeps the page from falling over rather than making
-          it fast.
-        </p>
-        <label>
-          what the Enter key does
-          <select name="enterSends">
-            <option value="auto">auto — keyboard: Enter sends · touch: Enter adds a line (default)</option>
-            <option value="on">always send</option>
-            <option value="off">never send — Enter adds a line, use the send button</option>
-          </select>
-        </label>
-        <p class="hint">
-          Also <em>this browser</em>, not the session. On a touch screen there is no Shift+Enter a thumb can
-          reach, so the default gives Enter back to the text: multi-line prompts and pasted code can be typed
-          after all, and the round button beside the box sends. On a keyboard nothing changes: Enter sends,
-          Enter during a live run interrupts that run and sends this instead, Shift+Enter is a newline. The
-          on-screen return key and the box's hint text follow whichever answer you pick.
-          <code>?enter=on|off|auto</code> wins over this row until the next load.
-        </p>
         <p class="hint">
           An empty API key keeps the stored one. Each session keeps its own log, MCP servers,
           system prompt, context window and compaction parameters. Saving while a run is active is
@@ -348,11 +380,84 @@
           price changes the totals of everything already in the log, because what is billed is the usage
           each request already recorded, and it never reconnects anything.
         </p>
+        </section>
+        <section id="pane-browser" class="pane hidden">
+          <p class="hint">
+            Nothing on this tab is sent to the daemon, and nothing on it waits for a run to finish. These are
+            this browser's own answers — redraw rate, the Enter key, the clock the transcript is drawn with —
+            stored in this profile, and two readers of one session can each pick their own.
+          </p>
+          <!-- The rate and the switch that owns it share a row: the switch is a mode of that number. Left to
+               the label's own column layout the box stacked *above* the words belonging to it, which reads as a
+               heading for whatever came next. -->
+          <div class="hz">
+            <label>
+              how often a streaming reply is redrawn
+              <span class="with-unit"><input name="renderHz" type="number" min="0" max="120" step="1" /><span>Hz</span></span>
+            </label>
+            <label class="check">
+              <input name="renderHzAuto" type="checkbox" role="switch" /> pick the rate by itself (auto)
+            </label>
+          </div>
+          <p class="hint">
+            <em>This browser</em> asks this one, not the session: it says how much of your machine a growing reply may
+            spend redrawing, so it is stored locally and never sent to the server. Text is never lost by
+            redrawing less — the characters keep arriving and the next frame draws everything up to now. At 0
+            the bubble shows its cursor and the whole reply appears when the stream ends, which is cheaper
+            than 1 Hz on a machine that cannot afford a parse a second; <code>?mode=plain</code> is the
+            readable version of that bargain (text as it arrives, markdown at the end). A <code>?hz=</code>
+            in the address bar wins over this row until the next load, and the streaming message prints the
+            rate it is really managing in its own header.
+          </p>
+          <p class="hint">
+            <em>auto</em> keeps choosing while the reply runs: it starts at 20 Hz and moves one rung at a time
+            — 10, 5, 1, then 0 — down after three redraws in a row cost more than 60% of what the
+            current rate promises, and back up after twenty cheap ones. It is judged on the whole redraw,
+            follow-scroll included, which is the only way to catch the cost that lands after the markdown is
+            drawn. What no rate can do is make a single redraw cheaper: on a long transcript the money goes
+            to laying the document out again, so <em>auto</em> keeps the page from falling over rather than making
+            it fast.
+          </p>
+          <label>
+            what the Enter key does
+            <select name="enterSends">
+              <option value="auto">auto — keyboard: Enter sends · touch: Enter adds a line (default)</option>
+              <option value="on">always send</option>
+              <option value="off">never send — Enter adds a line, use the send button</option>
+            </select>
+          </label>
+          <p class="hint">
+            Also <em>this browser</em>, not the session. On a touch screen there is no Shift+Enter a thumb can
+            reach, so the default gives Enter back to the text: multi-line prompts and pasted code can be typed
+            after all, and the round button beside the box sends. On a keyboard nothing changes: Enter sends,
+            Enter during a live run interrupts that run and sends this instead, Shift+Enter is a newline. The
+            on-screen return key and the box's hint text follow whichever answer you pick.
+            <code>?enter=on|off|auto</code> wins over this row until the next load.
+          </p>
+          <!-- The clock the page is drawn with. The log's own stamps are UTC and always will be; this only
+               decides what the transcript prints, which is why it lives here and not beside the time tools. -->
+          <label>
+            show timestamps in
+            <input name="tz" list="tz-names" spellcheck="false" autocomplete="off"
+              placeholder="this browser's own zone" />
+          </label>
+          <p class="hint" id="tz-now"></p>
+          <p class="hint">
+            The log is written in UTC and is never rewritten; this says what the transcript and the day
+            dividers are drawn in. Empty is this browser's own zone — the answer nobody has to think about.
+            <code>UTC</code> is what you want while reading a server's own logs beside this one, and an IANA
+            name (<code>Asia/Taipei</code>) is what you want when the conversation has a deadline in one place
+            and you are reading it from another. Nothing stored changes, so switching back costs nothing.
+          </p>
+        </section>
         <menu>
           <!-- Same rule as the new-session dialog: neither button submits. Enter in a field is handled
-               by the form's submit listener, which saves. -->
-          <button type="button" value="cancel" class="ghost" data-close="cancel">cancel</button>
-          <button id="settings-save" type="button" value="save" class="primary">save</button>
+               by the form's submit listener, which saves whichever pane is on screen. Two buttons because the
+               two halves are saved by two different hands: one is a PATCH the daemon may refuse, the other is
+               localStorage and cannot fail. -->
+          <button type="button" class="ghost" data-close="cancel">cancel</button>
+          <button id="settings-save-session" type="button" class="primary">save session</button>
+          <button id="settings-save-browser" type="button" class="primary hidden">save browser</button>
         </menu>
       </form>
     </dialog>

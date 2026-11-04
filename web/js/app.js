@@ -34,6 +34,7 @@ import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
+import { wireZoom } from './lightbox.js';
 import { flushStreams } from './transcript.js';
 import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions, renderStatus } from './session.js';
 import { onCompaction } from './events.js';
@@ -211,6 +212,9 @@ function wire() {
   wirePanel();
   wireTools();
   wireStats();
+  // One delegated listener for every picture the transcript will ever draw, so an entry rendered next month is
+  // zoomable without anything having remembered to wire it (js/lightbox.js).
+  wireZoom();
   wireNewSession();
   wireKeys();
   // The render gate draws nothing while this tab is hidden — a background tab has no reader — so coming

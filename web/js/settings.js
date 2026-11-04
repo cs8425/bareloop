@@ -11,6 +11,8 @@ import { fail, note, toast } from './ui.js';
 import { refresh, loadSessions } from './session.js';
 import { resolveHz, describeHz, AUTO, AUTO_INITIAL_HZ } from './scheduler.js';
 import { resolveEnterMode, describeEnterMode, syncComposer } from './composer.js';
+import { fmtZoneLabel, setTzSetting, tzSetting } from './clock.js';
+import { wireMcpEditor } from './mcp-form.js';
 
 // fld reads a control by name: form.elements has properties like "action" and "name" that a plain
 // property access would resolve to the wrong thing.
@@ -20,6 +22,33 @@ const fld = (form, name) => form.elements.namedItem(name);
 export async function currentConfig() {
   const data = await get('');
   return data.config || {};
+}
+
+// The MCP editors (form + JSON), built once when the dialog is first wired. `null` until then, which is why
+// openSettings asks with `?.`.
+let mcp = null;
+let pane = 'session';
+
+// showPane switches between the two halves of the dialog, and between the two save buttons with it. Which one
+// is on screen is the only thing that decides what Enter in a field means, so the answer is kept here rather
+// than read back off a class at submit time.
+function showPane(which) {
+  pane = which;
+  $('#pane-session').classList.toggle('hidden', which !== 'session');
+  $('#pane-browser').classList.toggle('hidden', which !== 'browser');
+  $('#tab-session').classList.toggle('on', which === 'session');
+  $('#tab-browser').classList.toggle('on', which === 'browser');
+  $('#settings-save-session').classList.toggle('hidden', which !== 'session');
+  $('#settings-save-browser').classList.toggle('hidden', which !== 'browser');
+  // The daemon refuses this PATCH while a run holds the request shape open, and the honest UI is the button
+  // that says so before it is pressed rather than after. The other half stays live — that is the whole point
+  // of splitting them.
+  const busy = state.status?.phase === 'running' || state.status?.phase === 'compacting';
+  const btn = $('#settings-save-session');
+  btn.disabled = busy;
+  btn.title = busy
+    ? `a run is in flight — the model, the tool set and the MCP list cannot change under a half-sent request. Stop it, or use the other tab`
+    : '';
 }
 
 export async function openSettings() {
@@ -82,8 +111,23 @@ export async function openSettings() {
   fld(f, 'priceCached').value = price ? price.cachedInput ?? 0 : '';
   fld(f, 'priceOutput').value = price ? price.output ?? 0 : '';
   fld(f, 'systemPrompt').value = cfg.systemPrompt || '';
+  // The timezone the time tools answer in, shown as stored. An empty box means "unchanged", which is the
+  // PATCH rule for this field and the reason the placeholder says so out loud rather than lying with a
+  // plausible-looking "UTC".
+  fld(f, 'timezone').value = cfg.timezone || '';
   fld(f, 'mcp').value = JSON.stringify(cfg.mcp || [], null, 2);
   compactMath(f);
+  // The MCP editors are reloaded from the textarea the config was just written into, and the dialog opens on
+  // the half the button was pressed for: the form, because that is what a person editing a URL wants.
+  mcp?.render();
+  mcp?.show('form');
+  $('#mcp-hint').classList.remove('dirty');
+  // The client half is read from storage every time, not from a cache: another tab may have changed it, and
+  // this is the one setting the daemon cannot arbitrate.
+  fld(f, 'tz').value = tzSetting();
+  const now = $('#tz-now');
+  if (now) now.textContent = `right now this browser is in ${fmtZoneLabel()} — leave it empty to keep that answer.`;
+  showPane('session');
   $('#dlg-settings').showModal();
 }
 
@@ -216,6 +260,10 @@ export async function saveSettings() {
     // the dialog's error rather than as a saved setting.
     structuredMaxBytes: Number(fld(f, 'structuredMaxBytes').value || 0),
     mcp,
+    // Timezone rides this PATCH only when the box has something in it. An absent timezone means "unchanged" to
+    // the daemon, so this dialog cannot express "back to no opinion" — that is a config.json edit, and the
+    // field's hint says so rather than letting an empty box look like a reset.
+    ...(fld(f, 'timezone').value.trim() ? { timezone: fld(f, 'timezone').value.trim() } : {}),
   };
   // Fields this dialog does not have are dropped rather than guessed at: absent means "unchanged",
   // while sending a zero here would look like an answer.
@@ -269,7 +317,7 @@ function applyRenderHz(f) {
   // this dialog would read that lie back as their own choice.
   if (!auto && (raw === '' || !Number.isFinite(hz) || hz < 0)) {
     toast('redraw rate: a number of Hz (0 or more), or tick auto');
-    return;
+    return false;
   }
   try {
     localStorage.setItem('bareloop.renderHz', String(raw));
@@ -281,6 +329,7 @@ function applyRenderHz(f) {
   // that log — a confirmation eaten by its own save is no confirmation. This one also has to be readable
   // after the dialog closes with the transcript scrolled somewhere else.
   toast(`redrawing at ${describeHz(hz)}${new URLSearchParams(location.search).has('hz') ? ' — the ?hz= in the address bar still wins until reload' : ''}`);
+  return true;
 }
 
 // applyEnterSends stores how this browser treats the Enter key. Like the redraw rate it is kept out of
@@ -307,14 +356,24 @@ function applyEnterSends(f) {
 
 export function wireSettings() {
   const dlg = $('#dlg-settings');
-  // One save path for both ways of leaving the dialog: the save button, and Enter inside a field.
-  // The form had no submit listener, so Enter was an implicit submission of a form with no action —
-  // a page reload that threw the edits away.
-  const save = async () => {
+  const f0 = $('#settings-form');
+  // The two MCP editors share the one textarea the config is written into; the form commits into it on every
+  // keystroke, the JSON tab commits on blur. The hint is where an edit announces itself as not-saved-yet:
+  // nothing reaches the daemon until the session half is saved, and a form this much like a settings panel
+  // invites exactly that mistake.
+  mcp = wireMcpEditor({
+    form: $('#mcp-form'),
+    json: fld(f0, 'mcp'),
+    addBtn: $('#mcp-add'),
+    onEdit: () => $('#mcp-hint').classList.add('dirty'),
+  });
+
+  // Two save buttons, because the two halves fail differently: the session half can be refused by the daemon
+  // (a run is holding the request shape open) and the browser half cannot be refused at all — it is
+  // localStorage. One button for both meant a refused PATCH took the client edits down with it.
+  const saveSession = async () => {
     try {
       await saveSettings();
-      applyRenderHz($('#settings-form'));
-      applyEnterSends($('#settings-form'));
       dlg.close();
     } catch (err) {
       // Bad MCP JSON is the user's own text: it is already on screen, and the dialog stays open so
@@ -322,8 +381,28 @@ export function wireSettings() {
       if (!(err instanceof SyntaxError)) fail(err);
     }
   };
+  const saveBrowser = async () => {
+    if (!applyRenderHz(f0)) return; // it has already said why in a toast
+    applyEnterSends(f0);
+    // A zone this browser cannot name is refused rather than stored: a typo would leave every timestamp in
+    // the transcript falling back to the browser's own zone while the setting claimed otherwise.
+    if (!setTzSetting(fld(f0, 'tz').value.trim())) {
+      toast('that is not a timezone id this browser recognises (try Asia/Taipei) — nothing stored');
+      return;
+    }
+    toast(`times shown in ${fmtZoneLabel()}`);
+    dlg.close();
+    // The stamps and the day separators are drawn from the zone, so the change is only visible once the
+    // transcript is painted again — and the sidebar titles carry timestamps too.
+    refresh().catch(() => {});
+    loadSessions().catch(() => {});
+  };
+
   $('#btn-settings').onclick = openSettings;
-  $('#settings-save').onclick = save;
+  $('#settings-save-session').onclick = saveSession;
+  $('#settings-save-browser').onclick = saveBrowser;
+  $('#tab-session').onclick = () => showPane('session');
+  $('#tab-browser').onclick = () => showPane('browser');
   // Ticking auto changes the row it belongs to: the number box stops being an input and becomes a reading
   // of what auto is on. Wiring only the open path would leave someone who just ticked it unable to read the
   // rung, and unable to type a rate again without closing and reopening the dialog.
@@ -340,9 +419,13 @@ export function wireSettings() {
   for (const name of ['nCtx', 'threshold', 'keepTarget', 'minKeptMessages']) {
     fld($('#settings-form'), name).oninput = () => compactMath($('#settings-form'));
   }
+  // One save path per way of leaving the dialog: the button, and Enter inside a field. The form has no action,
+  // so without this Enter would be an implicit submission — a page reload that throws the edits away. Which
+  // half is on screen is what Enter means; the other half's fields are hidden, and hidden fields are still in
+  // the form, which is why the dispatch cannot be left to the browser.
   $('#settings-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    save();
+    (pane === 'browser' ? saveBrowser : saveSession)();
   });
   dlg.querySelectorAll('[data-close]').forEach((b) => { b.onclick = () => dlg.close(b.dataset.close || 'cancel'); });
   // Renaming lives in the top bar, so it patches just the name on top of what the server has.

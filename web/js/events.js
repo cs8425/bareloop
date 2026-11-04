@@ -6,7 +6,7 @@ import { note, toast } from './ui.js';
 import { scrollDown } from './scroll.js';
 import { entryNode, requestCard, streamDelta, toolCard } from './transcript.js';
 import { renderTools, syncToolsPanel } from './tools.js';
-import { loadSoon, refresh, renderNewer, renderPending, renderStatus, returnToTip } from './session.js';
+import { clearBusy, loadSoon, refresh, renderNewer, renderPending, renderStatus, returnToTip, showBusy } from './session.js';
 
 // Everything on this list answers "what is happening now" by drawing at the bottom of #log, and that
 // sentence only means something while the bottom of #log is the newest message. A jump parks the
@@ -21,6 +21,13 @@ const LIVE_AT_THE_TAIL = ['delta', 'entry', 'tool_call', 'tool_result', 'compact
 
 export function handleEvent(ev) {
   if (ev.seq !== undefined) state.seq = Math.max(state.seq, ev.seq || 0);
+  // Nothing is on screen (this window put its session down). The hub still sends everything, so the list is
+  // told when a session moves and the transcript is left alone — drawing an entry into an empty window would
+  // be putting somebody's conversation back on a screen that just asked for it back.
+  if (!state.id) {
+    if (ev.type === 'state' || ev.type === 'entry') loadSoon();
+    return;
+  }
   if (ev.session && state.id && ev.session !== state.id) {
     // Another session produced this: the only thing on screen that cares is the sidebar.
     if (ev.type === 'state' || ev.type === 'entry') loadSoon();
@@ -176,9 +183,19 @@ function attach(card, entryId) {
 export function onCompaction(r) {
   if (!r) return;
   if (r.stage) {
+    // The one moment a session looks broken and is not: the summariser is answering, no token of the
+    // conversation is moving, and the phase still says `running` because the compaction is inside the run.
+    // The note stays (it is the attempt-by-attempt record a reader scrolls back through), but a note fades and
+    // this wait does not, so the badge is what actually answers "is it hung". Stop is the way out, and the
+    // badge says so rather than letting a reader conclude the page died.
+    showBusy(`writing the summary${r.attempt ? ` · attempt ${r.attempt}` : ''}…`, 'The context is over the compaction trigger, so this turn is being summarised before it can be sent — or the summary just came back over its own cap and is being asked again.\n\nNothing else is happening while this runs: the answer you asked for waits behind it, and anything you type is queued until it lands. The summariser can take a minute per attempt.\n\nStop (the red square, POST /api/session/<id>/stop) is the only hand on it: it kills the summariser, writes nothing, and leaves the conversation as it was.');
     note(`compaction: ${r.stage}${r.attempt ? ` (attempt ${r.attempt})` : ''}`);
     return;
   }
+  // Every answer below is the end of the wait the badge was standing for — committed, refused, or never
+  // needed. The summary entry arrives separately (and asks for a rebuild itself); this event is the last
+  // word on whether anything is still in flight.
+  clearBusy();
   if (r.noop) {
     note(`compaction: ${r.skipped || 'nothing to do'}`);
     return;

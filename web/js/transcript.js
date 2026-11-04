@@ -4,6 +4,7 @@
 import md from './md.js';
 import { makeRenderGate, resolveStreamMode } from './scheduler.js';
 import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName, tps, MIN_UNCACHED } from './util.js';
+import { fmtDay, fmtFull, fmtTime } from './clock.js';
 import { state } from './state.js';
 import { call } from './api.js';
 import { confirmBox, note } from './ui.js';
@@ -68,14 +69,12 @@ function resumeFrom(e) {
   return { anchor: '', why: '' };
 }
 
-// dayKey is the local calendar day of a timestamp, written `2026-11-01`. Deliberately not a locale
-// format: the header of every entry already prints a 24-hour clock for the same reason (see entryNode),
-// and a divider that reads "Nov 1" on one machine and "1/11" on another is two different transcripts.
-const dayKey = (ts) => {
-  if (!ts) return '';
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
+// dayKey is the reader's calendar day of a timestamp, written `2026-11-01` (js/clock.js — the zone is a
+// preference, and a divider that falls at UTC midnight for a reader in Taipei is a day divider in the wrong
+// place). Deliberately not a locale format: the header of every entry already prints a 24-hour clock for the
+// same reason, and a divider that reads "Nov 1" on one machine and "1/11" on another is two different
+// transcripts.
+const dayKey = (ts) => (ts ? fmtDay(ts) : '');
 
 // dayWord is the only relative date the transcript answers, because it is the only one that is free:
 // "yesterday" is a fact about the reader's clock, while "3 days ago" is a calculation nobody asked for
@@ -135,8 +134,9 @@ export function entryNode(e) {
     // A clock time down to the second was the widest and least used thing on the line. HH:MM is a fifth
     // of the width (always 24-hour, so it never depends on whose locale loaded the page), and the full
     // timestamp — with the zone, which is what you actually want next to a log entry — is in the title.
-    const when = el('span', 'eid', new Date(e.ts).toTimeString().slice(0, 5));
-    when.title = new Date(e.ts).toLocaleString();
+    // Both halves come from js/clock.js: the log's stamps are UTC and the reader's zone is a preference.
+    const when = el('span', 'eid', fmtTime(e.ts));
+    when.title = fmtFull(e.ts);
     head.appendChild(when);
   }
   const tools = el('span', 'eid');
@@ -741,6 +741,11 @@ function streamStart(streamId) {
 export function streamDelta(d) {
   const s = streamStart(d.streamId);
   if (!s) return;
+  // A rebuild is allowed to leave a not-yet-drawn stream out of the transcript (session.js refresh: an empty
+  // bubble is what two people separately called a bug). That ruling has an expiry date of one token: the first
+  // text or tool call is the news that changes the answer, so the node goes back at the tail — which is where a
+  // live stream belongs, below everything already committed.
+  if (!s.node.isConnected) logEl().appendChild(s.node);
   if (d.reasoning) {
     // The first thinking of a stream is what opens the block, not the first delta of the reply: a model that
     // never thinks must not get an empty open box, and until something is on screen the gate must stay off
@@ -762,15 +767,23 @@ export function streamDelta(d) {
   if (tc) {
     s.endThinking(); // a tool call ends the thinking too, and from here the card is what a reader watches
     const key = tc.index ?? tc.id ?? s.tools.size;
+    // The wire calls this `arguments` (agent.go: ToolCallProgress.Args `json:"arguments,omitempty"`), which is
+    // what the other two readers of the same event already ask for — the tool progress frame (events.js) and
+    // the replay of a committed entry (below in this file). This path asked for `tc.args`, a property nothing
+    // ever set, so a streamed call accumulated an empty string from its first frame to its last: open the card
+    // while the model is still working and the parameter box had nothing to show, and the arguments appeared
+    // only when the entry committed and the replay read the right name. Both spellings are accepted here so a
+    // producer that ever sends the short one is not silently ignored.
+    const text = tc.arguments ?? tc.args ?? '';
     if (tc.id || tc.name) {
-      s.args.set(key, tc.args || '');
+      s.args.set(key, text);
       const card = toolCard(tc.id || `#${key}`, tc.name || 'tool', 'running');
       s.tools.set(key, card);
       s.node.insertBefore(card.el, s.body);
       // Opening a card mid-stream asks for its arguments now, same rule as the reasoning panel.
       card.el.addEventListener('toggle', s.drawToolArgs);
     } else {
-      s.args.set(key, (s.args.get(key) || '') + (tc.args || ''));
+      s.args.set(key, (s.args.get(key) || '') + text);
     }
     // Which tool is running is drawn immediately (above), but its arguments accumulate and follow the
     // frame: an args delta used to mean a pretty-print plus a DOM write per token. And as with the
@@ -811,6 +824,13 @@ function streamFinish(s) {
   // finished message keeping a rate it is no longer drawing at would be a small, permanent lie.
   s.tag?.remove();
   markStreamFinished(s.id);
+  // "Finished" is said out loud because a rebuild re-hangs every stream it is holding below the committed
+  // entries (js/session.js), and it holds this one until the committed entry has taken its tool cards. With-
+  // out the flag that rebuild resurrects a reply that is already in the log — an empty assistant bubble with
+  // a header and nothing in it. Both ways a reader meets it are rebuilds they did not ask for: a compaction
+  // (the entry event asks for a rebuild) and a reconnect (the socket asks for one). Neither is the cause;
+  // the cause is a finished node outliving the buffer that should have let go of it.
+  s.done = true;
   if (!s.content && !s.tools.size) s.node.remove();
 }
 
@@ -831,6 +851,12 @@ export function toolCard(callId, label, cls) {
   const badge = el('span', cls || '', '·');
   summary.append(el('span', 'lbl', 'tool'), lbl, badge);
   const args = el('pre', 'args');
+  // Out of sight until it has something in it. `setArgs` is the only writer and it turns the box on, but a card
+  // is often created before any argument text exists — the tool_call progress frame draws the card the moment the
+  // call starts, and the arguments arrive after it, or not until the entry commits. A <pre> with a border-top
+  // and nothing else is what people reported as “the parameter box shows no content”: an empty box that
+  // promises an argument list and delivers a margin.
+  args.style.display = 'none';
   card.append(summary, args);
   // `done` is not a loading flag. It is the card admitting it has been told how the call ended, after which
   // a straggling progress event must not repaint the verdict it is standing on.
