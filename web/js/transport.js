@@ -12,6 +12,7 @@ import { state } from './state.js';
 import { setConn, note } from './ui.js';
 import { handleEvent } from './events.js';
 import { refresh } from './session.js';
+import { u } from './base.js';
 
 const MIN_DELAY = 600; // first retry: fast enough that a restarting server costs one blink
 const MAX_DELAY = 15000; // and never more than a quarter of a minute between attempts
@@ -31,9 +32,12 @@ export function connect() {
   // while the first is still handshaking would have both of them subscribing and refreshing.
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 
+  // The authority is this page's own: a proxy may be sitting in front of the daemon and terminating TLS, and the
+  // browser has to dial what it is looking at rather than what the daemon thinks it is called. The path comes
+  // from base.js, so a UI mounted under /app/bareloopd/ asks for /app/bareloopd/ws and the proxy strips it back.
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   try {
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    ws = new WebSocket(`${proto}//${location.host}${u('/ws')}`);
   } catch {
     degrade();
     schedule();
@@ -102,7 +106,7 @@ function degrade() {
 }
 
 function startSSE() {
-  const src = new EventSource(`/api/session/${state.id}/events`);
+  const src = new EventSource(u(`/api/session/${state.id}/events`));
   state.es = src;
   src.onopen = () => {
     setConn(true, 'sse · websocket down', 'sse');

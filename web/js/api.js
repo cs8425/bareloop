@@ -2,12 +2,14 @@
 // close to instant as the network allows, and so curl can do everything the page can.
 import { state } from './state.js';
 import { fail } from './ui.js';
+import { u } from './base.js';
 
 // api makes one request and always resolves to an object: a server that answers with something that
 // is not JSON (an HTML error page from a proxy, say) comes back as {raw: "..."} instead of throwing
-// inside JSON.parse, so the caller can still show what happened.
+// inside JSON.parse, so the caller can still show what happened. Callers write the daemon's own path
+// (`/api/session/…`); base.js puts whatever prefix this copy of the UI is hanging under in front of it.
 export async function api(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(u(path), {
     headers: { 'content-type': 'application/json' },
     method: opts.method || (opts.body ? 'POST' : 'GET'),
     body: opts.body ? JSON.stringify(opts.body) : undefined,

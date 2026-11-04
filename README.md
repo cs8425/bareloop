@@ -75,6 +75,17 @@ The UI puts the session in the URL (`#/s/<id>`): reload, bookmark or paste the l
 conversation, the back button steps through the sessions you looked at, and a link naming a session that is
 not there says so and puts the current one back into the address bar.
 
+Every URL the UI asks for is resolved against where its own code was loaded from, so it works behind a reverse
+proxy that hangs it under a prefix — `/app/bareloopd/`, `/app/`, or `/` — as long as the proxy takes that prefix
+off before forwarding, which is how one is normally written (`location /app/bareloopd/ { proxy_pass
+http://127.0.0.1:8090/; }`, or `handle_path /app/*` in Caddy). The daemon always answers at `/`: there is no
+base-path setting to keep in sync, and none to get wrong. Two things to know. The browser's URL keeps its
+trailing slash (`/app/bareloopd/`, not `/app/bareloopd` — without the slash the page looks for its own files one
+directory up). And the two long-lived channels want to be let through: the websocket `/ws` wants `Upgrade` and
+`Connection` forwarded, and the event stream `/api/session/{id}/events` wants buffering off (`proxy_buffering off`;
+Caddy and Apache stream by default). A proxy that does neither still works — the UI notices, says
+`poll fallback` in the sidebar, and keeps going a poll interval behind.
+
 ## Using it
 
 The transcript is the log: what you see is what is stored. In the composer **Enter** sends, **Shift+Enter**
