@@ -427,8 +427,11 @@ function fillBody(node, body, e) {
   if (e.kind === 'assistant') {
     if (e.content) md.renderTo(body, e.content);
     // Replay the call arguments so a reloaded page still shows what was passed.
-    for (const tc of e.toolCalls || []) {
-      const card = toolCard(tc.id, `${tc.server ? tc.server + '/' : ''}${tc.name}`, '');
+    // Each card is looked up by its own call id, and a log written without one falls back to entry + position:
+    // an id-less call would otherwise hand every card in the transcript the same cache key, so the second
+    // entry's call would steal the first one's DOM (and its arguments) on the way past.
+    for (const [i, tc] of (e.toolCalls || []).entries()) {
+      const card = toolCard(tc.id || `${e.id}#${i}`, `${tc.server ? tc.server + '/' : ''}${tc.name}`, '');
       card.setArgs(typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? ''));
       card.el.removeAttribute('open');
       body.appendChild(card.el);
@@ -669,6 +672,10 @@ function streamStart(streamId) {
   const drawToolArgs = () => {
     for (const [key, card] of s.tools) {
       const text = s.args.get(key) || '';
+      // Nothing arrived for this call yet: say nothing rather than open a box that promises an argument list
+      // and shows a margin. `setArgs` is the only thing that turns the box on, so an empty write here would
+      // undo the reason the box starts hidden.
+      if (!text) continue;
       if (card.el.open && s.argsShown.get(key) !== text) {
         s.argsShown.set(key, text);
         card.setArgs(text); // setArgs pretty-prints: a JSON round-trip, worth not doing 80 times a second
@@ -766,28 +773,39 @@ export function streamDelta(d) {
   const tc = d.toolCall;
   if (tc) {
     s.endThinking(); // a tool call ends the thinking too, and from here the card is what a reader watches
-    const key = tc.index ?? tc.id ?? s.tools.size;
-    // The wire calls this `arguments` (agent.go: ToolCallProgress.Args `json:"arguments,omitempty"`), which is
-    // what the other two readers of the same event already ask for — the tool progress frame (events.js) and
-    // the replay of a committed entry (below in this file). This path asked for `tc.args`, a property nothing
-    // ever set, so a streamed call accumulated an empty string from its first frame to its last: open the card
-    // while the model is still working and the parameter box had nothing to show, and the arguments appeared
-    // only when the entry committed and the replay read the right name. Both spellings are accepted here so a
-    // producer that ever sends the short one is not silently ignored.
+    // One call, one bucket. The provider sends the *accumulated* arguments on every frame (loop.go hands this
+    // field the whole buffer, not the newest fragment), so a frame replaces what came before it. This branch
+    // used to append, which turned a two-frame call into `{"path":"."}{"path":"."}` — no longer JSON, so the
+    // pretty-printer gave up and the box showed the ragged end of it: the "only a `}` is left" report, and it
+    // stayed wrong in the committed card until a reload re-read the entry. `id` when it is known, then the
+    // frame's index, then the call this stream was last told about; a counter of "how many cards exist" moves
+    // the moment this frame registers its own card, which is how fragments ended up in a bucket nobody reads.
     const text = tc.arguments ?? tc.args ?? '';
+    const index = tc.Index ?? tc.index;
+    const key = tc.id || (index === undefined || index === null ? s.lastKey || String(s.tools.size) : String(index));
+    if (tc.id || tc.name || !s.lastKey) s.lastKey = key;
+    s.args.set(key, text);
     if (tc.id || tc.name) {
-      s.args.set(key, text);
-      const card = toolCard(tc.id || `#${key}`, tc.name || 'tool', 'running');
+      // Which card this call owns. The cache is global and outlives a stream, so a card drawn before the
+      // provider named the call cannot be called `#0`: the next stream's first nameless call would look `#0`
+      // up, find the card of a reply that has already committed, move its DOM into the new stream and type the
+      // new arguments into the old card — one flash and a lone `}` where a finished call used to read, fixed
+      // only by a reload. The stream id makes a placeholder belong to the stream that drew it. The real id
+      // still wins, because that is what a tool entry, a summary link and a reload look the card up by.
+      const card = s.tools.get(key) || toolCard(tc.id || `${s.id}#${key}`, tc.name || 'tool', 'running');
+      // An id that arrives after the first fragment is registered late rather than ignored: without this the
+      // call keeps only its placeholder key, and `linkToolResults` — which walks real call ids — can never
+      // tell this card how the call ended.
+      if (tc.id && !state.tools.has(tc.id)) state.tools.set(tc.id, card);
       s.tools.set(key, card);
       s.node.insertBefore(card.el, s.body);
       // Opening a card mid-stream asks for its arguments now, same rule as the reasoning panel.
       card.el.addEventListener('toggle', s.drawToolArgs);
-    } else {
-      s.args.set(key, (s.args.get(key) || '') + text);
+      if (tc.name) card.setLabel(tc.name); // ToolCallProgress carries no server, unlike a tool run
     }
-    // Which tool is running is drawn immediately (above), but its arguments accumulate and follow the
-    // frame: an args delta used to mean a pretty-print plus a DOM write per token. And as with the
-    // reasoning panel, a collapsed card is not a reader — no frame is requested for it.
+    // Which tool is running is drawn immediately (above), and the arguments that follow it are one replace
+    // per frame, on the reply's own frame budget: an args delta used to mean a pretty-print plus a DOM write
+    // per token. And as with the reasoning panel, a collapsed card is not a reader — no frame is asked for.
     s.markNews();
   }
   // `done` closes the window: whatever is still unpainted gets painted now, and the split disappears into

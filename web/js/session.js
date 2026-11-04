@@ -851,8 +851,10 @@ export async function selectSession(id) {
   // queue). Changing session is the only thing that makes those copies somebody else's. The count that
   // trims it belongs to the session being loaded, which is why it goes empty with the entries.
   state.held = [];
-  // And the "waiting on" badge: whatever it was explaining belonged to the session being left behind.
-  clearBusy();
+  // And the "waiting on" badge: it belongs to the session being looked at, which is already `state.id` — so
+  // this re-draws rather than clears, and a summariser that started while you were elsewhere is on the bar
+  // the moment the session that is running one is selected.
+  syncBusy();
   state.tools.clear();
   state.toolResults.clear();
   state.streams.clear();
@@ -928,20 +930,39 @@ function clearStatus() {
 // `running` for the whole minute its summary is being written, which is exactly the freeze that reads as a
 // hang. So whoever knows writes it (events.js, on a compaction stage) and three hands erase it: that
 // compaction's own result, a phase that can no longer be busy (below), and looking at another session.
-export function showBusy(text, title) {
-  const box = $('#busy');
-  if (!box) return;
-  box.textContent = text;
-  box.title = title || '';
-  box.classList.remove('hidden');
+//
+// It is remembered per session (state.busy) rather than being a property of the screen, because the wait
+// outlives the tab's attention: the summariser of session B runs while you read session A, and the badge you
+// want at the moment you click B is the one whose frame arrived and was thrown away. So the frame is filed
+// under its own session, and whatever the screen shows is a re-draw of that file.
+export function showBusy(text, title, forSession) {
+  const id = forSession || state.id;
+  if (id) state.busy.set(id, { text, title: title || '', at: Date.now() });
+  syncBusy();
 }
 
-export function clearBusy() {
+export function clearBusy(id) {
+  const target = id || state.id;
+  if (target) state.busy.delete(target);
+  syncBusy();
+}
+
+// syncBusy paints whatever the session on screen is currently waiting on, and nothing else. Every caller
+// that changes the badge's subject — a frame arriving, a select, a phase moving — ends here, so the badge
+// and the session named in the status line can never disagree.
+export function syncBusy() {
   const box = $('#busy');
   if (!box) return;
-  box.textContent = '';
-  box.title = '';
-  box.classList.add('hidden');
+  const held = state.id && state.busy.get(state.id);
+  if (!held) {
+    box.textContent = '';
+    box.title = '';
+    box.classList.add('hidden');
+    return;
+  }
+  box.textContent = held.text;
+  box.title = held.title;
+  box.classList.remove('hidden');
 }
 
 export function renderStatus(st) {
@@ -952,8 +973,10 @@ export function renderStatus(st) {
   // Nobody is owed a "why is this waiting" badge once the loop is neither answering nor summarising. This is
   // the safety net under showBusy: a stage line from a run that ended on the way (a killed summariser, a
   // provider that refused the payload) has no fact left to report, and a badge that outlives its run is a
-  // story the daemon stopped telling.
-  if (st.phase !== 'running' && st.phase !== 'compacting') clearBusy();
+  // story the daemon stopped telling. It retires the record rather than the box, so the same truth holds for
+  // a session this tab is not looking at, and syncBusy is the only writer of the box.
+  if (st.phase !== 'running' && st.phase !== 'compacting') state.busy.delete(st.session || state.id);
+  syncBusy();
   // The composer's right-hand slot belongs to the phase: send while idle, the red square and the bolt
   // while a run is live, and the square alone while a manual summary is in flight (Stop is the only hand
   // on one). One owner for that decision (composer.js), because the glyph and the Enter key have to agree

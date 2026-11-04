@@ -21,6 +21,12 @@ export const state = {
   // queue: it is a mirror, dropped and re-cut whenever the count says the head has joined the log, and it
   // is emptied when this tab looks at another session because it describes the one it is leaving.
   held: [],
+  // "Why is this session not answering", per session, as {text, title, at}. The hub broadcasts every
+  // session's frames to every tab, and a compaction in the session you are *not* looking at is the news you
+  // want the moment you click it — so what arrives while you are elsewhere is kept here (events.js) and the
+  // badge is redrawn on select (session.js). Keyed by session id because a badge that follows you between
+  // sessions would be a claim about the wrong conversation.
+  busy: new Map(),
   status: null,
   // The page of the path this tab is showing, as request plus answer. The two live in one object
   // because a refresh has to re-ask exactly what it is showing: {mode, size, pivot, stale} are what

@@ -26,11 +26,23 @@ export function handleEvent(ev) {
   // be putting somebody's conversation back on a screen that just asked for it back.
   if (!state.id) {
     if (ev.type === 'state' || ev.type === 'entry') loadSoon();
+    // Filed even with nothing on screen: a session put down in this window is still a session the daemon is
+    // running, and reading it again should not lose a minute of "why was it sitting on running".
+    if (ev.type === 'compaction') fileCompaction(ev.session, ev.data);
     return;
   }
   if (ev.session && state.id && ev.session !== state.id) {
     // Another session produced this: the only thing on screen that cares is the sidebar.
     if (ev.type === 'state' || ev.type === 'entry') loadSoon();
+    // …and the badge of a session nobody is looking at, which retires on the same rule renderStatus uses for
+    // the one on screen. Without this a tab that stayed on session A for a day would keep claiming B was
+    // still writing a summary it finished hours ago, and selecting B would flash that claim for a frame.
+    if (ev.type === 'state' && ev.state && ev.state.phase !== 'running' && ev.state.phase !== 'compacting') clearBusy(ev.session);
+    // A compaction frame about another session is filed instead of drawn. It is the one piece of news about a
+    // session you are not looking at that you want the instant you click it: "why is this one sitting on
+    // running" is asked at the click, and the frame answering it was broadcast a minute earlier while this
+    // tab was busy with a different conversation.
+    if (ev.type === 'compaction') fileCompaction(ev.session, ev.data);
     return;
   }
   if (isParked() && LIVE_AT_THE_TAIL.includes(ev.type)) {
@@ -179,6 +191,22 @@ function attach(card, entryId) {
   card.attached = true;
 }
 
+// BUSY_TITLE is the sentence the badge points at: what a summariser is, why nothing else is moving, and the
+// one control that ends the wait. It lives here because this event is the only thing in the product that
+// knows a summary is being written, and it is the answer a reader types into a search box about a session
+// that looks hung.
+const BUSY_TITLE =
+  'The context is over the compaction trigger, so this turn is being summarised before it can be sent — or the summary just came back over its own cap and is being asked again.\n\nNothing else is happening while this runs: the answer you asked for waits behind it, and anything you type is queued until it lands. The summariser can take a minute per attempt.\n\nStop (the red square, POST /api/session/<id>/stop) is the only hand on it: it kills the summariser, writes nothing, and leaves the conversation as it was.';
+
+// fileCompaction records what one session is waiting on, under that session's id. Called for the session on
+// screen and — from the cross-session branch above — for the ones nobody is looking at, so selecting a
+// session that has been writing a summary for a minute shows the badge instead of a phase word and silence.
+function fileCompaction(id, r) {
+  if (!id || !r) return;
+  if (r.stage) showBusy(`writing the summary${r.attempt ? ` · attempt ${r.attempt}` : ''}…`, BUSY_TITLE, id);
+  else clearBusy(id);
+}
+
 // onCompaction reports one compaction run: progress lines while it works, one banner when it ends.
 export function onCompaction(r) {
   if (!r) return;
@@ -188,7 +216,7 @@ export function onCompaction(r) {
     // The note stays (it is the attempt-by-attempt record a reader scrolls back through), but a note fades and
     // this wait does not, so the badge is what actually answers "is it hung". Stop is the way out, and the
     // badge says so rather than letting a reader conclude the page died.
-    showBusy(`writing the summary${r.attempt ? ` · attempt ${r.attempt}` : ''}…`, 'The context is over the compaction trigger, so this turn is being summarised before it can be sent — or the summary just came back over its own cap and is being asked again.\n\nNothing else is happening while this runs: the answer you asked for waits behind it, and anything you type is queued until it lands. The summariser can take a minute per attempt.\n\nStop (the red square, POST /api/session/<id>/stop) is the only hand on it: it kills the summariser, writes nothing, and leaves the conversation as it was.');
+    fileCompaction(state.id, r);
     note(`compaction: ${r.stage}${r.attempt ? ` (attempt ${r.attempt})` : ''}`);
     return;
   }
