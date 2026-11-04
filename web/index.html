@@ -36,10 +36,12 @@
           <button id="menu" type="button" class="ghost icon-btn" title="sessions" aria-label="open the session list"><span data-icon="menu"></span></button>
           <input id="session-name" class="ghost-input" spellcheck="false" title="rename this session" />
           <!-- Putting a session down is not deleting it, and the difference is the whole reason the button is
-               here rather than being a smaller trash can: the transcript stops being drawn in this window, the
-               daemon is told nothing, and clicking the row again reads the log from disk. A reader who has been
-               watching a run for ten minutes and wants the screen back has had no way to ask for it. -->
-          <button id="btn-unload" type="button" class="icon-btn" title="put this session down in this window — nothing on the server changes" aria-label="put this session down"><span data-icon="close"></span></button>
+               here rather than being a smaller trash can: the transcript stops being drawn in this window and
+               the daemon puts its copy of the conversation down too — the next read of it, here or from curl,
+               replays log.jsonl and finds the queue again. A reader who has been watching a run for ten minutes
+               and wants the screen back had no way to ask, and the process had no way to forget any of the
+               sessions it opened at boot. -->
+          <button id="btn-unload" type="button" class="icon-btn" title="put this session down — the window clears and the daemon stops holding it in memory" aria-label="put this session down"><span data-icon="close"></span></button>
           <!-- Not decoration: clicking it opens the tool catalogue (descriptions, parameters, cost,
                switches), so it carries a role and a tabindex rather than being mouse-only. -->
           <span id="tools" class="badge" role="button" tabindex="0" aria-label="open the tool catalogue" title="MCP tools"></span>

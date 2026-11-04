@@ -1469,7 +1469,3 @@ dialog.zoom:not([open]) { display: none; }
 /* What an edit has not done yet. The hint is already the sentence that explains the list, so it is the right
    place to add “and right now it is not stored”. */
 #mcp-hint.dirty::after { content: ' — edited, not saved yet'; color: var(--warn); }
-/* Unloading is a statement about the session this tab is looking at — “close the daemon’s copy of it” — so a
-   row that is not the one on screen gets no button for it. The hover reveal already handles the “only when you
-   reach for the row” half; this is the “only where it means something” half. */
-#session-list li:not(.active) .act.down { display: none; }

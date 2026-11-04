@@ -5,7 +5,7 @@ import { $, el, fmtN, fmtBytes, fmtAgo, logEl, clamp, pathOf, sortByNum } from '
 import { isParked, state } from './state.js';
 import { api, get } from './api.js';
 import { EV_SESSION, emit } from './bus.js';
-import { confirmBox, note } from './ui.js';
+import { confirmBox, note, toast } from './ui.js';
 import { atTheBottom, isPinned, markPinned, resetScroll, scrollDown } from './scroll.js';
 import { closeNav, navIsOpen } from './nav.js';
 import { icon } from './icons.js';
@@ -628,16 +628,20 @@ function actions(s) {
     }
     loadSessions();
   };
-  // Putting down is drawn on every row and shown on one: which row is open is `state.id`, a fact this window
-  // knows and the list snapshot does not, so a diff rule cannot carry it. app.css hides the button on a row
-  // that is not `.active` (syncActive) instead of the JS rebuilding every row when the open session changes —
-  // on any other row it would be a no-op dressed up as a button anyway.
-  const down = btn('down', 'close', 'put this session down in this window — the transcript goes, the session does not');
-  down.onclick = (e) => {
-    e.stopPropagation();
-    unloadSession();
-  };
-  box.append(pin, arc, down, del);
+  // Every open row can answer for itself: what this releases is the daemon's copy of that session, which is
+  // worth having back most for the conversations you are not looking at. A closed row gets no button — the list
+  // snapshot already knows that (unlike which row this window is showing), and there is nothing there to do.
+  let down = null;
+  if (!s.closed) {
+    down = btn('down', 'close', 'let the daemon put this session down — the next read re-opens it from disk');
+    down.onclick = (e) => {
+      e.stopPropagation();
+      unloadSession(s.id);
+    };
+  }
+  box.append(pin, arc);
+  if (down) box.append(down);
+  box.append(del);
   return box;
 }
 
@@ -867,19 +871,40 @@ export async function selectSession(id) {
   await refresh();
 }
 
-// unloadSession puts the session down in this window. It is not delete, and it is not the daemon closing a
-// file either: this build has no per-session close to ask for (`Manager.Close` is the whole process's), so
-// what is released is this tab's attention — the transcript, the badges, the queue mirrors and the hash that
-// names the conversation. Nothing is destroyed and one click on the row reads the log again from disk.
-//
+// putDown asks the daemon to let one session go (POST .../unload). A session nobody has open costs nothing to
+// keep — the next read replays log.jsonl and finds the queue, so a parked tool wait survives it — and an LLM
+// stream in flight cannot be orphaned, so a session that is actively running or summarizing is refused with an
+// error naming its phase. `clearWindow` decides whether this tab forgets it too: yes for the session on screen,
+// no for a row you are not looking at, where there is nothing on screen to clear. Releasing a session you are
+// not viewing is the reason the button sits on every open row: the daemon opens every session at boot and,
+// until now, put none of them down.
+async function putDown(id, clearWindow) {
+  let res;
+  try {
+    res = await api(`/api/session/${encodeURIComponent(id)}/unload`, { body: {} });
+  } catch (err) {
+    toast(err.message, 'error'); // the daemon kept it open; the window would be wrong to pretend otherwise
+    return;
+  }
+  if (clearWindow) downWindow(id);
+  loadSessions(); // the row redraws as shut: its dot says so and the button is not drawn again
+  note(res.unloaded ? `put down ${id} — the next read of it re-opens it from disk` : `${id} was not open in the daemon`);
+}
+
+// unloadSession is the header button: put the session on screen down, in the daemon and in this window alike.
 // The empty state is worth having because watching a long run and then wanting the screen back used to have
 // exactly two answers, one of which deleted a session and the other of which was another browser tab.
-export function unloadSession() {
-  if (!state.id) {
+export function unloadSession(id = state.id) {
+  if (!id) {
     note('no session is open in this window');
     return;
   }
-  const was = state.id;
+  putDown(id, id === state.id);
+}
+
+// downWindow puts the session down in this window: the transcript, the badges, the queue mirrors and the hash
+// that names the conversation. Nothing here is destroyed — this half is a tab forgetting, not the daemon.
+function downWindow(id) {
   state.id = null;
   state.cfg = null;
   state.win = null;
@@ -898,11 +923,9 @@ export function unloadSession() {
   for (const [, card] of state.requests) card.remove();
   state.requests.clear();
   resetScroll();
-  clearBusy();
+  clearBusy(id);
   renderPending();
   clearStatus();
-  note(`put down ${was} — the session is untouched; click its row to read it again`);
-  loadSessions(); // the row that was highlighted is not the one on screen any more
 }
 
 // clearStatus empties the status bar. renderStatus has no "no session" branch and should not acquire one: the
