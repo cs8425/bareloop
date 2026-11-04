@@ -1369,14 +1369,20 @@ dialog.zoom {
   display: flex;
   flex-direction: column;
   gap: 0;
+  /* Not auto, which is what the generic dialog rule gives this: an overflowing bar would then scroll the whole
+     window sideways, and the picture is moved by its own transform instead — nothing here has to scroll. */
+  overflow: hidden;
   background: #05070a;
   border: 1px solid var(--border);
   border-radius: 10px;
 }
 dialog.zoom::backdrop { background: rgba(2, 4, 7, 0.88); }
 dialog.zoom:not([open]) { display: none; }
+/* The bar wraps instead of overflowing. Measured: one line down to a 360px dialog, 18px short at 320px — and the
+   alternative is a viewer whose `×` can only be reached by scrolling the whole window sideways. A second row of
+   39px on the narrowest phones, nothing anywhere else. */
 .zoom-bar {
-  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto; flex-wrap: wrap;
   padding: 5px 9px; border-bottom: 1px solid var(--border);
   font: var(--t-1) var(--mono); color: var(--muted);
 }
@@ -1388,9 +1394,16 @@ dialog.zoom:not([open]) { display: none; }
 /* The two mode buttons say which of them is already true — 1:1 highlighted means "you are looking at it
    pixel for pixel", which is the only way to know without pressing it and finding out. */
 .zoom-bar button.on { color: var(--accent); border-color: var(--accent); }
+/* The two tracks are minmax(0, 1fr) rather than left `auto`, because a track sized by its content becomes as
+   wide as the picture: `place-items: center` then centres the picture inside that oversized track, which is no
+   centring at all — the picture sits against the top-left of the stage while the scale, whose origin is the
+   picture's own centre, pushes it right and down. A stage narrower than the file is the everyday case on a
+   phone, so it read as "the image is off-centre and won't fit": centring it against the stage instead means the
+   oversized picture overflows by the same amount on both sides, which is what the transform's origin assumes. */
 .zoom-stage {
   flex: 1 1 auto; min-height: 0;
   display: grid; place-items: center; overflow: hidden;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
   touch-action: none; cursor: zoom-in;
 }
 .zoom-stage.dragging { cursor: grabbing; }
