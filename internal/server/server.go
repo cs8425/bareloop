@@ -48,6 +48,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/session/{id}", s.handleGet)
 	mux.HandleFunc("PATCH /api/session/{id}", s.handlePatch)
 	mux.HandleFunc("DELETE /api/session/{id}", s.handleDelete)
+	// The lighter sibling of DELETE: it gives back the RAM a conversation costs and touches nothing on disk.
+	mux.HandleFunc("POST /api/session/{id}/unload", s.handleUnload)
 	mux.HandleFunc("GET /api/session/{id}/inspect", s.handleInspect)
 	mux.HandleFunc("GET /api/session/{id}/payload", s.handlePayload)
 	mux.HandleFunc("GET /api/session/{id}/tools", s.handleTools)
@@ -250,6 +252,44 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.DropSession(id)
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleUnload puts one session down without deleting it: the process closes its log handle, its MCP
+// connections and its parsed conversation, while the directory stays exactly where it was. It is the
+// other half of the route two lines above - GET /api/session/{id} opens a session as a side effect of
+// looking at it, and this is how that side effect is undone without anybody losing a conversation.
+//
+// Like handleFlags it does not go through s.session on purpose: that helper opens whatever it resolves,
+// and a route whose entire job is to close something cannot begin by opening it. So it works from {id}
+// and the manager alone.
+//
+// A session with a run or a summary in flight is refused with a 400 naming the phase (see
+// Manager.Unload), exactly as a config PATCH refuses mid-run: stop it first, then put it down. The body
+// is the row of the session list this just produced - closed:true - so a caller repaints the line it
+// acted on without asking a second question, and "unloaded":false is the honest answer for a session
+// this process was not holding: it is shut, which is what was asked for.
+func (s *Server) handleUnload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	wasOpen, err := s.mgr.Unload(id)
+	if err != nil {
+		// A typo and a busy session both land here, and the sentence says which, because the caller's
+		// next move is completely different: correct the name, or press stop.
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if wasOpen {
+		// The replay buffer is what catches a reconnecting page up on a session this process is
+		// holding. There is no such session now, and everything the buffer held is on disk and comes
+		// back with the next read - which is the whole promise of unloading.
+		s.hub.DropSession(id)
+	}
+	for _, sum := range s.mgr.List() {
+		if sum.ID == id {
+			writeJSON(w, map[string]any{"ok": true, "unloaded": wasOpen, "session": sum})
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "unloaded": wasOpen})
 }
 
 // flagsRequest is the body of POST /api/session/{id}/flags. Either flag on its own is a complete request,

@@ -526,6 +526,65 @@ func (m *Manager) Remove(id string) error {
 	return os.RemoveAll(m.dir(id))
 }
 
+// Unload closes one session and forgets it, leaving its directory exactly as it was: what goes is the log
+// handle, the MCP connections and the parsed conversation, and the row in List survives because that row
+// is made from config.json and log.idx rather than from a live session (see List and diskSummary).
+//
+// This is the memory half of the story. An open session costs RAM for as long as it is open - the whole
+// conversation parsed into entries, its index, one set of child processes and sockets per MCP server -
+// and until now the only ways to give that back were deleting the conversation or restarting the daemon.
+// Opening is a side effect of looking: every read route goes through Get, so a reader who clicked through
+// six conversations was holding six of them until the process ended. Unload puts one back, and the next
+// read of the id opens it again from disk (open emits state, so a watching UI learns about it by itself).
+//
+// What goes with it is what only this process had: a message held instead of written, and the in-memory
+// half of a parked wait. That is the same bill a restart pays - Close gives up the same two things and
+// says so where it stands - and the wait itself is not lost: it is recomputed from the log the moment the
+// session is opened again (recoverPark reads the unanswered call off the path).
+//
+// A session with a run or a summary in flight is refused rather than cancelled: stopping a run is its own
+// verb, and putting a conversation down while a provider is answering it is not something a memory button
+// should decide. A session this process does not have open answers (false, nil) - the caller wanted it
+// shut and it is - while an id with no config behind it is an error: that is a typo, and silence about a
+// typo is how a script spends an hour unloading nothing while every answer says ok.
+func (m *Manager) Unload(id string) (bool, error) {
+	if err := validID(id); err != nil {
+		return false, err
+	}
+	s, ok := m.Peek(id)
+	if !ok {
+		if _, err := m.loadConfig(id); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	// Asked outside m.mu for the reason List gives: a session answers questions about itself behind
+	// whatever it is busy with, and the map lock is not the place to wait for that.
+	if p := s.phaseNow(); p != phaseIdle {
+		return false, fmt.Errorf("agent: session %q is %s; stop it before unloading", id, phaseToString(p))
+	}
+	// Close the instance that was just checked, and only that one. A Get that opened the id again in the
+	// interval has stored a newer session, and closing that one would be closing a session nobody asked
+	// about - so when the map no longer holds this pointer, this call has nothing left to do.
+	m.mu.Lock()
+	if m.sessions[id] == s {
+		delete(m.sessions, id)
+	} else {
+		s = nil
+	}
+	m.mu.Unlock()
+	if s == nil {
+		return false, nil
+	}
+	// A failure here is logged rather than returned: the session is already out of the map, which is the
+	// half the caller asked for, and a refusal now would leave a session that is neither open nor findable.
+	if err := s.Close(); err != nil {
+		m.logf("unload session %s: close: %v", id, err)
+	}
+	m.logf("session %s unloaded", id)
+	return true, nil
+}
+
 // Close closes every session.
 func (m *Manager) Close() {
 	m.mu.Lock()
