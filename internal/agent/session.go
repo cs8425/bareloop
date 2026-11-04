@@ -183,7 +183,10 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 		_ = log.Close()
 		return nil, fmt.Errorf("replay %s: %w", cfg.ID, err)
 	}
-	prov, err := llm.New(cfg.LLM)
+	// The endpoint is dialled through the proxy resolved for it — its own, else the session's, else whatever
+	// the environment says. llmDial is a copy, so cfg and the config on disk keep saying only what was
+	// configured there (proxy.go).
+	prov, err := llm.New(cfg.llmDial())
 	if err != nil {
 		_ = log.Close()
 		return nil, err
@@ -216,7 +219,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	go func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		s.reg.connect(cctx, s.Config().MCP)
+		s.reg.connect(cctx, s.Config().mcpDial())
 		s.emitState()
 	}()
 	// The previous process may have been holding a wait when it went away, and the log is the only
@@ -224,7 +227,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	// after the tool policy above because the question it asks is "is this an unanswered builtin call".
 	s.recoverPark()
 	s.logStructuredMode(cfg)
-	s.logTLS(cfg)
+	s.logPolicy(cfg)
 	return s, nil
 }
 
@@ -731,10 +734,10 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 			return fmt.Errorf("mcp server %q: %w", mc.Name, err)
 		}
 	}
-	// The TLS pair the body carries is checked here for the same reason: a body that names a caFile it
-	// cannot read should fail now, and the merged result is checked again below, where it can also be
-	// a body's new policy combined with a stored file.
-	if err := validateTLS(patch); err != nil {
+	// The transport policy the body carries is checked here for the same reason: a body that names a caFile it
+	// cannot read, or a proxy address it cannot parse, should fail now — and the merged result is checked again
+	// below, where it can also be a body's new policy combined with a stored file or a stored proxy.
+	if err := validatePolicy(patch); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -773,8 +776,17 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.LLM.InsecureTLS == nil {
 		patch.LLM.InsecureTLS = old.LLM.InsecureTLS
 	}
-	if patch.LLM.CAFile == "" && !patch.LLM.TLS().Insecure() {
+	if patch.LLM.CAFile == "" && !patch.LLM.Policy().Insecure() {
 		patch.LLM.CAFile = old.LLM.CAFile
+	}
+	// The endpoint's proxy follows the same rule as its caFile: an empty string in a body is not a change. It
+	// cannot express "nothing was ever said here" either, and unlike the pair above there is no second field to
+	// carry that answer — "direct" is available and means no proxy at all, environment included, while back to
+	// letting HTTP_PROXY decide is a hand-edit of data/<id>/config.json. The session-level proxy below is what
+	// an endpoint left empty falls back to, so clearing one endpoint's proxy to "" is not how it is changed;
+	// sending the new address in the same field is.
+	if patch.LLM.Proxy == "" {
+		patch.LLM.Proxy = old.LLM.Proxy
 	}
 	// Same rule as everything else in a patch: no pricing block means no change. Unlike the fields
 	// above, this one can be turned back off — send {"pricing":{"input":0,"cachedInput":0,"output":0}}
@@ -833,6 +845,13 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.Timezone == "" {
 		patch.Timezone = old.Timezone
 	}
+	// Same rule again: a session's proxy is not changed by a body that does not carry one. What this field is
+	// worth noticing: it is the fallback the endpoints without a proxy of their own read, so PATCHing this one
+	// line is how every such endpoint starts or stops going through a proxy at once — while each endpoint that
+	// named one keeps it, which is the rule proxy.go exists to apply.
+	if patch.Proxy == "" {
+		patch.Proxy = old.Proxy
+	}
 	// An absent builtinTools key is not a change, while an empty list is a decision ("switch all of
 	// them off") — the same line the MCP list draws just above between "did not say" and "said none".
 	if patch.BuiltinTools == nil {
@@ -854,10 +873,10 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		patch.Temperature = old.Temperature
 	}
 	// The merged policy is validated too, not only the body: the rules above can combine a body's
-	// insecureTLS with a stored caFile, and this is the last point where nothing has been written or
-	// applied yet. s.mu is held here, so the unlock on the error path is by hand — see the note above
-	// the lock about what a forgotten one costs.
-	if err := validateTLS(patch); err != nil {
+	// insecureTLS with a stored caFile, or a body's proxy with a stored stdio entry, and this is the last
+	// point where nothing has been written or applied yet. s.mu is held here, so the unlock on the error path
+	// is by hand — see the note above the lock about what a forgotten one costs.
+	if err := validatePolicy(patch); err != nil {
 		s.mu.Unlock()
 		return err
 	}
@@ -868,8 +887,12 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		s.mu.Unlock()
 		return err
 	}
-	reconnectMCP := !sameMCP(old.MCP, patch.MCP)
-	llmChanged := !old.LLM.Same(patch.LLM)
+	// Both questions are asked of the resolved endpoints rather than the stored ones, and the difference is
+	// the whole point: PATCHing only the session's proxy changes where every endpoint that names none is
+	// dialled, and an identity comparison on the stored fields would report "nothing changed" for the one
+	// change that moved the connection.
+	reconnectMCP := !sameMCP(old.mcpDial(), patch.mcpDial())
+	llmChanged := !old.llmDial().Same(patch.llmDial())
 	s.cfg = patch
 	s.mu.Unlock()
 
@@ -885,7 +908,7 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		s.emitTools()
 	}
 	if llmChanged {
-		prov, err := llm.New(patch.LLM)
+		prov, err := llm.New(patch.llmDial())
 		if err != nil {
 			return err
 		}
@@ -903,7 +926,7 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		go func() {
 			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			s.reg.connect(cctx, patch.MCP)
+			s.reg.connect(cctx, patch.mcpDial())
 			s.emitState()
 		}()
 	}
@@ -913,11 +936,11 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if patch.StructuredContent != "" || len(patch.MCP) > 0 {
 		s.logStructuredMode(patch)
 	}
-	// Both flags already mean "an endpoint changed", which is exactly when the certificate policy is
-	// worth restating — including when it did not change, because the line is the notice that a
-	// deviation is still in force.
+	// Both flags already mean "an endpoint changed", which is exactly when the transport policy is worth
+	// restating — including when it did not change, because the line is the notice that a deviation is still in
+	// force. A PATCH of the session-level proxy lands here too: resolving is what makes it an endpoint change.
 	if llmChanged || reconnectMCP {
-		s.logTLS(patch)
+		s.logPolicy(patch)
 	}
 	return nil
 }

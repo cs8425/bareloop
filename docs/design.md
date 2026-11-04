@@ -271,12 +271,25 @@ the llm endpoint and on any MCP entry with a `url`
   verify — is refused rather than stored, because a line in a config that does nothing is a line someone
   will later read as a guarantee.
 
-`internal/tlsconf` is the only place that reads the pair, and it returns a transport or an error: the two
-packages that reach the network (`internal/llm`, `internal/mcp`) may not import each other, so a third one
-holds the rule. A policy is part of the identity of an endpoint (`llm.Config.Same`, `mcp.Config.Identity`),
+`internal/tlsconf` is the only place that turns those fields into a transport, and it returns a transport or
+an error: the two packages that reach the network (`internal/llm`, `internal/mcp`) may not import each other,
+so a third one holds the rule. A policy is part of the identity of an endpoint (`llm.Config.Same`,
+`mcp.Config.Identity`),
 so changing one rebuilds the provider or reconnects the server, while a patch that merely spells out the
 default does neither. Whatever it decides is said once when a session opens and once when its endpoints
 move, because a connection that is being impersonated looks exactly like one that is not.
+
+A proxy is the other reason an endpoint is unreachable, and it is configured twice on purpose: once for a
+session and once for an endpoint ([README](../README.md#reaching-an-endpoint-through-a-proxy)). The nearer
+answer wins and the inheritance is one hop deep, because chaining proxies raises a question — which one wraps
+which — that nobody here has answered yet, and a half-implemented order is worse than none. What is worth
+keeping in mind is where the answer is computed: `internal/agent/proxy.go` resolves it onto a **copy** of the
+endpoint when a provider is built or a server connected, and never writes it back. An inherited value that
+reached `data/<id>/config.json` would reach `GET /config` too, and a settings page that PATCHes the config it
+cached would hand the daemon its own inheritance back as something the user typed — the pricing block taught
+this project that lesson twice (§2.13). So the stored config keeps saying only what was configured, the log
+line says which proxy is actually in force with any credential masked, and an address that cannot be parsed
+fails the save rather than becoming a direct connection.
 
 ## Images
 

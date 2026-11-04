@@ -14,7 +14,8 @@ import { $, el } from './util.js';
 
 // One row of the form. `show` is which half of the fields to draw: a stdio entry has no business showing a
 // URL box, and an http entry has no business showing a command box — the daemon refuses the mismatch for a
-// TLS policy (`agent/validateTLS`) and says nothing about the rest.
+// transport policy (`agent/validatePolicy`: a caFile, an insecure TLS, a proxy on a server it starts itself)
+// and says nothing about the rest.
 const FIELDS = [
   { key: 'name', label: 'name', hint: 'what the tools are named after when two servers collide; the command or URL is used when it is empty', ph: 'mcp-vroot' },
   { key: 'type', label: 'transport', kind: 'select', options: [['', 'stdio — start a command'], ['http', 'http — connect to a URL']], hint: 'empty means stdio, which is what the daemon writes back' },
@@ -26,6 +27,7 @@ const FIELDS = [
   { key: 'headers', label: 'headers', kind: 'lines', show: 'http', hint: 'one Key: value per line (Authorization: Bearer …)', kv: true },
   { key: 'caFile', label: 'CA file', show: 'http', hint: 'verify this server against this PEM bundle only' },
   { key: 'insecureTLS', label: 'accept an unverifiable certificate', kind: 'check', show: 'http', hint: 'https only; the daemon refuses it on a stdio entry' },
+  { key: 'proxy', label: 'proxy', show: 'http', ph: 'socks5://127.0.0.1:1080', hint: 'socks5://, socks5h://, http:// or https:// — user:password@host:port if it asks for one; “direct” connects without a proxy at all, ignoring HTTP_PROXY; empty leaves the environment and the session’s own proxy in charge' },
   { key: 'disabled', label: 'off — never start or connect this server', kind: 'check' },
   { key: 'toolPrefix', label: 'tool prefix', hint: 'vr turns fs_read into vr_fs_read; empty publishes the tool under its own name' },
   { key: 'disabledTools', label: 'tools off', kind: 'lines', hint: 'one per line; the tool’s own name or a glob like write_*', list: true },

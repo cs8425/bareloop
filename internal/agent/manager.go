@@ -96,6 +96,14 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 		cfg.LLM.InsecureTLS = m.defaults.LLM.InsecureTLS
 		cfg.LLM.CAFile = m.defaults.LLM.CAFile
 	}
+	// Where an endpoint's traffic is sent is inherited like the fields above: a session that says nothing
+	// about a proxy takes the daemon's, and one that says anything — including "direct" — replaces it. This
+	// one field is the session-level answer, so the endpoints' own proxy fields are deliberately not filled in
+	// here: they win over this one, and writing an inherited value into them would put words into a config
+	// that its owner never typed (proxy.go is the one place the two levels are read together).
+	if strings.TrimSpace(cfg.Proxy) == "" {
+		cfg.Proxy = m.defaults.Proxy
+	}
 	if cfg.Temperature == nil {
 		cfg.Temperature = m.defaults.Temperature
 	}
@@ -334,10 +342,11 @@ func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
 			return nil, fmt.Errorf("session %q: mcp server %q: %w", cfg.ID, mc.Name, err)
 		}
 	}
-	// Same rule as the two above: a certificate policy that cannot work — or names a file that cannot be
-	// read — is refused before data/<id>/config.json exists, so whoever typed the path hears about it now
-	// rather than as a failed request an hour later.
-	if err := validateTLS(cfg); err != nil {
+	// Same rule as the two above: a transport policy that cannot work — a certificate file that cannot be
+	// read, a proxy address that is not one of the four schemes, a proxy on a stdio entry — is refused before
+	// data/<id>/config.json exists, so whoever typed it hears about it now rather than as a failed request an
+	// hour later.
+	if err := validatePolicy(cfg); err != nil {
 		return nil, err
 	}
 	// And the same rule one more time for the daemon's own tools: "a name that is not a builtin" and

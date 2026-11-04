@@ -47,6 +47,8 @@
     "builtinTools": [],
     "timezone": "",
 
+    "proxy": "",
+
     "mcp": [
       {
         "name": "stub",
@@ -62,7 +64,8 @@
         "toolPrefix": "",
         "disabledTools": [],
         "insecureTLS": false,
-        "caFile": ""
+        "caFile": "",
+        "proxy": ""
       }
     ]
   }

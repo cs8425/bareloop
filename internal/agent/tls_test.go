@@ -1,10 +1,10 @@
 package agent
 
 // Where a certificate policy is refused and where it is announced: the same two places the config is
-// written — Create, PATCH, and a session opening. The rules themselves are in tls.go and internal/tlsconf;
-// what is pinned here is that they run at those points, that a refused config leaves nothing behind, and
-// that a PATCH can neither lose a stored policy it never mentioned nor keep a contradiction that only the
-// merged result forms.
+// written — Create, PATCH, and a session opening. The rules themselves are in policy.go, proxy.go and
+// internal/tlsconf; what is pinned here is that they run at those points, that a refused config leaves
+// nothing behind, and that a PATCH can neither lose a stored policy it never mentioned nor keep a
+// contradiction that only the merged result forms.
 
 import (
 	"context"
@@ -113,7 +113,7 @@ func TestValidateRefusesWhatCannotMeanAnything(t *testing.T) {
 			"",
 		},
 	} {
-		err := validateTLS(tc.cfg)
+		err := validatePolicy(tc.cfg)
 		switch {
 		case tc.wantErr == "" && err != nil:
 			t.Errorf("%s: refused: %v", tc.name, err)
@@ -212,7 +212,7 @@ func TestPatchMergesThePairNotTheFields(t *testing.T) {
 	if err := patch(Config{LLM: llm.Config{InsecureTLS: yesNo(true)}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Config().LLM; got.CAFile != "" || !got.TLS().Insecure() {
+	if got := s.Config().LLM; got.CAFile != "" || !got.Policy().Insecure() {
 		t.Fatalf("after insecureTLS:true: caFile=%q insecure=%v", got.CAFile, got.InsecureTLS)
 	}
 
@@ -251,7 +251,7 @@ func TestPatchMergesThePairNotTheFields(t *testing.T) {
 	if !strings.Contains(err.Error(), "pick one") {
 		t.Fatalf("error %q is not the contradiction message", err)
 	}
-	if got := s.Config(); got.LLM.CAFile != "" || !got.LLM.TLS().Insecure() || got.MaxTurns != 3 {
+	if got := s.Config(); got.LLM.CAFile != "" || !got.LLM.Policy().Insecure() || got.MaxTurns != 3 {
 		t.Fatalf("the refused patch changed the config: %+v", got.LLM)
 	}
 }

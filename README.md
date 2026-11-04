@@ -159,6 +159,7 @@ its own copy in `data/<id>/config.json`.
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
 | `insecureTLS`, `caFile` | on `defaults.llm` and on any `mcp[]` entry with a `url`: how an https endpoint is trusted ([reaching an endpoint no trust store knows](#reaching-an-endpoint-no-trust-store-knows)) |
+| `proxy` | at three levels — `defaults.proxy` (every session's), `llm.proxy`, `mcp[].proxy`: the nearer answer wins, and empty leaves the environment in charge ([reaching an endpoint through a proxy](#reaching-an-endpoint-through-a-proxy)) |
 | `defaults.builtinTools` | the tools the daemon answers itself, named one at a time: `wait`, `get_datetime`. It is an **on-list**, so all of them are off until a session says otherwise ([the daemon's own two tools](#the-daemons-own-two-tools)) |
 | `defaults.timezone` | the zone the time tools answer in when a call names none: an IANA name (`Asia/Taipei`), a fixed offset (`+08:00`, `UTC+8`), `Local` for the machine's own - and nothing at all means UTC ([the daemon's own two tools](#the-daemons-own-two-tools)) |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
@@ -212,6 +213,8 @@ default:
 | `structuredMaxBytes` | absent = **16 384 bytes** of a tool's JSON are shown, then a note naming what was left out | any positive byte count; only a negative is refused, because it is what someone types for "no limit" and it decodes back as the default. Unlike the word above it, `defaults` does not carry it: the ceiling is one session's own. `0` means unchanged, so the shipped default only comes back by being typed |
 | `llm.insecureTLS` | absent = verify, like anyone else | `false` is the same as absent; **`true` is a different endpoint** and is logged every time it applies |
 | `llm.caFile` | absent = the system trust store | a PEM bundle to verify against — and the only thing it is verified against |
+| `proxy` | absent = what the environment says (`HTTP_PROXY`, `NO_PROXY`) | `socks5://`, `socks5h://`, `http://` or `https://` — this session's answer for every endpoint that names none; `direct` means no proxy at all. An endpoint's own `proxy` wins over it ([through a proxy](#reaching-an-endpoint-through-a-proxy)) |
+| `llm.proxy` | absent = the session's `proxy` | the same address, for this one endpoint |
 
 `llm.nCtx` is a ceiling you set, not a fact about the server: the number used is the smaller of it and
 what the server reports, and `status.nCtx` / `nCtxSource` tell you which won. Leave it unset and the
@@ -246,12 +249,80 @@ as the whole answer about how that endpoint is verified, and clears a stored `ca
 
 A policy belongs to the identity of the endpoint: changing it rebuilds the provider and reconnects the
 server, while a patch that only spells out `false` — which is what a UI sends without being asked —
-reconnects nothing. The transport a policy needs is `http.DefaultTransport` cloned with only its TLS
-configuration replaced, so trusting one CA cannot change anything else about how the endpoint is dialled
-— the proxy from the environment is the property a test checks. Neither field has a control of its own in
+reconnects nothing. The transport a policy needs is `http.DefaultTransport` cloned with only the half the
+policy names replaced, so trusting one CA cannot change anything else about how the endpoint is dialled — the
+proxy from the environment surviving a certificate policy is the property a test checks, and so is a
+certificate policy surviving a proxy. Neither TLS field has a control of its own in
 the settings dialog: on `llm` they are set in `data/<id>/config.json` or by
 `PATCH` (a dialog save keeps them, because it sends back the fields it did not draw), and on an `mcp[]`
 entry they travel with the JSON box that already edits `url` and `headers`.
+
+### Reaching an endpoint through a proxy
+
+An endpoint that is only reachable by proxy needs the address written down, and it can be written in either
+of two places — the same string in both: `socks5://`, `socks5h://`, `http://` or `https://`, with
+`user:password@` in front when the proxy asks for one.
+
+| where it is written | whose answer it is |
+|---|---|
+| `proxy`, at the session level (so also in `defaults`) | every endpoint in this session that does not name one |
+| `proxy` on `llm`, or on an `mcp[]` entry with a `url` | that endpoint, and nobody else |
+
+The nearer answer wins, and the inheritance is one hop deep:
+
+| session | endpoint | what happens |
+|---|---|---|
+| set | — | the session's proxy |
+| — | set | the endpoint's proxy |
+| set | set | **the endpoint's** — the session's says nothing further about that endpoint |
+
+Chaining two of them is not implemented and no order between them has been decided, which is why the rule is
+"one answer per endpoint, nearest wins" instead of a list. One function reads the two levels
+(`internal/agent/proxy.go`), so a version that wants a chain has one place to change and one table here to
+rewrite.
+
+Four details are what make the field usable, and the first three are settled before a config is saved rather
+than on the request that would need them:
+
+- **empty is not "direct"**. Empty means nobody said anything, which leaves `HTTP_PROXY`, `HTTPS_PROXY` and
+  `NO_PROXY` in charge exactly as they were before this field existed. The word for "reach the endpoint
+  itself, environment included" is `"direct"`, and it beats an inherited value — which is how one endpoint is
+  taken off a proxy the rest of the session is on.
+- **an address this program cannot parse is a refused config, not a direct connection.** A scheme outside the
+  four, a missing host, a path or a query string on the end: refused, with the endpoint named in the message.
+  Traffic meant to leave through a host somebody chose does not get to leave some other way because the
+  address was typed wrong. Nothing is dialled while saving either: a proxy that is *down* is an outage worth
+  reporting when it is needed, while a proxy that is misaddressed is a typo worth fixing now.
+- **`NO_PROXY` stops applying to an endpoint that named a proxy**, `localhost` included. That endpoint said
+  where its traffic goes, which is the question `NO_PROXY` exists to answer. Everything without a `proxy`
+  field keeps the environment's rules, and a transport with a proxy in it is still `http.DefaultTransport`
+  cloned with only its `Proxy` replaced — pooling, timeouts and HTTP/2 survive, exactly as with `caFile`.
+- `socks5` and `socks5h` are both accepted and passed through as written: where a hostname is resolved for a
+  SOCKS proxy is the standard library's doing, and rewriting one spelling into the other would be this
+  program changing an address you typed.
+
+Over the API a `proxy` behaves like `caFile`: **absent or empty means unchanged**, and no wire spelling means
+"back to nothing said" — send `direct`, or take the key out of `data/<id>/config.json` to let the environment
+decide again. It is part of an endpoint's identity, so changing it rebuilds the provider and reconnects the
+server; changing the session-level one moves every endpoint that never named one, and leaves the ones that did
+connected. A `proxy` on a `stdio` entry is refused like a `caFile` on it is, because there is no connection to
+route.
+
+One asymmetry with `llm.apiKey`, which the API blanks before answering: `GET` does echo a `proxy`,
+credential and all, exactly as it echoes the `Authorization` header inside an `mcp[]` entry. The reason is
+the PATCH rule above — an `mcp[]` list is replaced whole, so a field the server blanked would be dropped by
+the next settings save that never mentioned it. The log line is where the credential is masked.
+
+What is in force is logged once when a session opens and again when its endpoints change, with any password
+in the address taken out:
+
+```
+llm: https://llama.internal:8080/v1 is reached through socks5://user:***@proxy.internal:1080
+mcp server "vr": http://127.0.0.1:8200/mcp is connected directly — HTTP_PROXY and NO_PROXY are not consulted for it
+```
+
+The MCP form has a field for it; `llm` and the session-level answer are set in `data/<id>/config.json` or by
+`PATCH`, as with the certificate fields.
 
 ### Tools: switches, prefixes and the cache
 
@@ -266,6 +337,7 @@ Three things are configured **per session**, all in `mcp[]`:
 | `toolPrefix` | none | namespace in front of this server's tools: `"vr"` ⇒ `vr_fs_list` (one underscore) |
 | `structuredContent` | the session's own `structuredContent` | what this server's `structuredContent` is worth to the model: [one of four words](#structured-content-in-four-words) |
 | `insecureTLS`, `caFile` | verify normally | how this server's `url` is trusted — the same two answers as on `llm` ([here](#reaching-an-endpoint-no-trust-store-knows)), and refused on a `stdio` entry, which has no certificate to check |
+| `proxy` | the session's `proxy`, else what the environment says | how this server is reached — the same address as on `llm` ([here](#reaching-an-endpoint-through-a-proxy)), `direct` for no proxy at all, and refused on a `stdio` entry, which has no connection to route. It is part of the server's identity, so changing it reconnects |
 
 Two tools that want the same name are a collision, and the **later** one moves: it is published as
 `<server>_<tool>`, never as `fs_read_2`, because a name you cannot read is a name you cannot use. It is

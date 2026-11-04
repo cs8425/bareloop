@@ -106,14 +106,30 @@ type Config struct {
 	// InsecureTLS and CAFile are this server's certificate policy, for a "url" entry: the same two
 	// answers as an llm endpoint (skip verification / verify against this PEM bundle only). They are
 	// part of Identity below — what they decide is whether the connection is allowed to be open at
-	// all — and they mean nothing to a stdio entry, which agent/validateTLS refuses rather than
+	// all — and they mean nothing to a stdio entry, which agent/validatePolicy refuses rather than
 	// accepting into a config that would quietly do nothing.
 	InsecureTLS *bool  `json:"insecureTLS,omitempty"`
 	CAFile      string `json:"caFile,omitempty"`
+	// Proxy is where this server is reached: socks5://, socks5h://, http:// or https://, with
+	// user:password when the proxy asks for one, or the literal "direct" to ignore HTTP_PROXY. Empty says
+	// nothing, leaving the environment in charge, and a session's own proxy (Config.Proxy) is what such an
+	// entry falls back to — resolved by internal/agent on the way here, so this field keeps holding what
+	// was configured. It is part of Identity, like the certificate pair: which host the connection is made
+	// through is the connection, and a server that failed to reach its proxy has to be retried through the
+	// one the operator names next.
+	Proxy string `json:"proxy,omitempty"`
 }
 
 // Insecure reports whether this entry asks for certificate verification to be skipped.
 func (c Config) Insecure() bool { return c.InsecureTLS != nil && *c.InsecureTLS }
+
+// Policy is this entry's transport policy in the shape internal/tlsconf takes: how its certificate is
+// checked and where its traffic is sent. One method reads the three fields together so that a caller
+// cannot pick up two of them, and the proxy in it is the resolved one — internal/agent puts the session's
+// own proxy on top of an entry that names none (Config.mcpDial).
+func (c Config) Policy() tlsconf.Options {
+	return tlsconf.Options{InsecureTLS: c.InsecureTLS, CAFile: c.CAFile, Proxy: c.Proxy}
+}
 
 // IsHTTP reports whether this entry is reached over a url rather than started as a child process.
 // It is the one list of the accepted spellings — New switches on it too — because "does this entry
@@ -127,13 +143,14 @@ func (c Config) IsHTTP() bool {
 }
 
 // httpClient is the client the HTTP transport should use: the injected one when a caller supplied a
-// client (what it does about certificates is then that caller's decision), a client with this entry's
-// TLS policy when it has one, and nil for neither — which is how the transport keeps its own default.
+// client (what it does about certificates and proxies is then that caller's decision), a client with this
+// entry's transport policy when it has one, and nil for neither — which is how the transport keeps its own
+// default, including the proxy from the environment.
 func (c Config) httpClient() (*http.Client, error) {
 	if c.HTTP != nil {
 		return c.HTTP, nil
 	}
-	tr, err := tlsconf.Options{InsecureTLS: c.InsecureTLS, CAFile: c.CAFile}.Transport(fmt.Sprintf("mcp server %q", c.Name))
+	tr, err := c.Policy().Transport(fmt.Sprintf("mcp server %q", c.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -152,12 +169,13 @@ func (c Config) httpClient() (*http.Client, error) {
 // must never restart a stdio child process. Two configs with the same Identity can be served by
 // the same live client; two that differ cannot.
 //
-// The TLS fields are part of it, because they decide whether the connection is permitted: a server
-// that was refused an unverifiable certificate has to be reconnected when the operator says "verify
-// against this file instead", and must not be reconnected for a policy nothing reached.
+// The TLS fields and the proxy are part of it, because they decide whether the connection is permitted and
+// to which host it is made: a server that was refused an unverifiable certificate has to be reconnected
+// when the operator says "verify against this file instead", and one that could not reach its proxy has to
+// be retried through the next one — while neither may be reconnected for a policy nothing reached.
 func (c Config) Identity() string {
-	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q dir=%s url=%s headers=%v roots=%v insecure=%t caFile=%s",
-		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.Dir, c.URL, c.Headers, c.Roots, c.Insecure(), c.CAFile)
+	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q dir=%s url=%s headers=%v roots=%v insecure=%t caFile=%s proxy=%s",
+		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.Dir, c.URL, c.Headers, c.Roots, c.Insecure(), c.CAFile, c.Proxy)
 }
 
 // Event is a notification received from the server.
@@ -241,7 +259,7 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	c := &Client{cfg: cfg, logf: cfg.Logf, era: eraModern, toolSchema: map[string]json.RawMessage{}}
 
 	var t transport
-	// IsHTTP is the one list of what counts as a url transport, because agent/validateTLS has to ask
+	// IsHTTP is the one list of what counts as a url transport, because agent/validatePolicy has to ask
 	// the same question of every entry. The default branch stays an error: a typo in "type" must not
 	// fall through to stdio and start a process nobody asked for.
 	switch kind := strings.ToLower(strings.TrimSpace(cfg.Type)); {

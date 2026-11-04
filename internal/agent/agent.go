@@ -262,15 +262,30 @@ type ElicitAsk struct {
 // Config is one session's configuration (per-session MCP set, system prompt, context
 // parameters — the multi-session requirement).
 type Config struct {
-	ID           string         `json:"id"`
-	Name         string         `json:"name,omitempty"`
-	SystemPrompt string         `json:"systemPrompt,omitempty"`
-	LLM          llm.Config     `json:"llm"`
-	MCP          []mcp.Config   `json:"mcp,omitempty"`
-	Compact      compact.Params `json:"compact"`
-	ASM          asm.Options    `json:"asm,omitempty"`
-	Temperature  *float64       `json:"temperature,omitempty"`
-	MaxTokens    int            `json:"maxTokens,omitempty"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name,omitempty"`
+	SystemPrompt string       `json:"systemPrompt,omitempty"`
+	LLM          llm.Config   `json:"llm"`
+	MCP          []mcp.Config `json:"mcp,omitempty"`
+	// Proxy is this session's answer to where an endpoint's traffic goes: socks5://, socks5h://, http:// or
+	// https://, with user:password when the proxy asks for one, or the literal "direct" to ignore HTTP_PROXY
+	// and connect to endpoints themselves. It is the fallback rather than the override: an endpoint that names
+	// a proxy of its own (llm.proxy, mcp[].proxy) is dialled through that one, an endpoint that names none is
+	// dialled through this, and one where neither is set keeps whatever the environment says. Nothing of it is
+	// stored into the endpoints — the fallback is applied where dialling is set up (llmDial, mcpDial) — so
+	// data/<id>/config.json and GET /config keep showing which field a proxy was actually written in, and a
+	// settings page cannot PATCH an inherited value into an endpoint that never asked for one.
+	//
+	// Two of them, nested, is not implemented: which one would wrap the other is an unanswered question, so
+	// the rule stays one answer per endpoint and the nearest one wins.
+	//
+	// It cannot be sent back to empty over the API, because empty means unchanged here just as it does for
+	// timezone below; send "direct" for the environment to stop being in charge.
+	Proxy       string         `json:"proxy,omitempty"`
+	Compact     compact.Params `json:"compact"`
+	ASM         asm.Options    `json:"asm,omitempty"`
+	Temperature *float64       `json:"temperature,omitempty"`
+	MaxTokens   int            `json:"maxTokens,omitempty"`
 	// MaxTurns caps one agentic run (0 = no cap).
 	MaxTurns int `json:"maxTurns,omitempty"`
 	// Extra is merged into every LLM request body (provider-specific kwargs).

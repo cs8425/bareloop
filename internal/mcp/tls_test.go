@@ -41,7 +41,7 @@ func TestIdentitySeparatesTheCertificatePolicy(t *testing.T) {
 	}
 }
 
-// TestIsHTTPIsTheOneList: agent/validateTLS asks this same question to decide whether a policy can mean
+// TestIsHTTPIsTheOneList: agent/validatePolicy asks this same question to decide whether a policy can mean
 // anything, so the accepted spellings live in exactly one place.
 func TestIsHTTPIsTheOneList(t *testing.T) {
 	for _, ty := range []string{"http", "HTTP", " streamable-http ", "streamable_http", "sse"} {

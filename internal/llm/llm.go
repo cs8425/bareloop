@@ -144,6 +144,13 @@ type Config struct {
 	// trust store is not consulted. It is read when the config is saved, not on the first request,
 	// so a wrong path is reported while there is still a session open in front of whoever typed it.
 	CAFile string `json:"caFile,omitempty"`
+	// Proxy is where requests to this endpoint are sent: socks5://, socks5h://, http:// or https://, with
+	// user:password when the proxy asks for one, or the literal "direct" to ignore HTTP_PROXY and connect to
+	// the endpoint itself. Empty says nothing about it, which leaves the environment in charge — the way it
+	// was before this field existed. A session's own proxy (Config.Proxy) is what an endpoint without one
+	// falls back to, and that is resolved when the provider is built rather than stored here, so config.json
+	// keeps showing what was configured.
+	Proxy string `json:"proxy,omitempty"`
 	// Pricing is what a token costs on this endpoint (per 1,000,000). It changes no request, which is
 	// why it is a pointer to a struct of plain numbers: absent means "no idea, show no cost", and an
 	// explicit {"input":0,"cachedInput":0,"output":0} is a real answer meaning "free".
@@ -162,16 +169,16 @@ type Config struct {
 // request, so it must never be a reason to rebuild a provider, reconnect, or warn that saving a
 // setting costs the KV cache.
 //
-// The two TLS fields are compared, and they belong here: they decide whether a request is even sent
-// to that host. Absent and false are treated as the same answer, though — neither asks anything of the
-// transport — so a PATCH that only spells out "false" does not rebuild a provider and does not warn
-// about a KV cache nothing changed.
+// The transport fields are compared, and they belong here: they decide whether a request is even sent
+// to that host, and through which host it goes on its way. Absent and false are treated as the same answer
+// for the certificate pair, though — neither asks anything of the transport — so a PATCH that only spells
+// out "false" does not rebuild a provider and does not warn about a KV cache nothing changed.
 func (c Config) Same(o Config) bool {
 	if c.Kind != o.Kind || c.BaseURL != o.BaseURL || c.APIKey != o.APIKey || c.Model != o.Model ||
 		c.Path != o.Path || c.NCTX != o.NCTX {
 		return false
 	}
-	if a, b := c.TLS(), o.TLS(); a.Insecure() != b.Insecure() || c.CAFile != o.CAFile {
+	if a, b := c.Policy(), o.Policy(); a.Insecure() != b.Insecure() || a.CAFile != b.CAFile || a.Proxy != b.Proxy {
 		return false
 	}
 	if len(c.Headers) != len(o.Headers) {
@@ -185,10 +192,13 @@ func (c Config) Same(o Config) bool {
 	return true
 }
 
-// TLS is this endpoint's certificate policy in the shape internal/tlsconf takes. A method, so that
-// nothing asking "how is this endpoint verified" can read one of the two fields without the other.
-func (c Config) TLS() tlsconf.Options {
-	return tlsconf.Options{InsecureTLS: c.InsecureTLS, CAFile: c.CAFile}
+// Policy is this endpoint's transport policy — how its certificate is checked and where its traffic is
+// sent — in the shape internal/tlsconf takes. A method, so that nothing asking either question can read one
+// of these fields without the others. The session's own proxy, when this endpoint does not name one, is put
+// on top by internal/agent before a provider is built (Config.llmDial), which is why it is not looked for
+// here.
+func (c Config) Policy() tlsconf.Options {
+	return tlsconf.Options{InsecureTLS: c.InsecureTLS, CAFile: c.CAFile, Proxy: c.Proxy}
 }
 
 // New builds a provider from cfg.
@@ -203,11 +213,11 @@ func New(cfg Config) (Provider, error) {
 	default:
 		return nil, errors.New("llm: unknown provider kind " + cfg.Kind)
 	}
-	// The TLS policy is resolved once, here, for two reasons: a caFile that cannot be read is a
-	// failure of the config rather than of the first request, and every request this provider makes
-	// then shares one transport — which is what keeps connections pooled now that the policy means
-	// a transport of its own instead of the process-wide default.
-	tr, err := cfg.TLS().Transport("llm")
+	// The transport policy is resolved once, here, for two reasons: a caFile that cannot be read or a proxy
+	// address that cannot be parsed is a failure of the config rather than of the first request, and every
+	// request this provider makes then shares one transport — which is what keeps connections pooled now that
+	// the policy means a transport of its own instead of the process-wide default.
+	tr, err := cfg.Policy().Transport("llm")
 	if err != nil {
 		return nil, err
 	}
