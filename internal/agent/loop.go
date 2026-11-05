@@ -517,7 +517,11 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			s.closeStream(streamID)
 			return false, fmt.Errorf("commit assistant entry: %w", err)
 		}
-		s.emit(Event{Type: EvtEntry, Entry: committed})
+		// Named with the stream it was written on, so the browser upgrades the node it has been drawing
+		// rather than drawing a second one for the same message (see Event.StreamID). The order of the two
+		// frames below is part of that promise: the entry arrives while its stream is still open, and the
+		// Done that closes the stream is what retires the buffer's live state — not the other way round.
+		s.emit(Event{Type: EvtEntry, Entry: committed, StreamID: streamID})
 		// The frame the hub waits for to forget this stream's deltas (see closeStream).
 		s.closeStream(streamID)
 		s.emitState()

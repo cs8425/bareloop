@@ -45,20 +45,28 @@ const (
 
 // Event is one UI event.
 type Event struct {
-	Seq     int64      `json:"seq"`
-	Type    string     `json:"type"`
-	Session string     `json:"session"`
-	Entry   *ir.Entry  `json:"entry,omitempty"`
-	Delta   *Delta     `json:"delta,omitempty"`
-	State   *Status    `json:"state,omitempty"`
-	Pending []string   `json:"pending,omitempty"`
-	Run     *RunInfo   `json:"run,omitempty"`
-	Gate    *GateAsk   `json:"gate,omitempty"`
-	Elicit  *ElicitAsk `json:"elicitation,omitempty"`
-	Info    string     `json:"info,omitempty"`
-	Level   string     `json:"level,omitempty"`
-	Data    any        `json:"data,omitempty"`
-	Ts      time.Time  `json:"ts"`
+	Seq     int64     `json:"seq"`
+	Type    string    `json:"type"`
+	Session string    `json:"session"`
+	Entry   *ir.Entry `json:"entry,omitempty"`
+	// StreamID names the delta stream an assistant entry was streamed out on, and only an entry that
+	// was streamed carries it: a tool result, a held message and a compaction arrive with it empty and
+	// omit the key. It exists because a live buffer in the browser is keyed by nothing else, and the
+	// alternative to naming it — "the newest buffer must be the one this reply belongs to" — is a guess
+	// that leaves one reply drawn twice whenever a late Done revives a buffer the entry had already
+	// taken over. With the name, the node a reader watched being written is upgraded into the committed
+	// entry in place instead of being replaced beside it.
+	StreamID string     `json:"streamId,omitempty"`
+	Delta    *Delta     `json:"delta,omitempty"`
+	State    *Status    `json:"state,omitempty"`
+	Pending  []string   `json:"pending,omitempty"`
+	Run      *RunInfo   `json:"run,omitempty"`
+	Gate     *GateAsk   `json:"gate,omitempty"`
+	Elicit   *ElicitAsk `json:"elicitation,omitempty"`
+	Info     string     `json:"info,omitempty"`
+	Level    string     `json:"level,omitempty"`
+	Data     any        `json:"data,omitempty"`
+	Ts       time.Time  `json:"ts"`
 }
 
 // Delta is a streaming fragment of the assistant message being generated.

@@ -15,6 +15,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -130,4 +131,141 @@ func TestAGenerateThatReturnsNothingClosesItsStream(t *testing.T) {
 			" the stream it opened is still open in the hub, and every page that reloads will replay it"+
 			" as a tool call that never finishes", closes)
 	}
+}
+
+// TestAStreamedReplyNamesItsStream is the identity that lets a browser finish the job 2026-11-05
+// started: a live buffer is keyed by its stream id and nothing else, so the frame that commits an
+// assistant entry has to name it. The rule that replaces it — "the newest buffer is the one this reply
+// wrote itself into" — is a guess, and the guess drew one reply twice when a late Done revived a buffer
+// the entry had already taken over. A run with a tool call in it is scripted rather than one plain
+// reply, because half of this assertion is about the entries that must NOT carry a stream.
+func TestAStreamedReplyNamesItsStream(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		frames []Event
+	)
+	m := NewManager(t.TempDir(), false, Config{}, func(e Event) {
+		mu.Lock()
+		frames = append(frames, e)
+		mu.Unlock()
+	}, nil)
+	cfg := Config{ID: "named"}
+	cfg.BuiltinTools = []string{"wait", "get_datetime"}
+	cfg.LLM = llm.Config{BaseURL: "http://127.0.0.1:1/v1"}
+	s, err := m.Create(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	script := []turn{
+		gatedToolCalls("call-1", "get_datetime", `{}`),
+		says("the date was on its way"),
+	}
+	f := &fakeProvider{script: script}
+	s.provider = f
+	t.Cleanup(func() { _ = s.Close() })
+
+	send(t, s, "what time is it")
+	f.waitForRequest(t, 1)
+	f.gate(t, 1).release()
+	waitForIdle(t, s)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	opened := map[string]int{}
+	done := map[string]int{}
+	for i, e := range frames {
+		if e.Type != EvtDelta || e.Delta == nil {
+			continue
+		}
+		opened[e.Delta.StreamID] = i
+		if e.Delta.Done {
+			done[e.Delta.StreamID] = i
+		}
+	}
+	if len(opened) < 2 {
+		t.Fatalf("the run streamed %d stream(s), want one per assistant reply:%s", len(opened), describeFrames(frames))
+	}
+
+	claimed := map[string]string{}
+	for i, e := range frames {
+		if e.Type != EvtEntry || e.Entry == nil {
+			continue
+		}
+		if e.Entry.Kind != ir.KindAssistant {
+			if e.StreamID != "" {
+				t.Errorf("frame %d: a %s entry names stream %q. Only a streamed reply has an id to lend:"+
+					" a tool result that claims a buffer would be drawn into it and steal its identity",
+					i, e.Entry.Kind, e.StreamID)
+			}
+			continue
+		}
+		if e.StreamID == "" {
+			t.Errorf("frame %d: the assistant entry %s names no stream, so the browser is left guessing"+
+				" which buffer this reply wrote itself into:%s", i, e.Entry.ID, describeFrames(frames))
+			continue
+		}
+		if _, ok := opened[e.StreamID]; !ok {
+			t.Errorf("frame %d: entry %s names stream %q, which no delta ever came on", i, e.Entry.ID, e.StreamID)
+		}
+		if other, dup := claimed[e.StreamID]; dup {
+			t.Errorf("stream %q is claimed by %s and by %s: upgrading in place would draw two messages in one node",
+				e.StreamID, other, e.Entry.ID)
+		}
+		claimed[e.StreamID] = e.Entry.ID
+		// The order the upgrade depends on: the entry lands while its stream is still open, and the Done
+		// that retires the buffer's live state comes after it. Reverse the two and a page reloading
+		// mid-run closes the buffer before the entry that would have inherited it arrives — the empty
+		// shell this file's other test was written about.
+		if d, ok := done[e.StreamID]; ok && d < i {
+			t.Errorf("frame %d: entry %s arrives after the Done that closed stream %q (frame %d)",
+				i, e.Entry.ID, e.StreamID, d)
+		}
+	}
+	if len(claimed) < 2 {
+		t.Errorf("%d assistant entries named a stream, want both of the run's replies to:%s", len(claimed), describeFrames(frames))
+	}
+}
+
+// TestStreamIDIsOmittedWhenNothingStreamed pins the wire shape. A client that has never heard of the
+// field must receive exactly the frame it received before — no key, not an empty one — and a client that
+// has must be able to join an entry to its deltas with a string compare, which only works while the two
+// spell the key identically.
+func TestStreamIDIsOmittedWhenNothingStreamed(t *testing.T) {
+	quiet, err := json.Marshal(Event{Type: EvtEntry, Entry: &ir.Entry{ID: "0000001", Kind: ir.KindUser}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(quiet), "streamId") {
+		t.Errorf("an entry that never streamed grew the key anyway: %s", quiet)
+	}
+
+	loud, err := json.Marshal(Event{Type: EvtEntry, Entry: &ir.Entry{ID: "0000002", Kind: ir.KindAssistant}, StreamID: "named-t1-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(loud), `"streamId":"named-t1-1"`) {
+		t.Errorf("a streamed reply does not name its stream: %s", loud)
+	}
+
+	d, err := json.Marshal(Delta{StreamID: "named-t1-1", Done: true})
+	if err != nil || !strings.Contains(string(d), `"streamId":"named-t1-1"`) {
+		t.Errorf("Delta spells its stream id differently, so the join cannot be made: %s (%v)", d, err)
+	}
+}
+
+// describeFrames is one line per event, for a failure about order to be readable at all.
+func describeFrames(frames []Event) string {
+	var b strings.Builder
+	for i, e := range frames {
+		switch {
+		case e.Entry != nil:
+			fmt.Fprintf(&b, "\n  %d %s %s stream=%q", i, e.Type, e.Entry.Kind, e.StreamID)
+		case e.Delta != nil:
+			fmt.Fprintf(&b, "\n  %d delta %s done=%v", i, e.Delta.StreamID, e.Delta.Done)
+		default:
+			fmt.Fprintf(&b, "\n  %d %s", i, e.Type)
+		}
+	}
+	return b.String()
 }
