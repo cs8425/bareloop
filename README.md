@@ -537,12 +537,14 @@ and in `/inspect` instead of crossing the wire to be thrown away.
 | *nothing* | the whole path — the default on purpose: the cost panel prices a whole session with one unparameterised call |
 | `?limit=40` | the newest page of at most 40 entries; 200 is the ceiling whatever you ask for, and `window.clamped` says when it was used |
 | `?limit=40&before=<id>` | the page before that one — `before` is exclusive and is normally the `oldestId` just received |
+| `?limit=40&after=<id>` | the page after that one — `after` is exclusive too and is normally the `newestId` just received: what comes back begins on the next turn, so nothing a reader holds is handed to it twice |
 | `?anchor=<id>&limit=40` | a page centred on one entry, for a jump that lands far from both ends; an anchor is a place in a page, so it is asked for with a size |
 | `?all=1` | the whole path by name, for inspecting and debugging |
 
-`before` cuts the path whether or not a `limit` came with it, because "everything older than this entry"
-is a question with an answer. An id that is not on the path is a 400 either way — answering such a
-request with the whole path would be guessing at it.
+`before` and `after` cut the path whether or not a `limit` came with them, because "everything older than
+this entry" and "everything newer than it" are both questions with an answer. Past the tip `after` has
+nothing left to give: an empty page comes back with `hasNewer` false. An id that is not on the path is a
+400 either way — answering such a request with the whole path would be guessing at it.
 
 `window` is always there: `oldestId`, `newestId`, `hasOlder`, `hasNewer`, `count`, `total`, `bytes`,
 `limit` (what you asked for; 0 means no ceiling was asked for), `maxLimit`, `clamped`, `truncated`.
@@ -551,7 +553,9 @@ A page is a run of **whole turns**: it begins on a user message or on a compacti
 call never sits on one page with its result on the next, and walking `before` back from the newest page
 reproduces the path with no gap and no overlap. The one exception is a single turn larger than the page
 it was asked into: it comes back whole and `truncated` is true, because two pages holding half a tool
-call each are two pages neither can draw. Combining `before` with `anchor`, or `all` with anything else,
+call each are two pages neither can draw. Walking `after` forward from the newest id of a page does the
+same thing in the other direction, which is what lets a reader let go of what it has scrolled past and
+ask for it again later. Combining any two of `before`, `after` and `anchor`, or `all` with anything else,
 is a 400 — as is a `limit` that is not a positive integer, an `anchor` with no `limit`, or an id that is
 not on the path.
 
@@ -561,7 +565,8 @@ with an ellipsis where it was cut) and no content at all, 500 turns per answer. 
 exactly the positions a page is allowed to begin at, which is what makes them worth jumping to: every row
 is an `anchor` for the pager, so a jump cannot land between a tool call and its result. Asking for 500
 turns of a longer session is not an error — the newest 500 come back, `clamped` is true and `hasOlder`
-says the path goes on before the first row. `before`, `anchor` and `all` are 400s here, because a turn
+says the path goes on before the first row. `before`, `after`, `anchor` and `all` are 400s here, because
+a turn
 list that skipped a stretch of the path without saying so is worse than one that refuses.
 
 ### Websocket protocol
