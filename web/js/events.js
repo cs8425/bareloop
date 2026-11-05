@@ -16,8 +16,20 @@ import { clearBusy, loadSoon, refresh, renderNewer, renderPending, renderStatus,
 // counts what it gave up — `#newer` says so in its title, because a transcript that is being ignored
 // looks perfectly calm. A reconnect still finds the page: `ws.onopen` refreshes, and a refresh asks for
 // a parked page by its anchor. Notes are not on the list on purpose: a line about the daemon is not a
-// claim about where this conversation is, and muting an error to keep a page tidy is the worse trade.
+// claim about where this conversation is, and muting an error because a page wanted to look tidy is the
+// worse trade — which is the reason the one error this file does mute is muted by what caused it, never
+// by where it happened to land.
 const LIVE_AT_THE_TAIL = ['delta', 'entry', 'tool_call', 'tool_result', 'compaction', 'removed', 'request', 'request_done'];
+
+// What a run the reader stopped looks like on the wire. The event carries a message and a level and no
+// field that says "this was a cancellation" — and a flag on this tab would miss every way a run is
+// stopped that is not this tab's Stop button (another tab, curl, ⚡ interrupt) — so the cause is read off
+// the text. Go's context.Canceled is a constant string, and the only two emitters a cancel can reach are
+// the streaming call and the plain one, which prefix "llm stream: " and "llm: "; the wrapped form of a
+// transport error puts the URL in between, hence the .* before the cause. Everything else keeps its red
+// line: "panic in run:", "llm:" for a real provider failure, "commit tool result:" and "held message:"
+// are all things worth seeing on a page that was merely being read.
+const STOPPED_RUN = /^llm(?: stream)?: .*\bcontext canceled\b/;
 
 export function handleEvent(ev) {
   if (ev.seq !== undefined) state.seq = Math.max(state.seq, ev.seq || 0);
@@ -128,7 +140,9 @@ export function handleEvent(ev) {
       note(ev.info || '');
       break;
     case 'error':
-      note(ev.info || 'error', 'error');
+      // A reader who pressed Stop does not need a red line telling them the run stopped: the transcript
+      // already says "interrupted" on the entry the daemon committed for exactly that. See STOPPED_RUN.
+      if (!STOPPED_RUN.test(ev.info || '')) note(ev.info || 'error', 'error');
       break;
     default:
       break;
