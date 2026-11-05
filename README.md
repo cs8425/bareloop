@@ -593,6 +593,14 @@ Event types: `hello`, `entry`, `delta`, `tool_call`, `tool_result`, `state`, `pe
 `request`, `request_done`, `log`, `info`, `error`, `removed`, `tools` (the tool set was rebuilt; the body is
 the same view `GET .../tools` returns).
 
+An `entry` frame for a reply that was streamed out carries `streamId` too — the id its `delta` frames came
+on — so a client that has been drawing those deltas can finish *that* node with the committed entry (id chips
+and token counts arriving, the streaming marker going) instead of drawing a second node for a message it
+watched being written. Entries that were never streamed — a tool result, a message accepted while an answer
+was on the wire, a compaction summary — omit the key. The entry arrives before the `delta` frame that closes
+its stream, which is the other half of the promise: nothing closes a buffer before the entry that would
+inherit it exists.
+
 ### Three moments for a message
 
 A message can arrive at three moments, and they are not the same transaction.
