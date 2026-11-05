@@ -729,7 +729,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Replay what this client missed while it was away.
 	for _, e := range s.hub.Snapshot(id) {
-		if !writeSSE(w, e) {
+		if !s.writeSSE(w, e) {
 			return
 		}
 	}
@@ -742,7 +742,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !writeSSE(w, e) {
+			if !s.writeSSE(w, e) {
 				return
 			}
 			flusher.Flush()
@@ -755,9 +755,17 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func writeSSE(w http.ResponseWriter, e agent.Event) bool {
+// writeSSE writes one event as one SSE frame. The bool is whether the stream may keep being used: a
+// failed write means the peer is gone.
+//
+// An event that cannot be encoded costs only itself, so this returns true and the stream goes on — but it
+// used to do that in silence, which made it a second place (after the websocket pump) where a page can
+// stop being told something about a session and nobody, including the page, can tell. `Data any` is what
+// makes encoding failure possible at all; if this line never prints, nothing is being dropped.
+func (s *Server) writeSSE(w http.ResponseWriter, e agent.Event) bool {
 	b, err := json.Marshal(e)
 	if err != nil {
+		s.logf("sse: dropping event %s/%s seq %d, it cannot be encoded: %v", e.Session, e.Type, e.Seq, err)
 		return true
 	}
 	if _, err := fmt.Fprintf(w, "event: agent\ndata: %s\n\n", b); err != nil {

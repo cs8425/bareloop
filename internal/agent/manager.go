@@ -54,6 +54,13 @@ func (m *Manager) publish(e Event) {
 	m.fanout(e)
 }
 
+// Seq is how many events this process has stamped. A subscriber that receives everything can compare
+// the highest stamp it has seen against this number and know whether an event was written that it never
+// got — which is the whole content of a heartbeat, and the reason the stamp is handed out here rather
+// than in the hub: every event leaves through this one call, so the counter and the stream cannot
+// disagree about what a number means. Reading it is one atomic load, safe to do on a timer.
+func (m *Manager) Seq() int64 { return m.seq.Load() }
+
 // Root returns the data directory.
 func (m *Manager) Root() string { return m.root }
 
