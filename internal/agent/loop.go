@@ -512,10 +512,14 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		// Closing the debt before the returns below is what keeps the hold a debt with a fixed end.
 		s.stopAwaiting()
 		if err != nil {
+			// The reply is not on the path and never will be, so this is the moment to close its
+			// stream: what the hub is holding are fragments of a message that does not exist.
+			s.closeStream(streamID)
 			return false, fmt.Errorf("commit assistant entry: %w", err)
 		}
 		s.emit(Event{Type: EvtEntry, Entry: committed})
-		s.emit(Event{Type: EvtDelta, Delta: &Delta{StreamID: streamID, Done: true}})
+		// The frame the hub waits for to forget this stream's deltas (see closeStream).
+		s.closeStream(streamID)
 		s.emitState()
 
 		// "That request does not fit" is both an error and a measurement. Re-probe (the second and
@@ -621,6 +625,40 @@ func transientLLMError(err error) bool {
 	return true
 }
 
+// closeStream tells every reader that no more deltas are coming for one stream. It is not a
+// courtesy: the hub remembers a session's recent events so a page that reloads mid-run can catch up,
+// and it forgets a stream's fragments only when it sees the frame that closes them. A stream that
+// ends without one is therefore replayed to every later reload — measured after one Stop: the
+// transcript kept a card of the half-written fs_list, still marked running, with nothing behind it
+// in the log, and a reload brought it back. So a generate that returns nothing still owes a goodbye.
+func (s *Session) closeStream(streamID string) {
+	s.emit(Event{Type: EvtDelta, Delta: &Delta{StreamID: streamID, Done: true}})
+}
+
+// completeArgs reports whether accumulated tool-call arguments can be stored and sent back.
+// Empty means the tool takes no arguments — a legal call, and what most providers send for one.
+// Anything else has to be a whole JSON value, because ir.ToolCall.Args is a json.RawMessage and
+// encoding/json marshals it as it stands: a half object is not a value, and the error lands on the
+// record rather than the field. Measured on a run stopped between two argument fragments: "commit
+// assistant entry: json: error calling MarshalJSON for type *jsontext.Value: unexpected end of JSON
+// input" — a lost reply, on account of a call that was never going to run.
+func completeArgs(raw json.RawMessage) bool {
+	// The cut set is exactly the whitespace encoding/json allows between values, which is what makes
+	// this a test of "will this marshal" rather than a guess at what a fragment means.
+	t := strings.Trim(string(raw), " \t\n\r")
+	return t == "" || json.Valid([]byte(t))
+}
+
+// cutOffNote is the sentence one dropped call leaves in the reply it was cut from. It is stored with
+// the entry, so the next payload is told what the transcript shows: the model asked for this call
+// and it never ran. Without it the only trace of a cut is a tool call the model believes it made.
+func cutOffNote(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "[cut off: a tool call's arguments never arrived complete, so it was not made]"
+	}
+	return "[cut off: the arguments of " + name + " never arrived complete, so that call was not made]"
+}
+
 // generate streams one assistant message and returns the entry to commit.
 func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.Tool, turn int) (*ir.Entry, string, bool) {
 	cfg := s.Config()
@@ -664,6 +702,7 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 		s.emit(Event{Type: EvtError, Info: "llm: " + err.Error()})
 		s.logf("turn %d: llm request failed: %v", turn, err)
 		if ctx.Err() != nil {
+			s.closeStream(streamID)    // this stream ends here, with nothing on it
 			return nil, streamID, true // stopped or interrupted before anything came back
 		}
 		// Commit the failure as the answer. This is what ends the turn: while the path ends with
@@ -742,8 +781,21 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 		aborted = true
 	}
 	var calls []ir.ToolCall
+	var cut []string // names of calls dropped for incomplete arguments
 	for _, idx := range order {
-		calls = append(calls, *byIndex[idx])
+		if completeArgs(byIndex[idx].Args) {
+			c := *byIndex[idx]
+			if ref, ok := s.reg.resolve(c.Name); ok {
+				c.Server = ref.Server // so the entry carries the same prefix the live card had
+			}
+			calls = append(calls, c)
+			continue
+		}
+		// A call whose arguments never arrived whole cannot be stored. ir.ToolCall.Args is a
+		// json.RawMessage, so encoding/json marshals it exactly as it was received: a half object is
+		// not a value, and the error lands on the record rather than on the field — taking the whole
+		// reply down with it. Drop the call, and leave a sentence saying so.
+		cut = append(cut, byIndex[idx].Name)
 	}
 	switch {
 	case finish != "":
@@ -774,6 +826,14 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	}
 	if content.Len() == 0 && reasoning.Len() == 0 && len(calls) == 0 && streamErr == "" && !aborted {
 		entry.Content = "[empty completion]"
+	}
+	for _, name := range cut {
+		line := cutOffNote(name)
+		if entry.Content == "" {
+			entry.Content = line
+			continue
+		}
+		entry.Content += "\n\n" + line
 	}
 	if streamErr != "" && !aborted {
 		// A stream that died halfway leaves the output up to that point. Say so: an answer that is
