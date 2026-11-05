@@ -140,9 +140,23 @@ function onEntry(e) {
   if (state.entries.has(e.id)) return;
   const node = entryNode(e);
   if (e.kind === 'assistant') {
-    // The committed entry supersedes the live stream buffer: move the streamed tool cards into the
-    // committed message and drop the buffer, so the tool cards are not rendered twice.
-    for (const [id, s] of [...state.streams]) {
+    const mine = new Set((e.toolCalls || []).map((tc) => tc.id).filter(Boolean));
+    const streams = [...state.streams];
+    // Only the buffer this entry is the reply of. The newest one is the safe guess for a reply with no
+    // calls, but a run stopped between two tokens leaves its buffer behind — `done` or not, no entry is
+    // ever coming for it (s.done says it is over, and session.js re-hangs everything it holds) — and
+    // sweeping every buffer into the next committed reply moved that orphan's cards into a message that
+    // never made them (measured: a stopped fs_list card ending up inside a following reply whose only
+    // content was "BETA", and its running badge with it).
+    const newest = streams[streams.length - 1];
+    for (const [id, s] of streams) {
+      // A stream's key is the call id whenever the provider named the call in its first frame — which is
+      // what an assistant entry can be matched against — and the frame index otherwise, in which case
+      // nothing in this buffer claims the call and only the newest-buffer rule below speaks for it.
+      const own = s === newest || [...s.tools.keys()].some((k) => mine.has(k));
+      if (!own) continue;
+      // The committed entry supersedes the live stream buffer: move the streamed tool cards into the
+      // committed message and drop the buffer, so the tool cards are not rendered twice.
       for (const [, card] of s.tools) {
         card.attached = true;
         node.appendChild(card.el);
@@ -164,6 +178,11 @@ function onEntry(e) {
 function onToolProgress(d, isResult) {
   if (!d) return;
   const card = toolCard(d.callId, `${d.server ? d.server + '/' : ''}${d.tool}`, d.status === 'error' ? 'state-error' : 'state-running');
+  // A card drawn from the stream's own progress frame can only name the tool: ToolCallProgress carries no
+  // server. After a reload the transcript is drawn from the committed entry, which does carry one — so this
+  // event, the first frame that knows who owns the call, is the one that relabels. Without it the same call
+  // reads `fs_list` while it runs and `mcp-vroot/fs_list` once the page is redrawn from the log.
+  if (d.server) card.setLabel(`${d.server}/${d.tool}`);
   if (d.arguments) card.setArgs(d.arguments);
   if (d.status === 'running') card.setBadge('running', 'state-running');
   // The output is not drawn from this event any more: the tool entry owns it, renders it in full (images

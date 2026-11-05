@@ -433,8 +433,19 @@ function fillBody(node, body, e) {
     for (const [i, tc] of (e.toolCalls || []).entries()) {
       const card = toolCard(tc.id || `${e.id}#${i}`, `${tc.server ? tc.server + '/' : ''}${tc.name}`, '');
       card.setArgs(typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? ''));
-      card.el.removeAttribute('open');
+      // The card is opened the way the reader left it, or closed if nobody ever had it open: a rebuild must
+      // not fold a card the reader is reading. `toolCard` hands out one card per call id from a cache that
+      // outlives this function, so a commit that re-draws an assistant entry reuses the live card — and this
+      // line used to fold it in front of its reader (measured: `open` went 1 → 0 in the 68 ms between the
+      // last streamed frame and the entry event, with the card on screen the whole time). The fold belongs
+      // to a fresh card, and `toolCard` gives one folded by default; anything still open was opened by hand.
       body.appendChild(card.el);
+      // The card is home: a replayed tool_call progress event (the socket re-sends recent frames on
+      // reconnect, and they carry no entryId) must not drag it out of this body and to the end of the
+      // transcript. `attach` skips a card it is told is already placed, and that is what this flag is for —
+      // the live path sets it in onEntry, the rebuild path has to set it here or a reload moves every card
+      // to the bottom.
+      card.attached = true;
     }
   } else if (e.kind === 'tool') {
     body.appendChild(toolOutput(collapseDataUrls(e.content).text));
@@ -773,18 +784,22 @@ export function streamDelta(d) {
   const tc = d.toolCall;
   if (tc) {
     s.endThinking(); // a tool call ends the thinking too, and from here the card is what a reader watches
-    // One call, one bucket. The provider sends the *accumulated* arguments on every frame (loop.go hands this
-    // field the whole buffer, not the newest fragment), so a frame replaces what came before it. This branch
-    // used to append, which turned a two-frame call into `{"path":"."}{"path":"."}` — no longer JSON, so the
-    // pretty-printer gave up and the box showed the ragged end of it: the "only a `}` is left" report, and it
-    // stayed wrong in the committed card until a reload re-read the entry. `id` when it is known, then the
-    // frame's index, then the call this stream was last told about; a counter of "how many cards exist" moves
-    // the moment this frame registers its own card, which is how fragments ended up in a bucket nobody reads.
+    // One call, one bucket, and every frame of that call is a fragment: the daemon appends the fragments
+    // itself before emitting one (loop.go), so a frame is what is new and never the whole. `id` when it is
+    // known, then the frame's index, then the call this stream was last told about; a counter of "how many
+    // cards exist" moves the moment this frame registers its own card, which is how fragments ended up in a
+    // bucket nobody reads.
     const text = tc.arguments ?? tc.args ?? '';
     const index = tc.Index ?? tc.index;
     const key = tc.id || (index === undefined || index === null ? s.lastKey || String(s.tools.size) : String(index));
     if (tc.id || tc.name || !s.lastKey) s.lastKey = key;
-    s.args.set(key, text);
+    // Append, always. A frame like `}` that does not extend what we hold is not a shorter message but the
+    // last fragment of a call whose 36 characters came in 13 pieces (measured on llama.cpp, arguments
+    // `{"depth":2,"path":"internal/server"}`), and the rule "take the frame whole when it starts with the
+    // buffer we hold" — written for a provider that sends the accumulated string — is what left a finished
+    // call showing nothing but that `}`. Appending would double an accumulating provider's buffer, and no
+    // provider behind this loop behaves that way: the daemon appends these very frames into the arguments it
+    // stores and replays, so accumulated frames would mean no tool call ever parsed.
     if (tc.id || tc.name) {
       // Which card this call owns. The cache is global and outlives a stream, so a card drawn before the
       // provider named the call cannot be called `#0`: the next stream's first nameless call would look `#0`
@@ -803,9 +818,12 @@ export function streamDelta(d) {
       card.el.addEventListener('toggle', s.drawToolArgs);
       if (tc.name) card.setLabel(tc.name); // ToolCallProgress carries no server, unlike a tool run
     }
-    // Which tool is running is drawn immediately (above), and the arguments that follow it are one replace
+    // Which tool is running is drawn immediately (above), and the arguments that follow it are one write
     // per frame, on the reply's own frame budget: an args delta used to mean a pretty-print plus a DOM write
     // per token. And as with the reasoning panel, a collapsed card is not a reader — no frame is asked for.
+    // The buffer is what `drawToolArgs` reads, so a frame that is never stored here is an arguments box that
+    // stays empty until a reload draws the card from the committed entry instead.
+    s.args.set(key, (s.args.get(key) || '') + text);
     s.markNews();
   }
   // `done` closes the window: whatever is still unpainted gets painted now, and the split disappears into
