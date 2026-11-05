@@ -266,6 +266,9 @@ func TestIDsAreRefusedOnAnEmptyPath(t *testing.T) {
 	if _, err := PageOf(nil, PageOptions{Before: "0000001"}); err == nil {
 		t.Error("before on an empty path: want an error, got none")
 	}
+	if _, err := PageOf(nil, PageOptions{After: "0000001"}); err == nil {
+		t.Error("after on an empty path: want an error, got none")
+	}
 	if _, err := PageOf(nil, PageOptions{Limit: 5, Anchor: "0000001"}); err == nil {
 		t.Error("anchor on an empty path: want an error, got none")
 	}
@@ -325,6 +328,135 @@ func TestEmptyPath(t *testing.T) {
 	}
 }
 
+// TestPagesWalkForwardIntoThePath is the same acceptance property walked the other way, which is what
+// a window that recycles what it has scrolled past depends on: starting from an entry the caller is
+// standing on, each page begins where the last one ended, no entry arrives twice, none is skipped, and
+// the last page ends the path.
+func TestPagesWalkForwardIntoThePath(t *testing.T) {
+	path := msgs(9, 3) // nine turns of four
+	for _, limit := range []int{1, 2, 3, 4, 5, 7, 8, 13, 36, 1000} {
+		// A client passes the newest id it holds, which is a turn edge, so the walk starts from the
+		// very first entry: the turn holding it belongs to what the caller has, and the expected cover
+		// is everything from the second turn on.
+		after := path[0].ID
+		want := idsOf(path[4:])
+		var walk []string
+		for pages := 0; ; pages++ {
+			if pages > len(path) {
+				t.Fatalf("limit %d: the walk never ends", limit)
+			}
+			p, err := PageOf(path, PageOptions{Limit: limit, After: after})
+			if err != nil {
+				t.Fatalf("limit %d after %q: %v", limit, after, err)
+			}
+			// As in the walk backwards, an empty page here is a bug rather than a state: the loop only
+			// asks again when the page it got said something newer exists.
+			if len(p.Entries) == 0 {
+				t.Fatalf("limit %d after %q: the walk got an empty page", limit, after)
+			}
+			head, tail := p.Entries[0], p.Entries[len(p.Entries)-1]
+			if !IsTurnStart(head) {
+				t.Fatalf("limit %d: page head %s (%s) is not a turn start", limit, head.ID, head.Kind)
+			}
+			// And a page that is not the last one ends on a turn edge, so the next page can begin on a
+			// legal boundary instead of in the middle of a tool call and its result.
+			if p.HasNewer && !IsTurnStart(path[indexOf(path, tail.ID)+1]) {
+				t.Fatalf("limit %d: page tail %s is not a turn edge", limit, tail.ID)
+			}
+			if !p.HasOlder {
+				t.Fatalf("limit %d: a page from %s claims nothing older", limit, head.ID)
+			}
+			if !p.Truncated && len(p.Entries) > limit {
+				t.Fatalf("limit %d: page of %d entries is not marked truncated", limit, len(p.Entries))
+			}
+			if !p.HasNewer && tail.ID != path[len(path)-1].ID {
+				t.Fatalf("limit %d: page claims nothing newer but ends at %s", limit, tail.ID)
+			}
+			for _, e := range p.Entries {
+				walk = append(walk, e.ID) // pages arrive oldest first going forwards
+			}
+			if !p.HasNewer {
+				break
+			}
+			after = tail.ID
+		}
+		if !equal(walk, want) {
+			t.Errorf("limit %d: the walk covers %d entries, want the %d from the second turn on", limit, len(walk), len(want))
+		}
+	}
+}
+
+// TestAfterInsideATurn: the turn named by after belongs to the page the caller already has, so an id
+// in the middle of a turn starts the newer page at that turn's end rather than repeating half of it.
+func TestAfterInsideATurn(t *testing.T) {
+	path := msgs(3, 3) // 12 entries, turns at 0, 4, 8
+	p, err := PageOf(path, PageOptions{Limit: 10, After: path[6].ID})
+	if err != nil {
+		t.Fatalf("PageOf: %v", err)
+	}
+	if !equal(idsOf(p.Entries), idsOf(path[8:])) {
+		t.Errorf("got %v, want only the last turn", idsOf(p.Entries))
+	}
+	if !p.HasOlder || p.HasNewer {
+		t.Errorf("got older=%v newer=%v, want true and false", p.HasOlder, p.HasNewer)
+	}
+}
+
+// TestAfterTheLastTurnIsEmpty is the other end of the path: standing inside the final turn leaves
+// nothing newer, and a page of nothing is not a reason to hand back the whole transcript. Like the
+// same test for before, it is what a client sees when it asks for more than the tip has.
+func TestAfterTheLastTurnIsEmpty(t *testing.T) {
+	path := msgs(3, 3)
+	p, err := PageOf(path, PageOptions{Limit: 4, After: path[9].ID})
+	if err != nil {
+		t.Fatalf("PageOf: %v", err)
+	}
+	if len(p.Entries) != 0 || !p.HasOlder || p.HasNewer || p.Total != len(path) {
+		t.Errorf("got %d entries older=%v newer=%v total %d, want none, true, false, %d",
+			len(p.Entries), p.HasOlder, p.HasNewer, p.Total, len(path))
+	}
+}
+
+// TestAfterWithoutALimitStillCuts: "everything newer than here" is a question with an answer, so the
+// cut happens with no ceiling, and an id off the path is refused rather than answered with the path.
+func TestAfterWithoutALimitStillCuts(t *testing.T) {
+	path := msgs(3, 3) // 12 entries, turns at 0, 4, 8
+	p, err := PageOf(path, PageOptions{After: path[3].ID})
+	if err != nil {
+		t.Fatalf("PageOf: %v", err)
+	}
+	if !equal(idsOf(p.Entries), idsOf(path[4:])) {
+		t.Errorf("got %d entries, want the 8 newer than the first turn", len(p.Entries))
+	}
+	if !p.HasOlder || p.HasNewer || p.Limit != 0 {
+		t.Errorf("got older=%v newer=%v limit %d, want true, false and 0 (nothing was asked for)",
+			p.HasOlder, p.HasNewer, p.Limit)
+	}
+	if _, err := PageOf(path, PageOptions{After: "not here"}); err == nil {
+		t.Error("an unknown after with no limit must still be refused")
+	}
+}
+
+// TestAfterOnATurnBiggerThanAPage: the turn that follows is larger than the page asked into, so it
+// comes back whole and says so — the same exception the anchor and before walks make.
+func TestAfterOnATurnBiggerThanAPage(t *testing.T) {
+	path := msgs(2, 500) // two turns of 501
+	first := len(path) / 2
+	p, err := PageOf(path, PageOptions{Limit: 10, After: path[0].ID})
+	if err != nil {
+		t.Fatalf("PageOf: %v", err)
+	}
+	if !p.Truncated {
+		t.Error("a turn larger than the page must be reported as truncated")
+	}
+	if !equal(idsOf(p.Entries), idsOf(path[first:])) {
+		t.Errorf("got %d entries, want exactly the next turn (%d)", len(p.Entries), len(path)-first)
+	}
+	if !p.HasOlder || p.HasNewer {
+		t.Errorf("got older=%v newer=%v, want the turn ahead and the tip inside it", p.HasOlder, p.HasNewer)
+	}
+}
+
 func TestRejectedRequests(t *testing.T) {
 	path := msgs(3, 3)
 	for name, o := range map[string]PageOptions{
@@ -334,6 +466,10 @@ func TestRejectedRequests(t *testing.T) {
 		"all with anchor":            {All: true, Anchor: "1"},
 		"before off the path":        {Before: "not here"},
 		"anchor off the path":        {Limit: 5, Anchor: "not here"},
+		"all with after":             {All: true, After: "1"},
+		"before and after together":  {Before: "1", After: "2"},
+		"after and anchor together":  {After: "1", Anchor: "2"},
+		"after off the path":         {After: "not here"},
 		"anchor with no size":        {Anchor: "2"},
 	} {
 		if _, err := PageOf(path, o); err == nil {

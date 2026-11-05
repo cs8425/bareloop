@@ -242,7 +242,10 @@ func pageQuery(r *http.Request) (ir.PageOptions, error) {
 	// An empty value reads as absent: ?before=&limit=20 is what a client that always serialises both
 	// fields sends, and "no id" from an empty field is the same request as no field. A *bad* id is
 	// refused in ir.PageOf, which is also where an anchor with no size is refused.
+	// `after` is the empty value of the same kind: a client that always serialises its window sends
+	// all three names, and an empty one is asking for no cut rather than for an id it does not have.
 	o.Before = q.Get("before")
+	o.After = q.Get("after")
 	o.Anchor = q.Get("anchor")
 	return o, nil
 }
@@ -677,12 +680,12 @@ func (s *Server) handleTurns(w http.ResponseWriter, r *http.Request) {
 }
 
 // turnLimit reads the one parameter this endpoint has. What the transcript endpoint takes by name are
-// refused here rather than ignored: a client that sends before= or anchor= is asking for a slice of
+// refused here rather than ignored: a client that sends before=, after= or anchor= wants a slice of
 // turns this endpoint cannot give, and answering with the newest turns anyway is how a ruler ends up
 // drawing the start of a path it has only seen the end of.
 func turnLimit(r *http.Request) (int, error) {
 	q := r.URL.Query()
-	for _, name := range []string{"before", "anchor", "all"} {
+	for _, name := range []string{"before", "after", "anchor", "all"} {
 		// An empty value reads as absent, which is what this server already does with those fields: a
 		// client that always serialises them all is not asking for anything.
 		if v := q.Get(name); v != "" {

@@ -48,6 +48,11 @@ type PageOptions struct {
 	// Unlike Before it is a place and not a cut, so it is refused without a Limit: a page around an
 	// entry with no size is the whole path, and the caller that named an entry did not want that.
 	Anchor string
+	// After is the mirror of Before: exclusive, and the page it selects begins with the turn that
+	// follows the one holding the entry named. The id a client passes is the newest one it is still
+	// holding, so nothing it already has is ever handed back to it a second time. Like Before it cuts
+	// with no Limit, because "everything newer than here" is a question with an answer.
+	After string
 	// All asks for the whole path by name: inspection and debugging.
 	All bool
 }
@@ -78,16 +83,24 @@ type Page struct {
 //
 // The unit is the whole turn, so the page boundaries are always legal ones: two neighbouring pages
 // concatenate back into the path with no gap and no overlap, and no page begins in the middle of a
-// turn. A request for the newest N and a following request with Before set to the oldest id it
-// returned are therefore the same walk a reader would do with a scrollbar.
+// turn. Asking for the newest N and then asking with Before set to the oldest id that page returned
+// is the same walk a reader would do with a scrollbar. After is that walk in the other direction:
+// forwards from a page's newestId, which is what a window that recycles what it has scrolled past
+// has to ask for.
 func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	// Every combination check lives here rather than in the HTTP layer, so that one rule about what
 	// the parameters mean has one home and is testable without a server.
 	if o.Before != "" && o.Anchor != "" {
 		return nil, errors.New("ir: before and anchor cannot be combined")
 	}
-	if o.All && (o.Limit > 0 || o.Before != "" || o.Anchor != "") {
-		return nil, errors.New("ir: all cannot be combined with limit, before or anchor")
+	if o.After != "" && (o.Before != "" || o.Anchor != "") {
+		// Two named places are two stretches of the path, and the request that means one but is
+		// answered with the other is the one a pager writes when it grows its window in both
+		// directions at once. Refused rather than given a precedence.
+		return nil, errors.New("ir: after cannot be combined with before or anchor")
+	}
+	if o.All && (o.Limit > 0 || o.Before != "" || o.After != "" || o.Anchor != "") {
+		return nil, errors.New("ir: all cannot be combined with limit, before, after or anchor")
 	}
 	// why refused rather than answered with no ceiling: an anchored page with no size grows until it
 	// has swallowed the path, so the answer to "centre a page of nothing in particular here" is the
@@ -95,13 +108,19 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	if o.Anchor != "" && o.Limit <= 0 {
 		return nil, errors.New("ir: anchor needs a limit: an anchor is a place in a page, not a page")
 	}
-	// The two ids are resolved once, here, so that "not on this path" is refused whatever else the
-	// request looked like — including an empty path, where there is nowhere for either to be, and a
-	// before with no limit, where an answer of the whole path would be a guess at what was asked.
-	bi, ai := -1, -1
+	// The three ids are resolved once, here, so that "not on this path" is refused whatever else the
+	// request looked like — including an empty path, where there is nowhere for any of them to be, and
+	// a before or after with no limit, where an answer of the whole path would be a guess at what was
+	// asked for.
+	bi, ai, afi := -1, -1, -1
 	if o.Before != "" {
 		if bi = indexOf(path, o.Before); bi < 0 {
 			return nil, fmt.Errorf("ir: before entry %q is not on the path", o.Before)
+		}
+	}
+	if o.After != "" {
+		if afi = indexOf(path, o.After); afi < 0 {
+			return nil, fmt.Errorf("ir: after entry %q is not on the path", o.After)
 		}
 	}
 	if o.Anchor != "" {
@@ -157,6 +176,22 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 		for ne+1 < len(starts) && edge(ne+1)-lo <= limit {
 			ne++
 			hi = edge(ne)
+		}
+	case o.After != "":
+		// The turn holding `after` is the one the caller is already standing on, whatever the id points
+		// at, so the page begins at the next turn and whole turns are added towards the tip. Walking
+		// this with a page's newestId reproduces the path forwards with no gap and no overlap — the
+		// mirror of the `before` walk, and the one a window that recycles behind itself depends on.
+		k := turnAt(starts, afi) + 1
+		if k < len(starts) {
+			lo, hi = starts[k], edge(k)
+			for k+1 < len(starts) && edge(k+1)-lo <= limit {
+				k++
+				hi = edge(k)
+			}
+		} else {
+			// after lies inside the last turn: nothing newer than it exists.
+			lo, hi = n, n
 		}
 	case o.Before != "":
 		// The turn containing before belongs to the newer page whatever the id points at, so the
