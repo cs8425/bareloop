@@ -33,10 +33,13 @@ export const state = {
   // this tab asked for and keeps, {count, oldest, newest, hasOlder, hasNewer, total, bytes, max} are
   // what the server says came back. `count` is the only one that answers "how much of the path is on
   // screen" — a page is turn-atomic, so it can arrive smaller than the number asked for.
-  // `mode` is 'tip' (the page ends at the newest message) or a parked page around `pivot` ('anchor':
-  // centred on the turn holding it, 'before': the page that ends just before it). `stale` counts live
+  // `mode` is 'tip' (the page ends at the newest message) or a parked page around `pivot`: 'anchor' centred on
+  // the turn holding it, 'before' the page ending just before it, 'after' the page starting just after it. The
+  // three parked modes are one idea — the window is a band that slides along the path — and 'before'/'after' are
+  // how a slide asks for its next position without re-fetching the half it is giving up. `stale` counts live
   // events this parked page refused to draw (events.js). `place` is the one exception: a field written
-  // just before a refresh and dropped by it — where to put the viewport once the rebuild lands.
+  // just before a refresh and dropped by it — where to put the viewport once the rebuild lands: an entry id,
+  // 'bottom', or 'top' for the edge a forward slide arrives on.
   // null until a session has been read, and reset when the tab looks at another session.
   win: null,
   pathIds: [], // ids on the path this tab is showing, root -> tip ([] until a session has loaded; a parked page knows its own page, not the whole conversation)

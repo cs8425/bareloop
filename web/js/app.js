@@ -24,7 +24,7 @@
 // This file wires the pieces, handles the global keys, and starts the transport.
 import { $ } from './util.js';
 import { isParked, state } from './state.js';
-import { EV_REFRESH, EV_SESSIONS, on } from './bus.js';
+import { EV_JUMP, EV_REFRESH, EV_SESSIONS, on } from './bus.js';
 import { fail, note, promptBox } from './ui.js';
 import { isPinned, scrollDown, wireScroll } from './scroll.js';
 import { bootNav, closeNav, isCollapsed, isMobile, navIsOpen, setNav } from './nav.js';
@@ -36,7 +36,7 @@ import { wireTools } from './tools.js';
 import { wireStats } from './stats.js';
 import { wireZoom } from './lightbox.js';
 import { flushStreams } from './transcript.js';
-import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions, renderStatus } from './session.js';
+import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions, renderStatus, jumpTo } from './session.js';
 import { onCompaction } from './events.js';
 import { connect } from './transport.js';
 import { bootIcons } from './icons.js';
@@ -226,6 +226,10 @@ function wire() {
   $('#btn-compact').onclick = compactNow;
   on(EV_REFRESH, () => refresh().catch(() => {}));
   on(EV_SESSIONS, () => loadSoon());
+  // A `→ id` link on a tool card can name an entry the sliding window is not showing. The transcript asks for
+  // it by id, this pages to it, and only when the server refuses does the reader hear anything — "off the
+  // path" is the one case where paging cannot help (js/transcript.js `jumpToEntry`).
+  on(EV_JUMP, (id) => jumpTo(id).catch((err) => note(`${id}: ${(err && err.message) || 'cannot be put on screen'}`)));
   // A hash change is somebody asking to look at another session: the back button, the forward button, or an
   // edited address bar. An id the list does not know is answered by reading the list once more - the session
   // may be brand new or just deleted - and then by putting the session actually on screen back into the URL.

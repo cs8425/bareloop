@@ -23,7 +23,11 @@ let lastScrollTop = -1;
 // from the bottom. On a fresh page the newest message is the right place, so opt out.
 if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual';
 
-const distanceFromBottom = (box) => box.scrollHeight - box.scrollTop - box.clientHeight;
+// distanceFromBottom is exported for the one other module that has to know how far the viewport is from the
+// end of the transcript: the window pager uses it to decide whether a reader has come back for the newest
+// part, and it needs the distance rather than the yes/no so it can make the reader clear some slack before
+// the edge fires again.
+export const distanceFromBottom = (box) => box.scrollHeight - box.scrollTop - box.clientHeight;
 
 export const isPinned = () => pinned;
 

@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { call } from './api.js';
 import { confirmBox, note } from './ui.js';
 import { markPinned, scrollDown } from './scroll.js';
-import { emit, EV_REFRESH } from './bus.js';
+import { emit, EV_JUMP, EV_REFRESH } from './bus.js';
 import { icon, swapIcon } from './icons.js';
 
 // Branching is switched off in the UI, and only in the UI. POST /tip still works and the log still holds a
@@ -965,7 +965,12 @@ export function linkToolResults() {
 function jumpToEntry(id) {
   const node = state.entries.get(id);
   if (!node) {
-    note(`${id} is not on the path being drawn`);
+    // "Not on screen" and "not on the path" are two different claims, and the transcript is now a window that
+    // slides: an entry a dozen pages back is on the path and simply not drawn. Asking the session module to
+    // page to it is the honest move, and the endpoint answers 400 when an id is truly off the path — that is
+    // the one case worth telling the reader about, and app.js says it. Claiming "not on the path" here would
+    // be a lie about the log and a dead end for somebody holding a link that works.
+    emit(EV_JUMP, id);
     return;
   }
   // A pointer that lands on a fold you cannot see never arrived. The card's `→ id` says the output is here,
