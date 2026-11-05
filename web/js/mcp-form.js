@@ -16,19 +16,27 @@ import { $, el } from './util.js';
 // URL box, and an http entry has no business showing a command box — the daemon refuses the mismatch for a
 // transport policy (`agent/validatePolicy`: a caFile, an insecure TLS, a proxy on a server it starts itself)
 // and says nothing about the rest.
+//
+// The order below IS the order the card is drawn in, and it is a reading order: the card's own switch, then
+// the transport's half, then how the endpoint is reached (url, headers, CA file, proxy, TLS), then the tool
+// policy. A switch row spans every column, so where one lands is not cosmetic — it reads as being *about*
+// whatever box sits above it. `disabled` used to be the row under the proxy field, and there it reads as
+// "do not use the proxy"; it is now the first row, which is what the summary line (`http · off`) already
+// says it is. The TLS switch sits after CA file and proxy for the same reason: its track falls under
+// "CA file", the setting it overrides, not under a routing box it has nothing to do with.
 const FIELDS = [
+  { key: 'disabled', label: 'off — never start or connect this server', kind: 'check' },
   { key: 'name', label: 'name', hint: 'what the tools are named after when two servers collide; the command or URL is used when it is empty', ph: 'mcp-vroot' },
   { key: 'type', label: 'transport', kind: 'select', options: [['', 'stdio — start a command'], ['http', 'http — connect to a URL']], hint: 'empty means stdio, which is what the daemon writes back' },
   { key: 'command', label: 'command', show: 'stdio', ph: 'mcp-server' },
   { key: 'args', label: 'args', kind: 'lines', show: 'stdio', hint: 'one argument per line, exactly as the shell would have received them', list: true },
-  { key: 'env', label: 'env', kind: 'lines', show: 'stdio', hint: 'one KEY=value per line', kv: true },
+  { key: 'env', label: 'env', kind: 'lines', show: 'stdio', hint: 'one KEY=value per line — a list in the daemon’s own keys, not a map: ["PATH=/usr/bin"]' },
   { key: 'dir', label: 'working dir', show: 'stdio' },
   { key: 'url', label: 'url', show: 'http', ph: 'http://127.0.0.1:8200/mcp' },
-  { key: 'headers', label: 'headers', kind: 'lines', show: 'http', hint: 'one Key: value per line (Authorization: Bearer …)', kv: true },
+  { key: 'headers', label: 'headers', kind: 'lines', show: 'http', kv: true, ph: 'Authorization: Bearer …', hint: 'one “Key: value” per line — a map in the daemon’s own keys, so it is sent as {"Authorization":"Bearer …"}' },
   { key: 'caFile', label: 'CA file', show: 'http', hint: 'verify this server against this PEM bundle only' },
-  { key: 'insecureTLS', label: 'accept an unverifiable certificate', kind: 'check', show: 'http', hint: 'https only; the daemon refuses it on a stdio entry' },
   { key: 'proxy', label: 'proxy', show: 'http', ph: 'socks5://127.0.0.1:1080', hint: 'socks5://, socks5h://, http:// or https:// — user:password@host:port if it asks for one; “direct” connects without a proxy at all, ignoring HTTP_PROXY; empty leaves the environment and the session’s own proxy in charge' },
-  { key: 'disabled', label: 'off — never start or connect this server', kind: 'check' },
+  { key: 'insecureTLS', label: 'accept an unverifiable certificate', kind: 'check', show: 'http', hint: 'https only; the daemon refuses it on a stdio entry' },
   { key: 'toolPrefix', label: 'tool prefix', hint: 'vr turns fs_read into vr_fs_read; empty publishes the tool under its own name' },
   { key: 'disabledTools', label: 'tools off', kind: 'lines', hint: 'one per line; the tool’s own name or a glob like write_*', list: true },
   { key: 'structuredContent', label: 'structuredContent', kind: 'select', options: [['', 'auto (session default)'], ['auto', 'auto'], ['fallback', 'fallback — only when there is no text'], ['always', 'always'], ['drop', 'never send it']] },
@@ -40,24 +48,49 @@ const KNOWN = new Set(FIELDS.map((f) => f.key));
 // A widget's value to the entry, and back. Empty means "do not write the key" for every one of them: the
 // daemon's own encoder omits all of these, and an explicit "" is a different answer from an absent key for
 // `structuredContent` (the session default comes back) — so this form omits rather than clearing.
+
+// Where a `K=V` / `Key: value` line splits: whichever separator comes first, because a value is allowed to
+// hold the other one (`Cookie: a=b`, `X-Ref: http://x`). The box is written with `: ` and an older paste uses
+// `=`, so both have to read the same way.
+const sepOf = (line) => {
+  const c = line.indexOf(':');
+  const e = line.indexOf('=');
+  if (c < 0) return e;
+  if (e < 0) return c;
+  return Math.min(c, e);
+};
+
+// The pairs a `kv` field holds, from whichever shape the value arrives in. `headers` is a map[string]string
+// and the daemon answers it with an object, while the JSON tab is free-hand and can carry a list of `K=V`
+// strings; accepting both is what keeps `0: A=b` — an index wearing a header name — out of the box. That was
+// not hypothetical: a stdio `env` (`[]string` in Go, a map to this form) came back out as ["0=A=b"], a valid
+// []string the child process then read as a variable called 0.
+function pairsOf(value) {
+  const lines = Array.isArray(value) ? value.map(String) : Object.entries(value || {}).map(([k, v]) => `${k}: ${v}`);
+  const out = [];
+  for (const line of lines) {
+    const i = sepOf(line);
+    if (i > 0) out.push([line.slice(0, i).trim(), line.slice(i + 1).trim()]);
+  }
+  return out;
+}
+
 function readField(f, node) {
   if (f.kind === 'check') return node.checked || undefined;
   const raw = node.value;
+  // `kv` is asked before `lines` and that order is the whole point: a map arrives in the box as lines too, and
+  // reading those lines as a list writes ["K=V"] where the daemon wants {"K":"V"} — which it answers with
+  // `cannot unmarshal array into Go struct field Config.mcp.0.headers of type map[string]string`.
+  if (f.kv) {
+    const out = {};
+    for (const [k, v] of pairsOf(raw.split('\n'))) out[k] = v;
+    return Object.keys(out).length ? out : undefined;
+  }
   if (f.kind === 'lines') {
     const parts = raw.split('\n').map((s) => s.trim()).filter(Boolean);
     return parts.length ? parts : undefined;
   }
   const v = raw.trim();
-  if (f.kv) {
-    const out = {};
-    for (const line of v ? v.split('\n') : []) {
-      const i = line.indexOf(line.includes(':') && !line.includes('=') ? ':' : '=');
-      if (i < 0) continue;
-      const k = line.slice(0, i).trim();
-      if (k) out[k] = line.slice(i + 1).trim();
-    }
-    return Object.keys(out).length ? out : undefined;
-  }
   return v === '' ? undefined : v;
 }
 
@@ -76,7 +109,8 @@ function writeField(f, node, value) {
     return;
   }
   if (f.kv) {
-    node.value = Object.entries(value || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+    // One pair per line, in the `Key: value` shape this field's own hint has always promised.
+    node.value = pairsOf(value).map(([k, v]) => `${k}: ${v}`).join('\n');
     return;
   }
   if (f.kind === 'lines') {
@@ -163,10 +197,21 @@ export function wireMcpEditor({ form, json, addBtn, onEdit }) {
           o.value = v;
           node.appendChild(o);
         }
+      } else if (f.kind === 'check') {
+        // A boolean row is a switch: `dialog input[type=checkbox]` paints the track and `.mcp-f.check` puts
+        // the words after it. There was no branch here, so `disabled` and `insecureTLS` fell through to the
+        // text input below and drew an empty box no click could change — the value still survived a
+        // round-trip, because `checked` was being set and read as a plain property on that input, which is
+        // why the JSON tab and the summary line were right while the form said nothing about either.
+        node = el('input');
+        node.type = 'checkbox';
+        node.setAttribute('role', 'switch'); // every other boolean in this dialog says "switch", and the paint
+        // is `input[type=checkbox]`, not the role — a screen reader should not hear "unchecked" for a track.
       } else if (f.kind === 'lines') {
         node = el('textarea');
         node.rows = 2;
         node.spellcheck = false;
+        if (f.ph) node.placeholder = f.ph; // an empty KV box reads better with its own shape written in it
       } else {
         node = el('input');
         node.type = 'text';

@@ -252,10 +252,10 @@ server, while a patch that only spells out `false` — which is what a UI sends 
 reconnects nothing. The transport a policy needs is `http.DefaultTransport` cloned with only the half the
 policy names replaced, so trusting one CA cannot change anything else about how the endpoint is dialled — the
 proxy from the environment surviving a certificate policy is the property a test checks, and so is a
-certificate policy surviving a proxy. Neither TLS field has a control of its own in
-the settings dialog: on `llm` they are set in `data/<id>/config.json` or by
-`PATCH` (a dialog save keeps them, because it sends back the fields it did not draw), and on an `mcp[]`
-entry they travel with the JSON box that already edits `url` and `headers`.
+certificate policy surviving a proxy. On `llm` neither TLS field has a control of its own in the settings
+dialog: they are set in `data/<id>/config.json` or by `PATCH` (a dialog save keeps them, because it sends
+back the fields it did not draw). On an `mcp[]` entry both have one — a CA file box and a switch — in the
+form, beside the `url` and `headers` they apply to.
 
 ### Reaching an endpoint through a proxy
 

@@ -1477,6 +1477,11 @@ dialog.zoom:not([open]) { display: none; }
 .mcp-f.check { grid-column: 1 / -1; grid-template-columns: auto 1fr; grid-template-rows: auto; align-items: center; gap: 7px; }
 .mcp-f.check > input { grid-column: 1; width: auto; }
 .mcp-f.check > span { order: 1; font-size: var(--t-2); color: var(--fg); }
+/* The `width: auto` above exists to undo the 100% the text fields get, and it also outranks the dialog's
+   switch (two classes beat an attribute), which paints a track of nothing: an appearance:none box has no
+   content to size itself from, so both boolean rows measured 0x20 until this line. Reading --sw-w back is
+   what keeps 34px owned by one rule. */
+dialog .mcp-f.check > input[type='checkbox'] { width: var(--sw-w); }
 /* The transport decides which half of the card means anything. */
 .mcp-server[data-type='stdio'] .show-http, .mcp-server[data-type='http'] .show-stdio { display: none; }
 /* What an edit has not done yet. The hint is already the sentence that explains the list, so it is the right
