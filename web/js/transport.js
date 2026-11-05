@@ -18,10 +18,24 @@ const MIN_DELAY = 600; // first retry: fast enough that a restarting server cost
 const MAX_DELAY = 15000; // and never more than a quarter of a minute between attempts
 const FALLBACK_AFTER = 3; // attempts before a second channel opens so the user still sees updates
 
+// The daemon tells each connection where its event counter got to, about every twenty seconds:
+// `{"type":"heartbeat","seq":821,"ts":…}`, written by the write pump in ws.go and deliberately not
+// published, so it takes no stamp of its own and joins no replay buffer. That one number is why this file
+// does not have to guess any more: every event is stamped as it leaves manager.go, every frame carries its
+// stamp, and this tab subscribes to everything — so a counter ahead of state.seq is an event that was
+// written for this page and never arrived. Nothing is polled to find that out.
+const BEAT_MS = 20000; // the daemon's interval, before its own jitter
+const BEAT_SLACK = 1.25; // ...and how far early or late it is allowed to be
+const BEAT_BEHIND = 2; // consecutive beats behind the counter before the page is re-read
+const BEAT_GIVEUP = 3.5; // intervals without a beat before a silent socket is dropped and reopened
+
 let wsAttempts = 0;
 let ws = null;
 let retry = null; // the pending reconnect, if any
 let stopFallback = null; // teardown of the live fallback, or null while the websocket carries events
+let beats = 0; // beats heard on this socket; the first one only says where the page stands
+let ahead = 0; // consecutive beats that found the page behind the counter
+let beatTimer = null; // the "no beat has arrived" alarm, armed once a first beat has been seen
 
 export function connect() {
   if (retry) {
@@ -58,6 +72,12 @@ export function connect() {
       note('websocket back up');
     }
     setConn(true, 'websocket', 'ws');
+    // The beat bookkeeping belongs to a socket, not to the tab: this one has heard nothing yet, so its
+    // first beat is a baseline and its silence is not evidence of anything.
+    clearTimeout(beatTimer);
+    beatTimer = null;
+    beats = 0;
+    ahead = 0;
     ws.send(JSON.stringify({ type: 'subscribe', session: '' }));
     ws.send(JSON.stringify({ type: 'snapshot', session: state.id || '' }));
     if (backFromADrop && state.id) refresh().catch(() => {});
@@ -70,10 +90,17 @@ export function connect() {
       return;
     }
     if (msg.type === 'reply' || msg.type === 'reply_error') return; // actions go over REST
+    // A heartbeat is transport, not an agent event. It stays out of handleEvent for two reasons: it is not
+    // something that happened in a session, and its number is the counter's value — running it through the
+    // event path would raise state.seq from the very frame whose job is to notice the page is behind, and
+    // the comparison could never fail again.
+    if (msg.type === 'heartbeat') return onBeat(msg);
     handleEvent(msg);
   };
   ws.onclose = () => {
     ws = null;
+    clearTimeout(beatTimer);
+    beatTimer = null;
     wsAttempts++;
     if (wsAttempts >= FALLBACK_AFTER) degrade();
     schedule();
@@ -85,6 +112,61 @@ export function connect() {
       /* the close handler deals with it */
     }
   };
+}
+
+// onBeat is the entire self-healing path: the counter moved and this page never saw the frames that moved
+// it, so the session is re-read exactly the way a reconnect re-reads it, with one line in the corner to
+// say why the page moved on its own. A page that silently redraws itself is a page nobody trusts after.
+//
+// The first beat is only a baseline. A tab cannot be expected to hold stamps from before it subscribed,
+// and a fresh page on a busy daemon is always behind by everything the other sessions did while it loaded
+// — state.seq is the floor of what this page received (state.js:46, raised at events.js:35, never lowered,
+// not even when the page switches sessions), which is the only thing a beat is worth comparing against.
+//
+// Then twice in a row, not once, because two separate things are ahead of their own frames: the daemon
+// stamps an event before the hub queues it, so a beat can report a number whose frame has not even been
+// queued yet, and the stamp and the queue are not the same lock, so two publishers can arrive in the
+// opposite order. Both sort themselves out in milliseconds while beats are twenty seconds apart, so the
+// second beat is a confirmation rather than a hunch. The trade is stated plainly: a page never redraws
+// itself over a frame that was merely late, and a frame that really was lost waits one extra beat — so
+// the worst case from loss to repair is two intervals, tens of seconds instead of never.
+function onBeat(msg) {
+  beats++;
+  armBeatAlarm();
+  if (beats < 2) return;
+  // A frame with no number to compare is read as "nothing to compare", never as "behind": a parse
+  // failure is not worth a page redraw.
+  ahead = typeof msg.seq === 'number' && msg.seq > state.seq ? ahead + 1 : 0;
+  if (ahead < BEAT_BEHIND) return;
+  ahead = 0;
+  note(`the socket never delivered ${msg.seq - state.seq} event(s) — re-reading the session`);
+  if (state.id) refresh().catch(() => {});
+}
+
+// armBeatAlarm watches for the absence of beats. A peer that dies without a close frame is invisible to
+// JS — no error, no close, only silence — and silence is also what an idle daemon looks like, so the only
+// way to tell them apart is that the daemon promised to speak. When it stops, the connection is half
+// open and the one fix available is another one: closing it runs the existing reconnect path, and that
+// path already re-reads the session because it knows it was dropped.
+//
+// Sleeping laptops fall out of this the right way too: the alarm cannot fire while the tab is frozen, so
+// it fires the moment the machine wakes, when a half-open socket is exactly what is waiting there.
+//
+// It is armed only after the first beat has arrived, so a page newer than its daemon keeps behaving
+// exactly as it did before. A client that reconnects every 90 seconds because it is waiting for a frame
+// an older server never learned to send would be a worse bug than the one this fixes.
+function armBeatAlarm() {
+  clearTimeout(beatTimer);
+  if (!beats) return;
+  beatTimer = setTimeout(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return; // onclose is already dealing with it
+    note('the socket stopped beating — reconnecting');
+    try {
+      ws.close();
+    } catch {
+      /* the close handler deals with it */
+    }
+  }, BEAT_MS * BEAT_SLACK * BEAT_GIVEUP);
 }
 
 // schedule waits, then knocks again: exponential, capped, and never the last attempt. The label says
