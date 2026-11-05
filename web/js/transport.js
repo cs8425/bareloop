@@ -34,7 +34,10 @@ let ws = null;
 let retry = null; // the pending reconnect, if any
 let stopFallback = null; // teardown of the live fallback, or null while the websocket carries events
 let beats = 0; // beats heard on this socket; the first one only says where the page stands
-let ahead = 0; // consecutive beats that found the page behind the counter
+let ahead = 0; // consecutive beats that counted fewer frames than the daemon published
+let applied = 0; // stamped frames this socket handed to handleEvent, counted from the ruler beat
+let appliedBase = 0; // `applied` as of the beat the ruler was laid on
+let counterBase = null; // the counter as of that beat, or null until the first beat has been measured
 let beatTimer = null; // the "no beat has arrived" alarm, armed once a first beat has been seen
 
 export function connect() {
@@ -78,6 +81,9 @@ export function connect() {
     beatTimer = null;
     beats = 0;
     ahead = 0;
+    applied = 0;
+    appliedBase = 0;
+    counterBase = null;
     ws.send(JSON.stringify({ type: 'subscribe', session: '' }));
     ws.send(JSON.stringify({ type: 'snapshot', session: state.id || '' }));
     if (backFromADrop && state.id) refresh().catch(() => {});
@@ -95,6 +101,9 @@ export function connect() {
     // event path would raise state.seq from the very frame whose job is to notice the page is behind, and
     // the comparison could never fail again.
     if (msg.type === 'heartbeat') return onBeat(msg);
+    // The count a beat is compared against is taken here, on the way in, and only for frames that carry a
+    // stamp: the two numbers have to be counted in the daemon's own units or they mean different things.
+    if (typeof msg.seq === 'number') applied++;
     handleEvent(msg);
   };
   ws.onclose = () => {
@@ -118,10 +127,21 @@ export function connect() {
 // it, so the session is re-read exactly the way a reconnect re-reads it, with one line in the corner to
 // say why the page moved on its own. A page that silently redraws itself is a page nobody trusts after.
 //
-// The first beat is only a baseline. A tab cannot be expected to hold stamps from before it subscribed,
-// and a fresh page on a busy daemon is always behind by everything the other sessions did while it loaded
-// — state.seq is the floor of what this page received (state.js:46, raised at events.js:35, never lowered,
-// not even when the page switches sessions), which is the only thing a beat is worth comparing against.
+// What a beat answers is a count, not a watermark, and that difference is the whole design. The first
+// version asked whether the counter had run past state.seq, and state.seq is a maximum (events.js:35
+// raises it to whichever stamp is largest), so a hole in the middle is invisible: the frame after the hole
+// raises the maximum over it and every later beat reads "nothing behind". Measured that way a page sat on a
+// finished run — the exact shape this exists to catch — for as long as the tab stayed open.
+//
+// So the question is arithmetic over counts instead: between the beat the ruler was laid on and this one,
+// the daemon published N stamped frames and this socket handed M of them to handleEvent. M below N is a
+// hole, whatever the stamps themselves were. Counts are immune to the three things a watermark is not: a
+// frame missing in the middle still counts short, so it is seen; a frame that arrives late (the daemon
+// stamps before the hub queues and they are not the same lock, so delivery can invert, and a frame stamped
+// one moment before a beat can land one moment after it) just shows up in a later window and closes its own
+// deficit, which is why a single short beat is not yet evidence; and a page that dialed after the process
+// started is behind by nothing, because both numbers are measured from the same beat — the head start that
+// used to need a baseline never enters the subtraction.
 //
 // Then twice in a row, not once, because two separate things are ahead of their own frames: the daemon
 // stamps an event before the hub queues it, so a beat can report a number whose frame has not even been
@@ -133,13 +153,36 @@ export function connect() {
 function onBeat(msg) {
   beats++;
   armBeatAlarm();
-  if (beats < 2) return;
   // A frame with no number to compare is read as "nothing to compare", never as "behind": a parse
   // failure is not worth a page redraw.
-  ahead = typeof msg.seq === 'number' && msg.seq > state.seq ? ahead + 1 : 0;
+  if (typeof msg.seq !== 'number') return;
+  if (counterBase === null) {
+    // The first beat is where the ruler is laid down. From here on both sides of the comparison are
+    // deltas, which is what keeps everything this page could not have received out of the arithmetic.
+    counterBase = msg.seq;
+    appliedBase = applied;
+    return;
+  }
+  if (msg.seq < counterBase) {
+    // A counter that went backwards means the daemon restarted underneath a socket that never noticed.
+    // Lay the ruler down again rather than subtract into negative numbers for the rest of the tab's life.
+    counterBase = msg.seq;
+    appliedBase = applied;
+    ahead = 0;
+    return;
+  }
+  const expected = msg.seq - counterBase; // frames published since the ruler was laid
+  const actual = applied - appliedBase; // frames this socket was handed
+  if (expected > actual) ahead++;
+  else ahead = 0; // a deficit that closes on its own was a late frame, and a late frame is not a lost one
   if (ahead < BEAT_BEHIND) return;
   ahead = 0;
-  note(`the socket never delivered ${msg.seq - state.seq} event(s) — re-reading the session`);
+  const missing = expected - actual;
+  // Re-reading moves the ruler with it: the REST reply fills the transcript without ever passing through
+  // this socket, so the hole would still count short on the next beat and the page would re-read forever.
+  counterBase = msg.seq;
+  appliedBase = applied;
+  note(`the socket never delivered ${missing} of ${expected} event(s) — re-reading the session`);
   if (state.id) refresh().catch(() => {});
 }
 
