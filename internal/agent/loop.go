@@ -490,8 +490,10 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		s.emitState()
 
 		// Remember the exact payload that goes out: the summary request reuses it as its
-		// prefix so the provider's KV cache stays warm (spec §5.2).
-		s.rememberSent(built.All(), tools)
+		// prefix so the provider's KV cache stays warm (spec §5.2). The ids travel with it because a
+		// payload is only worth its bytes while it is still the front of the path, and nothing but the ids
+		// can tell that a turn later.
+		s.rememberSent(built.All(), asm.EntryIDs(built), tools)
 		s.logPayload(turn, built, tools)
 
 		entry, streamID, aborted := s.generate(ctx, built, tools, turn)
@@ -671,16 +673,13 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	defer s.setGenerating(false)
 	streamID := fmt.Sprintf("%s-t%d-%d", s.ID, turn, time.Now().UnixMilli())
 	start := time.Now()
-	req := llm.Request{
-		Model:           cfg.LLM.Model,
-		Messages:        built.All(),
-		Tools:           tools,
-		Stream:          true,
-		Temperature:     cfg.Temperature,
-		MaxTokens:       cfg.MaxTokens,
-		ReasoningEffort: cfg.ReasoningEffort,
-		Extra:           cfg.Extra,
-	}
+	// Cut from the same identity the summary is cut from (see requestIdentity): the KV cache is keyed on
+	// bytes, and this request is the prefix every later call of this conversation wants to reuse — the
+	// first part of a summary chain above all. Stream is not part of that identity, so it stays here.
+	req := requestIdentity(cfg)
+	req.Messages = built.All()
+	req.Tools = tools
+	req.Stream = true
 	// Ask the provider, retrying only what a retry can fix. Two extra attempts cover a busy
 	// llama.cpp or a dropped connection; a request the server rejected (400, 401, 413 …) is not
 	// retried, because the same bytes will keep failing the same way.
@@ -1057,18 +1056,21 @@ func orEmpty(raw json.RawMessage) json.RawMessage {
 }
 
 // rememberSent stores the exact payload that went out, for the summary request prefix
-// (spec §5.2: the prefix must be the last payload actually sent, same tools and model).
-func (s *Session) rememberSent(msgs []asm.Message, tools []llm.Tool) {
+// (spec §5.2: the prefix must be the last payload actually sent, same tools and model), together with
+// the entry ids it carried — without them the session cannot tell a prefix from a near-miss, and a
+// near-miss is a full prefill dressed up as a cache hit.
+func (s *Session) rememberSent(msgs []asm.Message, ids []string, tools []llm.Tool) {
 	s.mu.Lock()
-	s.lastSent = msgs
-	s.lastTools = tools
+	s.lastSent, s.lastIDs, s.lastTools = msgs, ids, tools
 	s.mu.Unlock()
 }
 
-func (s *Session) lastSentPayload() ([]asm.Message, []llm.Tool) {
+// lastSentPayload is the last request's payload, the entry ids it carried and the tool array it was
+// sent with, or nils when no request has gone out in this process.
+func (s *Session) lastSentPayload() ([]asm.Message, []string, []llm.Tool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.lastSent, s.lastTools
+	return s.lastSent, s.lastIDs, s.lastTools
 }
 
 // guardFit is the last line of defence before a send (spec §3.10): refuse to send a payload

@@ -139,8 +139,11 @@ type Session struct {
 	provider llm.Provider
 
 	// lastSent is the payload the session actually sent last, reused verbatim as the prefix
-	// of the summary request (spec §5.2).
+	// of the summary request (spec §5.2). lastIDs names the entry behind each of those messages
+	// (asm.EntryIDs), which is the only way to know whether that payload is still a prefix of the
+	// path — a KV cache is keyed on bytes, so a payload that differs anywhere is worth nothing.
 	lastSent  []asm.Message
+	lastIDs   []string
 	lastTools []llm.Tool
 
 	// tmu guards toolSnapshot. It is deliberately not mu: the tool snapshot is read by build(), and

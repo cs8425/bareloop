@@ -175,6 +175,47 @@ func (b *Built) All() []Message {
 	return append(out, b.Messages...)
 }
 
+// EntryIDs names the entry behind each message of the payload: a fingerprint of the system prompt
+// first when there is one, then one id per Built.Entries.
+//
+// It is the payload's own description of what it carries, which is the only way a later request can ask
+// "is what I would like to reuse still the front of the path?" — a question no size can answer, because
+// two different paths can be exactly as long. The system head is a fingerprint rather than an id because
+// editing the system prompt changes every byte of the prompt while adding no entry at all, and a caller
+// comparing ids would call that a prefix.
+//
+// Entries and Messages are parallel by construction (Assemble appends them in step; repair keeps them
+// parallel when it drops orphans and when it synthesises a result), so this is a mapping and not a
+// lookup — the same fact the compaction chain cuts its parts with.
+func EntryIDs(b *Built) []string {
+	if b == nil {
+		return nil
+	}
+	out := make([]string, 0, len(b.Entries)+1)
+	if b.System != "" {
+		out = append(out, fingerprint(b.System))
+	}
+	for _, e := range b.Entries {
+		if e == nil {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// fingerprint is FNV-1a, because it needs no import and an entry id is not a security decision.
+func fingerprint(s string) string {
+	const prime = uint64(1099511628211)
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime
+	}
+	return "system:" + strconv.FormatUint(h, 16)
+}
+
 // Payload is the assembler input: "the effective path".
 type Payload struct {
 	System string

@@ -171,35 +171,9 @@ func TestClipEntryLeavesSmallEntriesAlone(t *testing.T) {
 	}
 }
 
-func TestChunkRequestCarriesThePreviousSummary(t *testing.T) {
-	p := Params{ThresholdPct: 70, KeepTargetPct: 20, SummaryMaxPct: 70, Temperature: 0.2, Marker: DefaultMarker}
-	call := p.ChunkRequest(40960, region(2), "", 1, 3, false, "")
-	if len(call.Messages) != 2 || call.Messages[0].Role != "system" || call.Messages[1].Role != "user" {
-		t.Fatalf("messages = %+v", call.Messages)
-	}
-	sys, _ := call.Messages[0].Content.(string)
-	if !strings.Contains(sys, "part 1 of 3") {
-		t.Fatalf("the model must know it is reading part of a longer conversation: %s", sys)
-	}
-	if call.MaxTokens != p.ChunkMaxTokens(40960) {
-		t.Fatalf("max_tokens = %d, want the acceptance cap %d", call.MaxTokens, p.ChunkMaxTokens(40960))
-	}
-	next := p.ChunkRequest(40960, region(2), "PARTIAL SUMMARY SO FAR", 2, 3, false, "keep the file names")
-	body, _ := next.Messages[1].Content.(string)
-	if !strings.Contains(body, "PARTIAL SUMMARY SO FAR") {
-		t.Fatal("the chain only works if the previous answer is handed to the next call")
-	}
-	if !strings.Contains(body, "New part of the conversation") {
-		t.Fatal("the model must be able to tell the partial summary from the new part")
-	}
-	sys2, _ := next.Messages[0].Content.(string)
-	if !strings.Contains(sys2, "keep the file names") {
-		t.Fatal("the user's instruction must reach every part")
-	}
-	if single := p.ChunkRequest(40960, region(2), "", 1, 1, false, ""); strings.Contains(single.Messages[0].Content.(string), "part 1 of 1") {
-		t.Fatal("a single part needs no counter")
-	}
-}
+// TestChunkRequestCarriesThePreviousSummary moved to iterative_cache_test.go, where the shape of a
+// chain call is tested as the cache question it is: which bytes a part begins with is the whole reason
+// the chain is affordable, and the wording it used to assert on is now only half the contract.
 
 func TestChunkInstructionNote(t *testing.T) {
 	if got := ChunkInstructionNote(1, false); got != "" {

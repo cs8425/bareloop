@@ -256,6 +256,17 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 
 	before, available := s.usedNow()
 	res.Before = before
+	// The size table walks the boundary — that is what its telescoping sum is for (§2.4) — but it must
+	// never price one entry, so the summary's own arithmetic gets a ruler of its own. It reads the same
+	// usage the table reads, per reply: between two of the server's own prompt counts sits the measured
+	// size of everything in between, spread over the entries that caused it rather than dropped on the
+	// last one. What the server never counted falls back to an estimate, and only that estimate is
+	// calibrated against the request total (§0).
+	var realTotal int
+	if available {
+		realTotal = before
+	}
+	ruler := compact.NewRuler(built.Entries, built.StructuredCap, realTotal)
 	if nctx <= 0 {
 		// Without n_ctx there is no basis for a budget, so refuse and keep everything (§3.10).
 		res.Skipped = string(compact.ReasonNCTXUnknown)
@@ -300,22 +311,24 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		sumRegion = region[:plan.Cut]
 	}
 	if p.SummaryMode != compact.ModeIterative && p.SummaryMode != compact.ModeMapReduce &&
-		compact.NeedsIterative(sumRegion, sizes, nctx, p) {
+		compact.NeedsIterative(sumRegion, ruler, nctx, p) {
 		s.logf("compaction (%s): region of %d tokens does not fit a %d-token request, summarising serially",
-			trig, compact.RegionTokens(sumRegion, sizes), p.ChunkFit(nctx))
+			trig, compact.RegionTokens(sumRegion, ruler), p.ChunkFit(nctx))
 		p.SummaryMode = compact.ModeIterative
 	}
 
-	// The prefix of the summary request is the last payload actually sent (§5.2). After a
-	// process restart nothing was sent by this process, so fall back to the payload the
-	// assembler produces now and say so in the log.
-	prefix, prefixTools := s.lastSentPayload()
-	if len(prefix) == 0 {
-		prefix = built.All()
-		s.logf("compaction (%s): no payload sent yet in this process, summary prefix rebuilt from storage", trig)
-	}
-	if len(prefixTools) == 0 {
-		prefixTools = tools
+	// The summary request is cut from the last payload actually sent (§5.2), because that is the byte
+	// sequence the provider's KV cache holds: a first call that starts anywhere else is a new
+	// conversation, and "new conversation" at 180k tokens is eight minutes of GPU. After a restart
+	// nothing was sent by this process, so the payload assembled now is the only honest prefix, and
+	// the log says so.
+	sentMsgs, sentIDs, sentTools := s.lastSentPayload()
+	refs := summaryPayload(sentMsgs, sentIDs, sentTools, built.All(), asm.EntryIDs(built), tools, len(built.Entries))
+	if !refs.warm {
+		// Two different reasons, one honest sentence: nothing was sent by this process (a restart), or
+		// something was and the path has moved since (a time travel, a deleted entry). Either way the
+		// provider has nothing to reuse and the summary is worth what a full prefill costs.
+		s.logf("compaction (%s): the payload this process sent is not a prefix of the path, so the summary is cut from the one assembled now: expect a full prefill", trig)
 	}
 
 	summaryModel := cfg.LLM.Model
@@ -333,7 +346,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		)
 		for attempt := 1; attempt <= tries; attempt++ {
 			res.Attempts = attempt
-			text, size, err = s.summarize(ctx, cfg, p, plan, region, sizes, prefix, prefixTools, extra, attempt)
+			text, size, err = s.summarize(ctx, cfg, p, plan, region, ruler, refs, extra, attempt)
 			if err != nil {
 				s.logf("compaction (%s): attempt %d failed: %v", trig, attempt, err)
 				extra = ""
@@ -386,11 +399,16 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 // summarizeIterative runs the serial rolling summary (compact.ModeIterative, and the automatic
 // fallback whenever the region is bigger than one summariser call can carry). Serial on purpose:
 // this is a local model, so parallel parts would queue on the same GPU instead of helping.
+//
+// Every part is asked in the shape of §3.1 (see compact.ChunkRequest): the first part IS the prefix
+// the loop already put in the provider's cache, and the parts after it are the payload's own
+// messages behind the running summary. Cutting the region into parts is a decision about bytes, so
+// it is made against the ruler and reported next to what the server counted.
 func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
-	cut []*ir.Entry, sizes *asm.Sizes, extra string, attempt int) (string, int, error) {
+	cut []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int) (string, int, error) {
 
 	nctx := s.nctxLocked()
-	chunks := compact.PlanChunks(cut, sizes, nctx, p)
+	chunks := compact.PlanChunks(cut, ruler, nctx, p)
 	if len(chunks) == 0 {
 		return "", 0, errors.New("nothing to summarise")
 	}
@@ -405,7 +423,7 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 	}
 	if note := compact.ChunkInstructionNote(len(chunks), clipped); note != "" {
 		s.logf("compaction: %s (%d tokens to read, %d tokens fit one request)", note,
-			compact.RegionTokens(cut, sizes), p.ChunkFit(nctx))
+			compact.RegionTokens(cut, ruler), p.ChunkFit(nctx))
 	}
 
 	prev, reported := "", 0
@@ -413,16 +431,39 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		if err := ctx.Err(); err != nil {
 			return "", 0, err
 		}
-		call := p.ChunkRequest(nctx, c.Entries, prev, i+1, len(chunks), plan.Split, extra)
-		req := llm.Request{
-			Model:       cfg.LLM.Model,
-			Messages:    call.Messages,
-			Tools:       call.Tools,
-			Stream:      false,
-			Temperature: &call.Temperature,
-			MaxTokens:   call.MaxTokens,
-			Extra:       cfg.Extra,
+		in := compact.ChunkInput{
+			Head:  refs.head,
+			Tools: refs.tools,
+			Prev:  prev,
+			Index: i + 1, Total: len(chunks),
+			Split: plan.Split,
+			Extra: extra,
 		}
+		// Entry number k of the region is message number k after the system head: the assembler builds
+		// the two lists in step (§2.1), so a part boundary is an offset rather than a lookup.
+		//
+		// Part 1 takes the payload from its first message through the end of the part — that slice is
+		// the cache hit, and the request that starts anywhere else pays for the conversation again.
+		// It is also the whole part, so it carries no Chunk of its own.
+		if i == 0 {
+			in.Prefix, _ = refs.through(c.Start + len(c.Entries))
+		}
+		if len(in.Prefix) == 0 {
+			if msgs, ok := refs.messages(c.Start, c.Start+len(c.Entries)); ok {
+				in.Chunk = msgs
+			} else {
+				// The part is outside anything this process sent: a time travel, a deleted entry, or a
+				// path rebuilt after a restart. Flattening it is worse for the cache and it loses a
+				// structuredContent document the model would otherwise have been given, so it says so —
+				// silently summarising less than the log claims is how this whole investigation started.
+				s.logf("compaction: part %d/%d is outside the payload this process sent; its %d entries go as a flat transcript",
+					i+1, len(chunks), len(c.Entries))
+				in.Chunk = []asm.Message{{Role: "user",
+					Content: "Conversation to compress:\n\n" + compact.Transcript(c.Entries)}}
+			}
+		}
+		call := p.ChunkRequest(nctx, in)
+		req := summaryRequest(cfg, call)
 		s.emit(Event{Type: EvtCompact, Data: map[string]any{
 			"stage": "summarizing", "attempt": attempt, "part": i + 1, "parts": len(chunks)}})
 		res, err := s.provider.Complete(ctx, req)
@@ -436,6 +477,19 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		if res.Usage != nil {
 			reported = res.Usage.CompletionTokens
 		}
+		// The three numbers that used to live in three different places and could therefore disagree
+		// forever: what the ruler said this part would cost, what the server counted, and what the
+		// server could reuse. On one line they either agree or they name the bug.
+		prompt, reused, answer := "n/a", "n/a", "n/a"
+		if res.Usage != nil {
+			answer = fmt.Sprint(res.Usage.CompletionTokens)
+			if res.Usage.HasPrompt {
+				prompt, reused = fmt.Sprint(res.Usage.PromptTokens), fmt.Sprint(res.Usage.CacheTokens)
+			}
+		}
+		s.logf("compaction: part %d/%d read %d entries ≈%d tokens → prompt %s, reused %s (%s), answer %s",
+			i+1, len(chunks), len(c.Entries), c.Tokens, prompt, reused,
+			map[bool]string{true: "prefix of the last request", false: "payload rebuilt"}[refs.warm], answer)
 		prev = text
 	}
 	if strings.TrimSpace(prev) == "" {
@@ -444,9 +498,150 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 	return prev, compact.SummarySize(reported, prev), nil
 }
 
+// ─── what a summary is cut from ─────────────────────────────────────────
+//
+// A summary is not asked about the conversation in the abstract; it is asked about a particular
+// sequence of bytes, and the cheaper candidate is always the one already sitting in the provider's KV
+// cache. Which one that is a fact about what this process has sent, so it is worked out once, here,
+// and the answer is carried to every part of the chain.
+type payloadRefs struct {
+	// msgs is the payload a summary is cut from: the messages that went on the wire, or the ones
+	// assembled now when nothing matches them.
+	msgs []asm.Message
+	// ids[i] is the entry behind msgs[i]; empty when the payload was recorded before ids were kept.
+	ids []string
+	// off is the number of messages before the first entry: 1 with a system prompt, 0 without. The
+	// assembler builds the two lists in step (§2.1), so a region index is a message index plus this.
+	off int
+	// head is msgs[:off] alone: what every part of a chain repeats byte for byte, which for parts 2..N
+	// is the only prefix there is.
+	head []asm.Message
+	// tools is the tool array of that same request. A chat template renders the definitions before the
+	// messages, so a summary asked without them can reuse nothing — and is asked about a conversation
+	// in which the assistant had no tools either.
+	tools []llm.Tool
+	// warm says the payload was sent by this process, so a prefix of it is a prefix of what the
+	// provider has cached. When it is false the chain still runs — a summary is worth eight minutes of
+	// prefill — but the log says what it cost, and nothing here may claim a cache it does not have.
+	warm bool
+}
+
+// summaryPayload chooses between the request still in the provider's cache and the payload assembled
+// now. The rule is the prefix rule, because that is what a KV cache is: the sent payload is worth its
+// bytes only while it is still a prefix of the path. One entry differing — a time travel, a deleted
+// message, an assembler setting flipped mid-run, a restart — and the provider has nothing to reuse,
+// so the honest choice is the payload assembled now and the summary stops pretending to be cheap.
+func summaryPayload(sent []asm.Message, sentIDs []string, sentTools []llm.Tool,
+	cur []asm.Message, curIDs []string, curTools []llm.Tool, entries int) payloadRefs {
+	msgs, ids, tools, warm := cur, curIDs, curTools, false
+	// An id list of nothing but empty strings says the payload was assembled by a caller that never
+	// named its entries, which is a payload that cannot be checked. Trusting it is what this function
+	// replaced: a stale prefix is not a slow summary, it is a summary of a conversation that no longer
+	// exists. So no ids means no claim, and the payload assembled now is used instead.
+	if len(sent) > 0 && named(sentIDs) && samePrefix(sentIDs, curIDs) {
+		msgs, ids, tools, warm = sent, sentIDs, sentTools, true
+	}
+	off := len(ids) - entries
+	if off < 0 || off > len(msgs) || len(msgs) < off+entries {
+		// ids does not describe msgs, so no boundary through it can be trusted. Everything still gets
+		// summarised — the parts fall back to a flat transcript and say so in the log — because a
+		// summary that is merely slow beats a compaction that refuses to run.
+		return payloadRefs{tools: tools, warm: warm}
+	}
+	return payloadRefs{msgs: msgs, ids: ids, off: off, head: msgs[:off], tools: tools, warm: warm}
+}
+
+// samePrefix reports whether a is the front of b. A payload longer than the path is never a prefix of
+// it: the path got shorter (a time travel, a rollback), which is exactly when the tail of the cache
+// has been thrown away.
+func samePrefix(a, b []string) bool {
+	if len(a) > len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// named reports whether every message of a payload is identified, which is the precondition of trusting
+// samePrefix at all — a list of empty strings is a prefix of anything, and "anything" is precisely the
+// answer that must not be yes.
+func named(ids []string) bool {
+	if len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if id == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// messages is the payload messages of region entries [lo:hi), and whether the payload describes them.
+func (r payloadRefs) messages(lo, hi int) ([]asm.Message, bool) {
+	if r.msgs == nil || lo < 0 || hi <= lo || r.off+hi > len(r.msgs) {
+		return nil, false
+	}
+	return r.msgs[r.off+lo : r.off+hi], true
+}
+
+// through is part 1's prefix: the payload from its first message through the end of entry hi-1 — the
+// whole of what the provider already holds that this part covers, which is what turns the first call
+// of a chain into a cache hit instead of a new conversation of the same size.
+func (r payloadRefs) through(hi int) ([]asm.Message, bool) {
+	if r.msgs == nil || hi <= 0 || r.off+hi > len(r.msgs) {
+		return nil, false
+	}
+	return r.msgs[:r.off+hi], true
+}
+
+// ─── the request every LLM call of a session is cut from ───────────────────
+//
+// A KV cache is keyed on bytes, and thinking is a byte-level change to the prompt: a server that is
+// told to reason renders a different template around the same messages. So the summariser of a session
+// that reasons must reason at the same level as the turn it is summarising, and no two calls of one
+// conversation may differ in these fields by accident — which cannot be guaranteed from call sites
+// that each build their own request, so there is one source and everything is cut from it.
+
+// requestIdentity is the part of an llm.Request that must not vary between calls of one session: the
+// model, the sampling, and above all the thinking switch and its level — here that is
+// `reasoning_effort` plus whatever thinking knob the endpoint takes through `extra`.
+func requestIdentity(cfg Config) llm.Request {
+	return llm.Request{
+		Model:           cfg.LLM.Model,
+		Temperature:     cfg.Temperature,
+		MaxTokens:       cfg.MaxTokens,
+		ReasoningEffort: cfg.ReasoningEffort,
+		Extra:           cfg.Extra,
+	}
+}
+
+// summaryRequest is one summary call on top of that identity: the same thinking level as the turn the
+// summary is about, and the same tools.
+//
+// Two fields are overridden on purpose — the summariser's own budget, and §3.5's request that a
+// summariser be more deterministic than the conversation it reads — and both are sampling parameters
+// applied after the prompt, so neither forks the prefix the way thinking does. Before this function
+// existed the two call sites drifted by exactly one field that is not sampling: the loop sent
+// `reasoning_effort` and the summary did not, so a chain of summaries over a 184k-token conversation
+// reused 0 tokens of it. That is the price of a setting nobody chose.
+func summaryRequest(cfg Config, call compact.SummaryCall) llm.Request {
+	req := requestIdentity(cfg)
+	temp := call.Temperature
+	req.Messages = call.Messages
+	req.Tools = call.Tools
+	req.Temperature = &temp
+	req.MaxTokens = call.MaxTokens
+	return req
+}
+
 // summarize performs one summary attempt with the complete (non-streaming) call of §3.5.
 func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
-	region []*ir.Entry, sizes *asm.Sizes, prefix []asm.Message, tools []llm.Tool, extra string, attempt int) (string, int, error) {
+	region []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int) (string, int, error) {
 
 	// The summary request is itself bound by n_ctx. When the region does not fit one call there is
 	// no way to summarise it in one piece, and the session is stuck too big to send and too big to
@@ -457,37 +652,37 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	}
 	switch p.SummaryMode {
 	case compact.ModeIterative, compact.ModeMapReduce:
-		return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, sizes, extra, attempt)
+		return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt)
 	default:
-		if compact.NeedsIterative(sumRegion, sizes, s.nctxLocked(), p) {
+		if compact.NeedsIterative(sumRegion, ruler, s.nctxLocked(), p) {
 			s.logf("compaction: region of %d tokens does not fit a %d-token request, summarising serially",
-				compact.RegionTokens(sumRegion, sizes), p.ChunkFit(s.nctxLocked()))
-			return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, sizes, extra, attempt)
+				compact.RegionTokens(sumRegion, ruler), p.ChunkFit(s.nctxLocked()))
+			return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt)
 		}
 	}
 
-	call := p.BuildRequest(s.nctxLocked(), prefix, tools, plan.Split, extra)
-	if p.SummaryMode != compact.ModePrefixStable {
-		// Shape B: no cache affinity; the flat transcript of the region being replaced is the
-		// payload (spec §3.1).
+	call := p.BuildRequest(s.nctxLocked(), refs.msgs, refs.tools, plan.Split, extra)
+	if p.SummaryMode != compact.ModePrefixStable || len(refs.msgs) == 0 {
+		// Shape B asks with no cache affinity, so the flat transcript of the region is the payload
+		// (spec §3.1). The second half of the condition is the case shape B cannot be reached without:
+		// a payload whose ids did not describe its messages, so there is nothing to send as a prefix.
+		// Left alone that is a request of two messages — a system prompt and "compress the conversation
+		// above" — over a conversation the model was never given, and the answer would pass acceptance
+		// and replace the path with a fiction. The transcript is lossy (structuredContent is not in it);
+		// a summary of nothing is not lossy, it is wrong.
 		var cut []*ir.Entry
 		if plan.Cut <= len(region) {
 			cut = region[:plan.Cut]
+		}
+		if len(refs.msgs) == 0 {
+			s.logf("compaction: the payload could not be sliced, so %d entries go to the summariser as a flat transcript", len(cut))
 		}
 		call.Messages = append(call.Messages, asm.Message{
 			Role:    "user",
 			Content: "Conversation to compress:\n\n" + compact.Transcript(cut),
 		})
 	}
-	req := llm.Request{
-		Model:       cfg.LLM.Model,
-		Messages:    call.Messages,
-		Tools:       call.Tools,
-		Stream:      false,
-		Temperature: &call.Temperature,
-		MaxTokens:   call.MaxTokens,
-		Extra:       cfg.Extra,
-	}
+	req := summaryRequest(cfg, call)
 	s.emit(Event{Type: EvtCompact, Data: map[string]any{"stage": "summarizing", "attempt": attempt}})
 	res, err := s.provider.Complete(ctx, req)
 	if err != nil {
