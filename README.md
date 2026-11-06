@@ -609,6 +609,12 @@ the text arrive keeps showing a message that looks finished, beside a toast abou
 result the path refuses is the same case on the other frame that ends a thing - the `tool_result` which closes
 a card carries the refusal as its error, since a card left spinning reads as a call still running.
 
+The page takes both at their word, because what it has on screen is then the only copy of that text anywhere: a
+refused reply stays where it was, marked `not saved` in the space its id would have stood in, with the refusing
+sentence under it and a rebuild that keeps the node instead of dropping it; a refused tool result puts that
+sentence in the card's tooltip, where the card would otherwise read `error` with nothing to expand it.
+`internal/agent/stream_test.go` pins the two frames, `js/transcript.js` and `js/events.js` render them.
+
 ### Three moments for a message
 
 A message can arrive at three moments, and they are not the same transaction.

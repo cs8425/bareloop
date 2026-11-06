@@ -433,7 +433,12 @@ export async function refresh() {
   //     it is not content, it is chrome. A stream that is genuinely mid-answer keeps every character, because
   //     `content` is what it is judged on, and the next delta puts the node back if it was left out (see
   //     streamDelta).
-  for (const [, s] of state.streams) if (!s.done && (s.content || s.tools.size)) box.appendChild(s.node);
+  // A third state survives on purpose: a reply the log refused (`s.uncommitted`, set by streamFinish when the
+  // closing delta carried an error). It is finished, so the first rule above would drop it — and its premise,
+  // that the reply is now in the entries above, is false for the one message in this transcript that is in no
+  // entry at all. Dropping it here would be a second way to lose the text, on an event that had nothing to do
+  // with it.
+  for (const [, s] of state.streams) if ((s.uncommitted || !s.done) && (s.content || s.tools.size)) box.appendChild(s.node);
   state.status = data.status;
   renderStatus(data.status);
   state.pending = data.pending || [];

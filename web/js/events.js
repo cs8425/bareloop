@@ -211,7 +211,13 @@ function onToolProgress(d, isResult) {
     // finished at all and may not for another six hours. The tooltip is the server's own sentence about the
     // handover, so the card cannot disagree with what the daemon promised.
     if (d.status === 'parked') card.setBadge('asleep', 'state-parked', d.result || 'this wait is scheduled and the loop is not held open for it');
-    else if (d.status === 'error') card.setBadge('error', 'state-error');
+    // The word `error` on a card tells a reader that something failed; the sentence behind it is what they were
+    // waiting for the call to learn. `RunInfo.Error` carries it in both shapes this frame exists for: the tool's
+    // own failure text, and the one case where no entry will ever arrive to overwrite the badge — the daemon
+    // wrote the call and the loop refused to store its result (refuseToolResult), which leaves this tooltip as
+    // the only place the reason is ever shown. A committed error entry rewrites the badge later through
+    // `finished`, and that is the version a reload replays, so it wins whenever it exists.
+    else if (d.status === 'error') card.setBadge('error', 'state-error', d.error || d.result || 'this call failed and the daemon has no more to say about why');
     else if (d.ms) card.setBadge(`${d.ms} ms`, 'state-ok');
   }
   attach(card, d.entryId);

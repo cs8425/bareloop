@@ -868,7 +868,10 @@ export function streamDelta(d) {
   // arrives, and there is no text after the last one.
   if (d.done) {
     s.drawer.finish();
-    streamFinish(s);
+    // `d.error` rides on the closing frame when the reply it closes was never committed - the log refused it
+    // (`internal/agent` closeStreamErr, pinned by stream_test.go). A stream that ended normally has nothing to
+    // say here, and the committed entry is already on its way to take this node over.
+    streamFinish(s, d.error);
   }
   scrollDown();
   // The adaptive ceiling wants the cost of this delta, and the only honest place to read it is after the
@@ -885,7 +888,7 @@ export function flushStreams() {
   for (const s of state.streams.values()) s.drawer.repaint();
 }
 
-function streamFinish(s) {
+function streamFinish(s, refused) {
   // A stream that ends while still thinking (an abort between the tokens, a provider that stops mid-reasoning)
   // must not leave the block open: this is the one path that runs without a content or toolCall delta, and
   // `done` is the last thing the hub will ever say about it.
@@ -894,7 +897,28 @@ function streamFinish(s) {
   // The header chip says "streaming", and the moment this runs that is no longer true. It goes rather
   // than being reworded: the committed entry brings its own chips (id, model, usage) when it lands, and a
   // finished message keeping a rate it is no longer drawing at would be a small, permanent lie.
-  s.tag?.remove();
+  //
+  // Unless there is no committed entry coming. `refused` is the log's own sentence about refusing to write
+  // this reply, and it changes what this node is: not a message on its way to becoming an entry, and not an
+  // entry either — text that exists nowhere else. It cannot get an id, so the chip where an id would be is
+  // exactly the space that has to say what happened, and the row under the body is the one thing in the
+  // message a reader can act on: copy it, because nothing else is holding it.
+  if (refused) {
+    s.uncommitted = true;
+    s.node.classList.add('uncommitted');
+    // A stream that never received a reasoning token is left with a fold that opens onto nothing. Every other
+    // ending gets this clean-up for free, because the committed entry redraws the node from the log and the log
+    // has no reasoning block to draw; this node is the one a commit will never come to redraw, so the fold that
+    // is chrome and not content is removed here rather than kept as a permanent dead control. A stream that did
+    // think keeps the panel — reading the thought that produced an unsaved answer is the whole use of it.
+    if (!s.reasoningText) s.reasoning?.remove();
+    if (s.tag) {
+      s.tag.textContent = 'not saved';
+      s.tag.className = 'eid state-error';
+      s.tag.title = refused;
+    }
+    s.node.appendChild(el('div', 'lost', `nothing was written to the log — a reload will not bring this text back · ${refused}`));
+  } else s.tag?.remove();
   markStreamFinished(s.id);
   // "Finished" is said out loud because a rebuild re-hangs every stream it is holding below the committed
   // entries (js/session.js), and it holds this one until the committed entry has taken its tool cards. With-
@@ -902,6 +926,9 @@ function streamFinish(s) {
   // a header and nothing in it. Both ways a reader meets it are rebuilds they did not ask for: a compaction
   // (the entry event asks for a rebuild) and a reconnect (the socket asks for one). Neither is the cause;
   // the cause is a finished node outliving the buffer that should have let go of it.
+  // A refused reply is the exception the rebuild has to keep (see the re-hang rule in js/session.js): the
+  // premise of "finished means its reply is in the entries above" is simply false here, and dropping the
+  // node would make the message vanish on an event that had nothing to do with it.
   s.done = true;
   if (!s.content && !s.tools.size) s.node.remove();
 }

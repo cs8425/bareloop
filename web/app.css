@@ -415,6 +415,11 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .state-error { color: var(--err); }
 /* A parked call has not finished, and `ms` next to it would be a number about something else entirely. */
 .state-parked { color: #cbb8f0; }
+/* A reply the log refused. The text on screen is the only copy that exists, so the message stays where the
+   reader can select and copy it and says out loud what it is: the chip is the half seen while scanning, this
+   row is the half that can be acted on, and both carry the daemon's own reason — a reader who knows the disk is
+   full copies the text, and one who does not will wait for an entry that is never coming. */
+.msg.uncommitted .lost { color: var(--err); font-size: var(--t-2); margin-top: 6px; }
 
 .note { color: var(--muted); font-size: var(--t-1); text-align: center; margin: 6px 0; }
 .compact-banner { border: 1px solid #4a3866; background: #1d1826; border-radius: 8px; padding: 7px 11px; margin-bottom: 10px; font-size: var(--t-2); }
