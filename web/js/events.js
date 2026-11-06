@@ -4,7 +4,7 @@ import { el, fmtN, logEl, numId } from './util.js';
 import { isParked, state } from './state.js';
 import { note, toast } from './ui.js';
 import { scrollDown } from './scroll.js';
-import { entryNode, requestCard, streamDelta, toolCard } from './transcript.js';
+import { claimStream, entryNode, requestCard, retireStream, streamDelta, toolCard } from './transcript.js';
 import { renderTools, syncToolsPanel } from './tools.js';
 import { clearBusy, loadSoon, refresh, renderNewer, renderPending, renderStatus, returnToTip, showBusy } from './session.js';
 
@@ -59,6 +59,13 @@ export function handleEvent(ev) {
   }
   if (isParked() && LIVE_AT_THE_TAIL.includes(ev.type)) {
     state.win.stale = (state.win.stale || 0) + 1;
+    // D99: parked, a bubble at the tail is not the reply's body, it is a preview of news this page declined
+    // to draw, and an entry naming a live stream is the daemon saying that preview's reply is in the log now.
+    // So it goes — and dropping it is not drawing at the tail, it is the opposite: a preview left behind is
+    // re-hung by the next rebuild and sits there claiming to be an entry the window already has (the resident
+    // version of the two-bubbles bug D97 exists to prevent). The page's tally is untouched: the reply is still
+    // news this page refused, and `#newer` still says how many it refused.
+    if (ev.type === 'entry' && ev.streamId) retireStream(state.streams.get(ev.streamId));
     // Counting is not telling: this chip is the only place those words live, and nothing else rewrites it
     // while parked — a parked page is exactly the one that does not refresh. So the tally would sit there
     // computed, and a transcript being quietly ignored would still look perfectly calm.
@@ -72,7 +79,7 @@ export function handleEvent(ev) {
       streamDelta(ev.delta);
       break;
     case 'entry':
-      onEntry(ev.entry);
+      onEntry(ev.entry, ev.streamId);
       break;
     case 'removed':
       state.entries.get(ev.info)?.remove();
@@ -149,36 +156,31 @@ export function handleEvent(ev) {
   }
 }
 
-function onEntry(e) {
+// onEntry draws one committed entry. `streamId` is the second argument because an assistant entry is usually
+// not new information — it is the same message the reader has been watching arrive, now with the log's
+// authority behind it — and the event names the live buffer it is the commit of rather than leaving the view
+// to guess which one that was.
+function onEntry(e, streamId) {
   if (!e) return;
-  if (state.entries.has(e.id)) return;
-  const node = entryNode(e);
-  if (e.kind === 'assistant') {
-    const mine = new Set((e.toolCalls || []).map((tc) => tc.id).filter(Boolean));
-    const streams = [...state.streams];
-    // Only the buffer this entry is the reply of. The newest one is the safe guess for a reply with no
-    // calls, but a run stopped between two tokens leaves its buffer behind — `done` or not, no entry is
-    // ever coming for it (s.done says it is over, and session.js re-hangs everything it holds) — and
-    // sweeping every buffer into the next committed reply moved that orphan's cards into a message that
-    // never made them (measured: a stopped fs_list card ending up inside a following reply whose only
-    // content was "BETA", and its running badge with it).
-    const newest = streams[streams.length - 1];
-    for (const [id, s] of streams) {
-      // A stream's key is the call id whenever the provider named the call in its first frame — which is
-      // what an assistant entry can be matched against — and the frame index otherwise, in which case
-      // nothing in this buffer claims the call and only the newest-buffer rule below speaks for it.
-      const own = s === newest || [...s.tools.keys()].some((k) => mine.has(k));
-      if (!own) continue;
-      // The committed entry supersedes the live stream buffer: move the streamed tool cards into the
-      // committed message and drop the buffer, so the tool cards are not rendered twice.
-      for (const [, card] of s.tools) {
-        card.attached = true;
-        node.appendChild(card.el);
-      }
-      s.node.remove();
-      state.streams.delete(id);
-    }
+  // The buffer this reply was streamed out on, named by the daemon (`agent.Event.StreamID`) rather than
+  // inferred: an entry that was streamed carries the id of its stream and one that was not carries nothing
+  // (a user message, a tool result, a compaction, a provider that never streamed), which is the whole rule —
+  // no name means there is no buffer to take over. Guessing was worse than it looked: "the newest buffer must
+  // be this reply's" is a claim about ordering, and the closing `done` frame arrives after the entry, so the
+  // buffer is still open at this moment and holds nothing that says which entry it belongs to. It was also
+  // never even comparing what it meant to — `[...map]` is an array of key/value *pairs*, so the buffer object
+  // was tested against a pair, only a reply with tool calls could still be recognised (by its call ids), and
+  // every plain answer left its bubble standing next to the committed one.
+  const s = streamId ? state.streams.get(streamId) : null;
+  if (state.entries.has(e.id)) {
+    // Already on screen: a rebuild read the log while this answer was still arriving, so what the transcript
+    // is holding is the committed rendering of it. That node stands — it came from the log — and the bubble
+    // has nothing left to say, so it goes. Retiring it is also what silences the `done` frame still to come.
+    if (s) retireStream(s);
+    return;
   }
+  if (s && e.kind === 'assistant') claimStream(s, e);
+  else entryNode(e);
   if (e.kind === 'user') {
     state.pending = state.pending.filter((p) => p !== e.id);
     renderPending();

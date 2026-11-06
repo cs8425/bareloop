@@ -100,22 +100,18 @@ const dayDivider = (day) => {
   return line;
 };
 
-export function entryNode(e) {
-  let node = state.entries.get(e.id);
-  if (node) return node;
-  // A tool call's outcome belongs to the entry the tool wrote, not to the assistant message that asked for
-  // it: only that entry has the milliseconds, the error flag and an id worth linking to. Indexing it here
-  // is what lets a card that already exists be told how it ended, and lets one created later find out from
-  // the index (session.js sweeps those up with linkToolResults after a rebuild).
-  if (e.kind === 'tool' && e.toolCallId) {
-    state.toolResults.set(e.toolCallId, e);
-    const card = state.tools.get(e.toolCallId);
-    if (card) card.finished(e);
-  }
+// renderEntry makes `node` the rendering of `e`, whatever that element was rendering before. It is idempotent
+// and it writes nothing outside its own subtree, which is what lets the two moments in one message's life —
+// the bubble a reader watched being written, and the same message read back off the log — go through one
+// function instead of two that can disagree. Whole sections are rebuilt rather than patched field by field: a
+// header is a dozen elements and `fillBody` has always drawn its body from nothing, so "redraw this message"
+// costs less than reasoning about which of its twelve chips a given change is allowed to have missed.
+function renderEntry(node, e) {
   // A committed failure (provider error, stream that died halfway) is drawn as a failure: an
   // assistant message that says "[generation failed: …]" in normal colours looks like an answer.
   const bad = e.finishReason === 'error' || (e.label || '').includes('error');
-  node = el('div', `msg ${e.kind}${e.interrupted ? ' interrupted' : ''}${bad ? ' error' : ''}`);
+  node.className = `msg ${e.kind}${e.interrupted ? ' interrupted' : ''}${bad ? ' error' : ''}`;
+  node.textContent = '';
   const head = el('header');
   head.appendChild(el('span', 'who', whoName(e)));
   head.appendChild(el('span', 'eid', e.id));
@@ -151,20 +147,49 @@ export function entryNode(e) {
   fillBody(node, body, e);
   node.appendChild(body);
 
-  state.entries.set(e.id, node);
-  const box = logEl();
+  // What this element is a rendering of: the key `state.entries` holds it under, readable off the DOM by a
+  // console, a test, or the next pass of the renderer.
+  if (e.id) node.dataset.entry = e.id;
   // The day is written on the node rather than tracked in a module variable, because the transcript gets
-  // emptied from three places and a cache would outlive the entries it described. Reading it back off the
-  // node that is currently last costs nothing (no layout, no query) and is automatically wrong-free:
-  // no last child means no previous day, which is exactly the rule that keeps a divider off the top of a
-  // fresh transcript, and an entry with no `ts` leaves an empty day that neither asks for a divider nor
-  // promises one to its neighbour.
-  const day = dayKey(e.ts);
-  node.dataset.day = day;
-  const prev = box.lastElementChild ? box.lastElementChild.dataset.day : '';
-  if (day && prev && prev !== day) box.appendChild(dayDivider(day));
-  box.appendChild(node);
+  // emptied from three places and a cache would outlive the entries it described.
+  node.dataset.day = dayKey(e.ts);
   return node;
+}
+
+// placeAtTail puts `node` at the end of the transcript, with a day divider in front of it when it starts a
+// new day. Reading the previous day off the node that is currently last costs nothing (no layout, no query)
+// and is automatically wrong-free: no last child means no previous day, which is exactly the rule that keeps
+// a divider off the top of a fresh transcript, and an entry with no `ts` leaves an empty day that neither asks
+// for a divider nor promises one to its neighbour. It is idempotent — a node already at the tail is not moved,
+// and a divider carries a day of its own, so a second pass over the same entry reads a previous day equal to
+// its own and adds nothing. That matters because one element arrives here twice: once as the bubble it was
+// streaming in, once as the entry it became (see claimStream).
+function placeAtTail(node) {
+  const box = logEl();
+  const day = node.dataset.day || '';
+  const atTail = box.lastElementChild === node;
+  const before = atTail ? node.previousElementSibling : box.lastElementChild;
+  const prev = before ? before.dataset.day : '';
+  if (day && prev && prev !== day) box.insertBefore(dayDivider(day), atTail ? node : null);
+  if (!atTail) box.appendChild(node);
+  return node;
+}
+
+export function entryNode(e) {
+  let node = state.entries.get(e.id);
+  if (node) return node;
+  // A tool call's outcome belongs to the entry the tool wrote, not to the assistant message that asked for
+  // it: only that entry has the milliseconds, the error flag and an id worth linking to. Indexing it here
+  // is what lets a card that already exists be told how it ended, and lets one created later find out from
+  // the index (session.js sweeps those up with linkToolResults after a rebuild).
+  if (e.kind === 'tool' && e.toolCallId) {
+    state.toolResults.set(e.toolCallId, e);
+    const card = state.tools.get(e.toolCallId);
+    if (card) card.finished(e);
+  }
+  node = renderEntry(el('div', 'msg'), e);
+  state.entries.set(e.id, node);
+  return placeAtTail(node);
 }
 
 // ---------------------------------------------------------------- one request's numbers
@@ -631,6 +656,12 @@ function streamStart(streamId) {
   if (state.streams.has(streamId)) return state.streams.get(streamId);
   if (finishedStreams.has(streamId)) return null;
   const node = el('div', 'msg assistant stream');
+  // D97's key, in the one form that says which of the two lives this node is living: while the reply is
+  // arriving it is keyed by the stream, and `claimStream` trades that for the entry id the moment the reply
+  // commits. Nothing reads it yet — the transcript is still rebuilt whole rather than diffed — but a node
+  // that carries its own identity is what that diff will key on, and this is the half of it a bubble can say
+  // before it has an id.
+  node.dataset.stream = streamId;
   const head = el('header');
   head.appendChild(el('span', 'who', 'assistant'));
   const tag = el('span', 'eid', 'streaming');
@@ -814,6 +845,11 @@ export function streamDelta(d) {
       if (tc.id && !state.tools.has(tc.id)) state.tools.set(tc.id, card);
       s.tools.set(key, card);
       s.node.insertBefore(card.el, s.body);
+      // Placed on purpose, so say so: a `tool_call` progress frame that arrives before the entry this call
+      // belongs to has no home to look up (`attach` falls back to the end of the transcript when the entry id
+      // is unknown), and without this flag it would lift the card out of the bubble that is still being written
+      // and hang it at the bottom of the page.
+      card.attached = true;
       // Opening a card mid-stream asks for its arguments now, same rule as the reasoning panel.
       card.el.addEventListener('toggle', s.drawToolArgs);
       if (tc.name) card.setLabel(tc.name); // ToolCallProgress carries no server, unlike a tool run
@@ -868,6 +904,71 @@ function streamFinish(s) {
   // the cause is a finished node outliving the buffer that should have let go of it.
   s.done = true;
   if (!s.content && !s.tools.size) s.node.remove();
+}
+
+// closeBuffer retires a live stream from the state: the map forgets it, and `finishedStreams` makes sure the
+// frame that closes it — which the daemon sends *after* the committed entry, pinned by
+// `internal/agent/stream_test.go` — cannot answer "open a buffer for this id" and produce the empty bubble the
+// `finishedStreams` set exists to prevent. What it deliberately does not do is touch the DOM, because the two
+// callers disagree about that: one has a node to throw away, the other a node to keep.
+function closeBuffer(s) {
+  markStreamFinished(s.id);
+  state.streams.delete(s.id);
+}
+
+// retireStream drops a bubble that will never be drawn again: the reply it was streaming is in the log under
+// another element (a rebuild read the log while the answer was still arriving, and then the entry event found
+// the entry already drawn), or nothing ever came of the stream. Leaving it up is what "one reply, two cards —
+// one with an id, one without" looked like: `streamFinish` has already removed the "streaming" chip, so the
+// orphan is a message header with no id and no story.
+export function retireStream(s) {
+  if (!s) return;
+  closeBuffer(s);
+  s.node.remove();
+}
+
+// claimStream is the handover: the bubble a reader watched being written *becomes* the committed entry, in
+// place. D97 in one line: one reply, one DOM node — the streamed bubble is the entry's first body, and the
+// commit upgrades it rather than building a second one and trying to reap the first.
+// That is what makes the transcript a function of state rather than a log of everything the daemon
+// drew — the message moves from "arriving" to "committed" without changing element, so the reader's place in
+// the page, the card they had opened and the panel they were reading all survive the frame that rewrites the
+// message. (The text itself is re-parsed from the entry, so a selection inside the reply does not survive —
+// what survives is everything that was not the reply's characters.)
+// Identity is not guessed at: the entry event names the stream its reply was streamed out on
+// (`agent.Event.StreamID`), and the render is the same `renderEntry` every other copy of this message goes
+// through — the header loses "streaming" and gains its id, model, usage and actions, and the body is drawn
+// once from the entry instead of from however the frozen/live split happened to fall. The node is not moved
+// and not replaced: it is the same element before the frame and after it, and its key moves from
+// `data-stream` to `data-entry` (D97's `stream:<sid>` → `entry:<id>`).
+export function claimStream(s, e) {
+  if (!s || !e) return null;
+  closeBuffer(s);
+  // Whose decision the thinking panel is in is a fact about the reader, not about the entry, and `renderEntry`
+  // cannot know it: a committed entry draws its reasoning folded, which is right for anything read back and
+  // wrong for the panel being read right now. Only a reply that stopped mid-thought gets here with it open —
+  // the first answer token closes it (see beginThinking/endThinking) — so this is the one case where folding
+  // it would be folding it in front of somebody.
+  const wasThinking = !!s.reasoning && s.reasoning.open && !!e.reasoning;
+  renderEntry(s.node, e);
+  if (wasThinking) {
+    const panel = s.node.querySelector('details.reasoning');
+    if (panel) panel.open = true;
+  }
+  // A streamed call the committed entry does not name — a stream cut short, a provider that never gave the
+  // call an id — has no other home now that the buffer is gone. `fillBody` has just rebuilt the body from the
+  // entry, reusing the card of every call it does name (`toolCard` hands back the same element for an id it
+  // knows), so what is missing here is exactly the cards nothing can point at by id. Dropping one would make
+  // a reader's message shorter than the reply they watched arrive.
+  const body = s.node.querySelector('.body');
+  if (body) {
+    for (const card of s.tools.values()) {
+      if (!body.contains(card.el)) body.appendChild(card.el);
+    }
+  }
+  state.entries.set(e.id, s.node);
+  delete s.node.dataset.stream; // the key is the entry now; two identities on one node would be two claims
+  return placeAtTail(s.node);
 }
 
 // ------------------------------------------------------------------ tool cards
