@@ -64,7 +64,12 @@ function inline(text) {
       ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
       : m,
   );
-  out = out.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${escape(spans[Number(i)])}</code>`);
+  // `spans` holds text that was escaped once, at the top of this function, so it goes into the element as it
+  // is. Escaping it a second time here is what made `info:"connected"` print `info:&quot;connected&quot;` and
+  // `a & b` print `a &amp; b` — every quote, ampersand and angle bracket in a code span, shown as its own
+  // entity. (Code spans are cut out before the other rules and put back last, which is the only reason the
+  // text passes through `escape` twice on its way here and never got caught.)
+  out = out.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${spans[Number(i)]}</code>`);
   for (const ext of extensions) {
     if (ext.inline) {
       const next = ext.inline(out);
@@ -75,7 +80,40 @@ function inline(text) {
 }
 
 const isTableSep = (line) => /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(line) && line.includes('-');
-const splitRow = (line) => line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+
+// splitRow cuts one table row into cells. A `|` divides a cell only when it is not escaped: a row saying
+// `run{status:ok\|error}` — which is what a pipe inside a `code` span costs you in a table, and the spelling
+// GFM tells an author to use — is one cell holding `run{status:ok|error}`, not two cells each wearing a stray
+// backslash and losing the code span that was wrapping them. Unescaping is deliberately limited to table
+// cells and to the pipe: outside a table `\|` divides nothing and means nothing here, and a backslash rule for
+// all of CommonMark's punctuation is a larger promise than this row needs one to be.
+function splitRow(line) {
+  const cells = [];
+  let cell = '';
+  let k = 0;
+  while (k < line.length) {
+    if (line[k] === '\\' && line[k + 1] === '|') {
+      cell += '|';
+      k += 2;
+      continue;
+    }
+    if (line[k] === '|') {
+      cells.push(cell);
+      cell = '';
+      k++;
+      continue;
+    }
+    cell += line[k];
+    k++;
+  }
+  cells.push(cell);
+  // The pipes at the two ends of a row frame it rather than divide it. Read off the line, the way the
+  // `^\s*\|` / `\|\s*$` pair this replaces did, so a cell that legitimately holds only spaces stays a cell.
+  const edge = line.trim();
+  if (edge.startsWith('|')) cells.shift();
+  if (edge.endsWith('|') && !edge.endsWith('\\|')) cells.pop();
+  return cells.map((c) => c.trim());
+}
 
 function codeBlock(code, lang) {
   for (const ext of extensions) {
@@ -180,7 +218,11 @@ export function render(src) {
       }
       let html = '<table><thead><tr>' + header.map((c) => `<th>${inline(c)}</th>`).join('') + '</tr></thead><tbody>';
       for (const r of rows) html += '<tr>' + r.map((c) => `<td>${inline(c)}</td>`).join('') + '</tr>';
-      out.push(html + '</tbody></table>');
+      // The div is a scrollbar waiting for a table too wide for the message column (see `.md-scroll` in
+      // app.css): without a scroll container of its own, a wide table gets its columns cut to characters
+      // instead of running sideways. It is emitted per table, so a table still arriving in a stream's tail
+      // never leaves an unclosed div behind in the frozen prefix.
+      out.push(`<div class="md-scroll">${html}</tbody></table></div>`);
       continue;
     }
 

@@ -573,6 +573,19 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 .md blockquote { border-left: 3px solid var(--border); margin: .5em 0; padding-left: 10px; color: var(--muted); }
 .md table { border-collapse: collapse; margin: .5em 0; }
 .md th, .md td { border: 1px solid var(--border); padding: 3px 7px; }
+/* A pipe table wider than the message column runs sideways; it does not cut every column into characters.
+   `min-width: max-content` is the whole trick and it costs nothing when the table fits — that is already its
+   natural width, so a small table looks exactly as it did (measured: a 2-column table still 26px wide, no
+   scrollbar) — and it only buys a scrollbar when the table does not fit (measured over the 4-column event
+   table of `_tmp/markdown-debug.md`: 1385px of table in a 1059px message column, one line per code span).
+   The two undo rules are the other half: `.msg > .body` sets `white-space: pre-wrap` and `word-break:
+   break-word` — right for prose, and exactly what turned `tool_call` into `tool_c` / `all` inside a cell — so
+   a cell takes the browser's own rules back. Scoped to the scroller rather than to `.md` because `.md` is also
+   a tooltip and a panel, and nothing outside a pipe table needs this argument.
+   `word-break: normal` is not `break-word`'s opposite, it is its default; `break-all` would undo the fix. */
+.md-scroll { overflow-x: auto; max-width: 100%; margin: .5em 0; }
+.md-scroll > table { min-width: max-content; margin: 0; }
+.md-scroll th, .md-scroll td { white-space: normal; word-break: normal; }
 .md hr { border: none; border-top: 1px solid var(--border); margin: .8em 0; }
 
 /* dialogs */
