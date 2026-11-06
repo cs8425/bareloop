@@ -161,9 +161,14 @@ func TestAWakeDueWhileTheDaemonWasDownIsAnsweredLate(t *testing.T) {
 }
 
 func TestAScheduledWakeDoesNotExplainItself(t *testing.T) {
-	// Due half a second from now, so the timer's own decision can be asked about without waiting for it,
-	// and the wake is the ordinary kind: the tool sleeps what is left of the wait and answers for itself.
-	s := parkFixture(t, "ontime", "wait", time.Now().Add(500*time.Millisecond-6*time.Hour), `{"duration":"6h"}`)
+	// Due three seconds from now, and this number has two ends that pull against each other, which is why it
+	// is neither smaller nor bigger. Below, it is the moment `recoverPark` asks about: pass it and the
+	// honest answer is to answer the wait at once, so a fixture that is slow to create its session and write
+	// its log reports a lost race ("the session did not pick the wait up") instead of the wake it came to
+	// ask about. Above, it is the rest of the wait the wake still sleeps before it may answer — the clock
+	// the tick below hands in says only whether it is due, not that the answer may skip the wait — so the
+	// number also sets how long the path may take, and the wait for it is a finite one.
+	s := parkFixture(t, "ontime", "wait", time.Now().Add(3*time.Second-6*time.Hour), `{"duration":"6h"}`)
 	s.recoverPark()
 	if !s.isParked() {
 		t.Fatal("the session did not pick the wait up")

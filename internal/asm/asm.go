@@ -205,6 +205,23 @@ func EntryIDs(b *Built) []string {
 	return out
 }
 
+// HeadLen is the counterpart of EntryIDs: how many of a payload's leading messages are not entries.
+// One with a system head, zero without, and that is the whole rule — which is exactly why it lives
+// here instead of being re-derived by subtracting an entry count from a message count somewhere else.
+// Subtracting is what let a payload that was a prefix of the path — so shorter than the path, so
+// holding fewer entries than the path has — read as a payload with no system head, and shift every
+// slice of every part one message to the left: the summariser was then handed the system prompt where
+// the conversation should have been, while the log kept crediting it with reading thousands of tokens.
+func HeadLen(ids []string) int {
+	if len(ids) > 0 && strings.HasPrefix(ids[0], systemPrefix) {
+		return 1
+	}
+	return 0
+}
+
+// systemPrefix marks the one id of a payload that is not an entry id.
+const systemPrefix = "system:"
+
 // fingerprint is FNV-1a, because it needs no import and an entry id is not a security decision.
 func fingerprint(s string) string {
 	const prime = uint64(1099511628211)
@@ -213,7 +230,7 @@ func fingerprint(s string) string {
 		h ^= uint64(s[i])
 		h *= prime
 	}
-	return "system:" + strconv.FormatUint(h, 16)
+	return systemPrefix + strconv.FormatUint(h, 16)
 }
 
 // Payload is the assembler input: "the effective path".

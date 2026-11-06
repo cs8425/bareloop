@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -322,8 +323,8 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 	// conversation, and "new conversation" at 180k tokens is eight minutes of GPU. After a restart
 	// nothing was sent by this process, so the payload assembled now is the only honest prefix, and
 	// the log says so.
-	sentMsgs, sentIDs, sentTools := s.lastSentPayload()
-	refs := summaryPayload(sentMsgs, sentIDs, sentTools, built.All(), asm.EntryIDs(built), tools, len(built.Entries))
+	sentMsgs, sentIDs, _ := s.lastSentPayload()
+	refs := summaryPayload(sentMsgs, sentIDs, built.All(), asm.EntryIDs(built), tools, len(built.Entries))
 	if !refs.warm {
 		// Two different reasons, one honest sentence: nothing was sent by this process (a restart), or
 		// something was and the path has moved since (a time travel, a deleted entry). Either way the
@@ -477,6 +478,16 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		if res.Usage != nil {
 			reported = res.Usage.CompletionTokens
 		}
+		// What the part was supposed to carry and what the server counted are the same number for any
+		// request that carried its part, so a large gap names a part that never made it into the request.
+		// It is said out loud rather than returned as an error, because the gap has an honest cause too: a
+		// part whose entries are mostly structuredContent is priced at the assembler's ceiling and handed
+		// over at its beginning, and a session that could never compact would be worse than one whose log
+		// says something alarming — which is how this line caught the off-by-one in the first place.
+		if res.Usage != nil && res.Usage.HasPrompt && c.Tokens > 200 && res.Usage.PromptTokens < c.Tokens/2 {
+			s.logf("compaction: WARNING part %d/%d was planned at %d tokens but the server counted %d in the prompt — the part may not be in the request it was sent in",
+				i+1, len(chunks), c.Tokens, res.Usage.PromptTokens)
+		}
 		// The three numbers that used to live in three different places and could therefore disagree
 		// forever: what the ruler said this part would cost, what the server counted, and what the
 		// server could reuse. On one line they either agree or they name the bug.
@@ -487,8 +498,8 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 				prompt, reused = fmt.Sprint(res.Usage.PromptTokens), fmt.Sprint(res.Usage.CacheTokens)
 			}
 		}
-		s.logf("compaction: part %d/%d read %d entries ≈%d tokens → prompt %s, reused %s (%s), answer %s",
-			i+1, len(chunks), len(c.Entries), c.Tokens, prompt, reused,
+		s.logf("compaction: part %d/%d read %s ≈%d tokens → prompt %s, reused %s (%s), answer %s",
+			i+1, len(chunks), entriesUnit(len(c.Entries)), c.Tokens, prompt, reused,
 			map[bool]string{true: "prefix of the last request", false: "payload rebuilt"}[refs.warm], answer)
 		prev = text
 	}
@@ -526,29 +537,59 @@ type payloadRefs struct {
 	warm bool
 }
 
-// summaryPayload chooses between the request still in the provider's cache and the payload assembled
-// now. The rule is the prefix rule, because that is what a KV cache is: the sent payload is worth its
-// bytes only while it is still a prefix of the path. One entry differing — a time travel, a deleted
-// message, an assembler setting flipped mid-run, a restart — and the provider has nothing to reuse,
-// so the honest choice is the payload assembled now and the summary stops pretending to be cheap.
-func summaryPayload(sent []asm.Message, sentIDs []string, sentTools []llm.Tool,
+// summaryPayload decides what a summary is cut from, and what may then be claimed about the cache.
+// Those are two decisions and they used to be one, which is how the second one came to contradict the
+// first: the bytes come from the payload assembled now, because that is the payload that describes
+// every entry of the path, while the sent payload is only ever a prefix of it and a part reaching past
+// that prefix still has to be summarised. The claim follows the prefix rule, because that is what a KV
+// cache is: the bytes the provider already holds are worth their bytes only while they are still the
+// front of the path. One entry differing — a time travel, a deleted message, an assembler setting
+// flipped mid-run, a restart — and there is nothing to reuse, so the log stops saying otherwise.
+func summaryPayload(sent []asm.Message, sentIDs []string,
 	cur []asm.Message, curIDs []string, curTools []llm.Tool, entries int) payloadRefs {
-	msgs, ids, tools, warm := cur, curIDs, curTools, false
-	// An id list of nothing but empty strings says the payload was assembled by a caller that never
-	// named its entries, which is a payload that cannot be checked. Trusting it is what this function
-	// replaced: a stale prefix is not a slow summary, it is a summary of a conversation that no longer
-	// exists. So no ids means no claim, and the payload assembled now is used instead.
-	if len(sent) > 0 && named(sentIDs) && samePrefix(sentIDs, curIDs) {
-		msgs, ids, tools, warm = sent, sentIDs, sentTools, true
-	}
-	off := len(ids) - entries
-	if off < 0 || off > len(msgs) || len(msgs) < off+entries {
+	// Where the entries begin in the payload is a fact about that payload's own shape, told by the
+	// marker EntryIDs leaves on the one message that is not an entry — not a subtraction against an
+	// entry count that may have come from a different payload.
+	off := asm.HeadLen(curIDs)
+	if len(cur) != off+entries {
 		// ids does not describe msgs, so no boundary through it can be trusted. Everything still gets
 		// summarised — the parts fall back to a flat transcript and say so in the log — because a
 		// summary that is merely slow beats a compaction that refuses to run.
-		return payloadRefs{tools: tools, warm: warm}
+		return payloadRefs{tools: curTools}
 	}
-	return payloadRefs{msgs: msgs, ids: ids, off: off, head: msgs[:off], tools: tools, warm: warm}
+	// Warmth is a claim about bytes, so it is checked as bytes and not as ids. The ids say the two
+	// payloads describe the same conversation in the same order; the comparison says the front they
+	// share really is the same request. The second half is not decoration: an edited entry keeps its
+	// id, so ids alone will call an edited message a prefix, and a stale prefix is not a slow summary —
+	// it is a summary of a conversation that no longer exists, billed to a cache that was never filled.
+	//
+	// An id list of nothing but empty strings says the payload came from a caller that never named its
+	// entries, which is a payload no claim can be checked against: no ids means no claim.
+	warm := len(sent) > 0 && named(sentIDs) && samePrefix(sentIDs, curIDs) && sameBytes(sent, cur)
+	return payloadRefs{msgs: cur, ids: curIDs, off: off, head: cur[:off], tools: curTools, warm: warm}
+}
+
+// sameBytes reports whether sent is still the front of cur, message for message. Deep equality is the
+// point: one assembler builds both, so anything but an equal prefix means the bytes the provider
+// cached are not the bytes about to be sent.
+func sameBytes(sent, cur []asm.Message) bool {
+	if len(sent) > len(cur) {
+		return false
+	}
+	for i := range sent {
+		if !reflect.DeepEqual(sent[i], cur[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// entriesUnit writes the count of a part's entries the way the line is read: "1 entry", "12 entries".
+func entriesUnit(n int) string {
+	if n == 1 {
+		return "1 entry"
+	}
+	return fmt.Sprintf("%d entries", n)
 }
 
 // samePrefix reports whether a is the front of b. A payload longer than the path is never a prefix of

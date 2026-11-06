@@ -42,50 +42,54 @@ func sentFixture() ([]asm.Message, []string, []llm.Tool) {
 	return sent, []string{"system:aa", "e1", "e2"}, []llm.Tool{{Name: "fs_read"}}
 }
 
-func TestSummaryPayloadKeepsTheSentPayloadWhileItIsStillThePrefix(t *testing.T) {
+// TestSummaryPayloadIsWarmWhileTheSentPayloadIsStillTheFront: two entries have been committed since the
+// request was made, so what the provider holds is now the front of the path rather than all of it. What
+// a part is cut from and what may be claimed about the cache are two questions — the first is answered
+// by the payload assembled now, because that is the only one that describes the two entries nobody has
+// sent yet, and the second is answered by the sent payload.
+func TestSummaryPayloadIsWarmWhileTheSentPayloadIsStillTheFront(t *testing.T) {
 	sent, sentIDs, tools := sentFixture()
-	// Two entries have been committed since that request, so the sent payload is now the front of the
-	// path rather than all of it.
 	cur := append(append([]asm.Message{}, sent...),
 		asm.Message{Role: "user", Content: "a question that arrived after it"},
 		asm.Message{Role: "assistant", Content: "and its answer"})
 	curIDs := append(append([]string{}, sentIDs...), "e3", "e4")
 
-	refs := summaryPayload(sent, sentIDs, tools, cur, curIDs, tools, 2)
+	refs := summaryPayload(sent, sentIDs, cur, curIDs, tools, 4)
 	if !refs.warm {
 		t.Fatal("a payload that is still the front of the path is exactly the prefix worth sending")
 	}
-	if len(refs.msgs) != len(sent) {
-		t.Fatalf("the chain must be cut from the sent payload, got %d messages, want %d: the two messages nobody has ever sent are not cache",
-			len(refs.msgs), len(sent))
+	if len(refs.msgs) != len(cur) {
+		t.Fatalf("the chain is cut from the payload that describes the whole path: %d messages, want %d — the two entries nobody has sent are still entries that have to be summarised",
+			len(refs.msgs), len(cur))
 	}
 	if len(refs.head) != 1 || refs.head[0].Role != "system" {
 		t.Fatalf("every part after the first opens with the system message, so it has to be separable: %+v", refs.head)
 	}
 	// Part 1 wants everything from the top through its last entry; a later part wants only its own.
-	if pre, ok := refs.through(1); !ok || len(pre) != 2 || !reflect.DeepEqual(pre, sent[:2]) {
+	if pre, ok := refs.through(1); !ok || len(pre) != 2 || !reflect.DeepEqual(pre, cur[:2]) {
 		t.Fatalf("part 1's prefix = %v, want the system head and entry 0", pre)
 	}
-	if got, ok := refs.messages(0, 1); !ok || !reflect.DeepEqual(got, sent[1:2]) {
+	if got, ok := refs.messages(0, 1); !ok || !reflect.DeepEqual(got, cur[1:2]) {
 		t.Fatalf("entry 0 = message 1 behind a system head, got %v (%v)", got, ok)
 	}
-	if got, ok := refs.messages(1, 2); !ok || !reflect.DeepEqual(got, sent[2:3]) {
+	if got, ok := refs.messages(1, 2); !ok || !reflect.DeepEqual(got, cur[2:3]) {
 		t.Fatalf("entry 1 = message 2, got %v (%v)", got, ok)
 	}
-	// A part reaching past the payload is refused rather than guessed at: the caller falls back to a
-	// transcript of those entries, which is honest, instead of a slice of someone else's conversation.
-	if _, ok := refs.messages(2, 3); ok {
-		t.Fatal("entry 2 is not in the sent payload, so it cannot be sliced out of it")
+	// An entry past the sent prefix is cold, not unknowable: it is on the path, the payload assembled
+	// now carries it, and flattening it into a transcript would lose every tool result whose answer
+	// travels in structuredContent.
+	if got, ok := refs.messages(2, 3); !ok || !reflect.DeepEqual(got, cur[3:4]) {
+		t.Fatalf("entry 2 arrived after the last request and still has to reach the summariser, got %v (%v)", got, ok)
 	}
-	if _, ok := refs.through(3); ok {
-		t.Fatal("part 1 cannot reach past the payload either")
+	if pre, ok := refs.through(4); !ok || len(pre) != len(cur) {
+		t.Fatalf("a part reaching the end of the path wants the whole payload, got %d messages (%v)", len(pre), ok)
 	}
 }
 
 // TestSummaryPayloadDropsTheSentPayloadTheMomentThePathMoves: a KV cache is keyed on bytes, so a
-// payload that differs anywhere is worth nothing — and sending it anyway is worse than slow, because
-// the summary would then be about a conversation that no longer exists. A rewritten entry, a rollback,
-// and a payload nobody identified are the three ways that happens.
+// payload that differs anywhere is worth nothing — and sending it anyway is worse than slow, because the
+// summary would then be about a conversation that no longer exists. A rewritten entry, an entry edited
+// where it stands, a rollback, an edited system prompt and a payload nobody identified are the ways.
 func TestSummaryPayloadDropsTheSentPayloadTheMomentThePathMoves(t *testing.T) {
 	sent, sentIDs, tools := sentFixture()
 	cur := append(append([]asm.Message{}, sent...), asm.Message{Role: "user", Content: "newest"})
@@ -93,24 +97,35 @@ func TestSummaryPayloadDropsTheSentPayloadTheMomentThePathMoves(t *testing.T) {
 
 	// A rewritten entry: the third message of the path is a different entry now.
 	rewritten := []string{"system:aa", "e1", "zzz"}
-	if r := summaryPayload(sent, rewritten, tools, cur, curIDs, tools, 3); r.warm {
+	if r := summaryPayload(sent, rewritten, cur, curIDs, tools, 3); r.warm {
 		t.Fatal("an entry that was rewritten is not a prefix, however many messages it shares")
 	}
 	// The path got shorter than what was sent (a rollback): the tail of the cache is gone.
-	if r := summaryPayload(sent, sentIDs, tools, cur[:2], sentIDs[:2], tools, 1); r.warm {
+	if r := summaryPayload(sent, sentIDs, cur[:2], sentIDs[:2], tools, 1); r.warm {
 		t.Fatal("a payload longer than the path cannot be a prefix of it")
 	}
+	// An entry rewritten where it stands: the ids still match and the bytes are a different request.
+	// This is what /entry/patch does, which is why ids alone cannot carry the claim.
+	patched := append([]asm.Message{}, cur...)
+	patched[1] = asm.Message{Role: "user", Content: "the oldest question, rewritten after the fact"}
+	if r := summaryPayload(sent, sentIDs, patched, curIDs, tools, 3); r.warm {
+		t.Fatal("an entry edited in place keeps its id, and the provider has never seen these bytes")
+	}
+	// Editing the system prompt changes every byte of the prompt while adding no entry at all.
+	if r := summaryPayload(cur, curIDs, cur, []string{"system:bb", "e1", "e2", "e3"}, tools, 3); r.warm {
+		t.Fatal("a different system prompt is a different prompt: nothing ahead of the first message survives it")
+	}
 	// Nothing named the messages, so nothing can be trusted about them.
-	if r := summaryPayload(sent, []string{"", "", ""}, tools, cur, []string{"", "", "", ""}, tools, 3); r.warm {
+	if r := summaryPayload(sent, []string{"", "", ""}, cur, []string{"", "", "", ""}, tools, 3); r.warm {
 		t.Fatal("empty ids are a prefix of anything, and that is the one answer that must not be yes")
 	}
-	if r := summaryPayload(sent, nil, tools, cur, []string{"system:aa", "e1", "e2", "e3"}, tools, 3); r.warm {
+	if r := summaryPayload(sent, nil, cur, []string{"system:aa", "e1", "e2", "e3"}, tools, 3); r.warm {
 		t.Fatal("no ids at all is the same case with fewer bytes")
 	}
 
 	// In every one of those cases the payload assembled now is used, and used whole: the summary still
 	// has to cover everything on the path.
-	r := summaryPayload(sent, rewritten, tools, cur, curIDs, tools, 3)
+	r := summaryPayload(sent, rewritten, cur, curIDs, tools, 3)
 	if len(r.msgs) != len(cur) {
 		t.Fatalf("the honest payload is the one assembled now: %d messages, want %d", len(r.msgs), len(cur))
 	}
@@ -123,7 +138,7 @@ func TestSummaryPayloadDropsTheSentPayloadTheMomentThePathMoves(t *testing.T) {
 // and with no system head there is nothing to skip.
 func TestSummaryPayloadWithoutASystemPrompt(t *testing.T) {
 	cur := []asm.Message{{Role: "user", Content: "one"}, {Role: "assistant", Content: "two"}}
-	r := summaryPayload(nil, nil, nil, cur, []string{"e1", "e2"}, nil, 2)
+	r := summaryPayload(nil, nil, cur, []string{"e1", "e2"}, nil, 2)
 	if len(r.head) != 0 {
 		t.Fatalf("no system prompt means no head, got %+v", r.head)
 	}
@@ -141,26 +156,12 @@ func TestSummaryPayloadWithoutASystemPrompt(t *testing.T) {
 // refuses to run is the worse failure.
 func TestSummaryPayloadRefusesToSliceAPayloadItCannotRead(t *testing.T) {
 	cur := []asm.Message{{Role: "user", Content: "one"}}
-	r := summaryPayload(nil, nil, nil, cur, []string{"e1", "e2", "e3"}, nil, 3)
+	r := summaryPayload(nil, nil, cur, []string{"e1", "e2", "e3"}, nil, 3)
 	if r.msgs != nil {
 		t.Fatal("three entries cannot be cut out of one message")
 	}
 	if _, ok := r.through(1); ok {
 		t.Fatal("and no part can be sliced out of it either")
-	}
-}
-
-// TestSummaryPayloadIsBlindToASizeChangeAlone: two different paths can be exactly as long, which is why
-// the decision is made on ids and never on a count. Editing the system prompt is the other case that a
-// count cannot see: it changes every byte of the prompt while adding no entry at all.
-func TestSummaryPayloadIsBlindToASizeChangeAlone(t *testing.T) {
-	sent := []asm.Message{{Role: "system", Content: "You are a test assistant."}, {Role: "user", Content: "the question"}}
-	cur := []asm.Message{{Role: "system", Content: "You are a test assistant."}, {Role: "user", Content: "a different question"}}
-	if r := summaryPayload(sent, []string{"system:aa", "e1"}, nil, cur, []string{"system:aa", "e2"}, nil, 1); r.warm {
-		t.Fatal("the same length is not the same conversation")
-	}
-	if r := summaryPayload(cur, []string{"system:aa", "e2"}, nil, cur, []string{"system:bb", "e2"}, nil, 1); r.warm {
-		t.Fatal("a different system prompt is a different prompt: nothing ahead of the first message survives it")
 	}
 }
 
@@ -243,11 +244,35 @@ func (p *chainProvider) Complete(_ context.Context, req llm.Request) (*llm.Resul
 	n := len(p.asks)
 	p.asks = append(p.asks, req)
 	p.mu.Unlock()
+	// Counted from the request itself, so that the numbers beside the log line cannot be satisfied by a
+	// fixture that made them up.
+	prompt := promptFor(req)
+	cache := prompt - 120
+	if cache < 0 {
+		cache = 0
+	}
 	return &llm.Result{
 		Content:      "SUMMARY " + strconv.Itoa(n+1),
 		FinishReason: "stop",
-		Usage:        &ir.Usage{PromptTokens: 1000 + n, CacheTokens: 900 + n, CompletionTokens: 40, HasPrompt: true},
+		Usage:        &ir.Usage{PromptTokens: prompt, CacheTokens: cache, CompletionTokens: 40, HasPrompt: true},
 	}, nil
+}
+
+// promptFor is the fake's four-bytes-to-a-token count of a request, tools included. The tests are about
+// a byte budget, and an invented constant would let a part vanish from its own request without a single
+// number in the fixture changing.
+func promptFor(req llm.Request) int {
+	n := 0
+	for _, m := range req.Messages {
+		n += len(msgText(m)) + len(m.Role)
+	}
+	for _, t := range req.Tools {
+		n += len(t.Name) + len(t.Description)
+	}
+	if n < 4 {
+		n = 4
+	}
+	return n / 4
 }
 
 func (p *chainProvider) NCTX(context.Context) int { return 0 }
@@ -324,8 +349,8 @@ func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message
 		// The loop sent this payload. That is what makes it worth its bytes.
 		s.rememberSent(sent, sentIDs, tools)
 	}
-	sentMsgs, sentIDsAgain, sentTools := s.lastSentPayload()
-	refs := summaryPayload(sentMsgs, sentIDsAgain, sentTools, built.All(), asm.EntryIDs(built), tools, len(built.Entries))
+	sentMsgs, sentIDsAgain, _ := s.lastSentPayload()
+	refs := summaryPayload(sentMsgs, sentIDsAgain, built.All(), asm.EntryIDs(built), tools, len(built.Entries))
 	if refs.warm != warm {
 		t.Fatalf("warm = %v, want %v", refs.warm, warm)
 	}
@@ -462,7 +487,7 @@ func TestTheChainNeverSummarisesNothing(t *testing.T) {
 	cfg := s.Config()
 	built, _, tools := s.build()
 	// More entries than there are messages: no boundary through this payload can be trusted.
-	refs := summaryPayload(nil, nil, tools, built.All(), asm.EntryIDs(built), tools, len(built.Entries)+3)
+	refs := summaryPayload(nil, nil, built.All(), asm.EntryIDs(built), tools, len(built.Entries)+3)
 	if refs.msgs != nil {
 		t.Fatal("the fixture was supposed to produce a payload that cannot be sliced")
 	}
@@ -520,3 +545,56 @@ type chainError struct{}
 func (e *chainError) Error() string { return "chain provider: no scripted turn, only summaries" }
 
 var errChainNoTurn = &chainError{}
+
+// ─── the two shapes a fixture kept missing ──────────────────────────────────
+//
+// Every test above handed the session a payload that described the whole path, which is the one case
+// where counting messages against entries happens to give the right answer. Out of a running loop that
+// never holds: the payload still in the provider's cache is a prefix of the path, so it is shorter than
+// it, and the two counts part company. These two tests are the live failure and the claim it traded on.
+
+// TestAPrefixShorterThanThePathStillHasASystemHead is the live bug in one fixture. The offset between an
+// entry index and a message index was worked out as len(ids) - entries: three messages over a
+// three-entry path is zero, read as "this payload has no system head", which shifted every slice of
+// every part one message to the left. Part 1 arrived as the system prompt alone; the server counted 655
+// prompt tokens for a part the ruler had priced at 3,840; the line beside it said "reused 529 (prefix
+// of the last request)"; and the summary was committed over a real user turn.
+func TestAPrefixShorterThanThePathStillHasASystemHead(t *testing.T) {
+	built := &asm.Built{
+		System: "You are a test assistant.",
+		Entries: []*ir.Entry{
+			{ID: "e1", Kind: ir.KindUser, Role: "user", Content: "ten kilobytes of notes the user just pasted"},
+			{ID: "e2", Kind: ir.KindAssistant, Role: "assistant", Content: "one line"},
+			{ID: "e3", Kind: ir.KindUser, Role: "user", Content: "and a second question"},
+		},
+		Messages: []asm.Message{
+			{Role: "user", Content: "ten kilobytes of notes the user just pasted"},
+			{Role: "assistant", Content: "one line"},
+			{Role: "user", Content: "and a second question"},
+		},
+	}
+	cur, curIDs := built.All(), asm.EntryIDs(built)
+	// The loop has only ever sent the first two entries of a three-entry path: that is what a cache is.
+	sent, sentIDs := cur[:3], curIDs[:3]
+
+	refs := summaryPayload(sent, sentIDs, cur, curIDs, nil, len(built.Entries))
+	if !refs.warm {
+		t.Fatal("the sent payload is the front of the path, so it is worth its bytes")
+	}
+	if len(refs.head) != 1 || refs.head[0].Role != "system" {
+		t.Fatalf("a payload shorter than the path still has its system head, got %+v", refs.head)
+	}
+	pre, ok := refs.through(1)
+	if !ok || len(pre) != 2 || !strings.Contains(msgText(pre[len(pre)-1]), "ten kilobytes") {
+		t.Fatalf("part 1 was handed %d message(s) and the entry it was told to read is not in it:%s",
+			len(pre), dumpForTest(pre))
+	}
+	if got, ok := refs.messages(0, 1); !ok || !strings.Contains(msgText(got[0]), "ten kilobytes") {
+		t.Fatalf("entry 0 is the message behind the head, got %v (%v)", got, ok)
+	}
+	// The head is what a later part reopens with, and an empty head would send part 2 off with no
+	// system message at all — a different prompt from the turn it is continuing.
+	if got, ok := refs.messages(2, 3); !ok || got[0].Content != "and a second question" {
+		t.Fatalf("the entry nobody has sent yet still has to be reachable, got %v (%v)", got, ok)
+	}
+}
