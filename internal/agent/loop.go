@@ -515,9 +515,14 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		s.stopAwaiting()
 		if err != nil {
 			// The reply is not on the path and never will be, so this is the moment to close its
-			// stream: what the hub is holding are fragments of a message that does not exist.
-			s.closeStream(streamID)
-			return false, fmt.Errorf("commit assistant entry: %w", err)
+			// stream: what the hub is holding are fragments of a message that does not exist. The reason
+			// travels on that closing frame, because the page above it is holding text that reads as an
+			// answer (see closeStreamErr), and it is the very sentence the run reports: one failure, said
+			// twice, in the two places that need to hear it — the bubble holding the text, and the toast
+			// saying the run stopped.
+			refused := fmt.Errorf("commit assistant entry: %w", err)
+			s.closeStreamErr(streamID, refused)
+			return false, refused
 		}
 		// Named with the stream it was written on, so the browser upgrades the node it has been drawing
 		// rather than drawing a second one for the same message (see Event.StreamID). The order of the two
@@ -639,6 +644,19 @@ func transientLLMError(err error) bool {
 // in the log, and a reload brought it back. So a generate that returns nothing still owes a goodbye.
 func (s *Session) closeStream(streamID string) {
 	s.emit(Event{Type: EvtDelta, Delta: &Delta{StreamID: streamID, Done: true}})
+}
+
+// closeStreamErr closes a stream whose reply was refused after it was already streamed out — today the
+// one way is storage saying no to the commit (see the caller). It is the moment a reader has to be told
+// more than "no more is coming": the fragments went out, so the page is holding a message that looks
+// finished and will never be in the log. The Done is still set, and that matters twice — it is what makes
+// the hub forget the fragments (so a reload is not left with a half reply forever), and it is what the UI
+// treats as the end of the buffer. What the reason adds is the difference between "an answer" and "an
+// answer that was thrown away"; an error event beside it could not make that difference, having no stream
+// id to aim at. Only ever send it together with the Done: a reason arriving mid-stream would be read as
+// the end and close a buffer still being written into.
+func (s *Session) closeStreamErr(streamID string, why error) {
+	s.emit(Event{Type: EvtDelta, Delta: &Delta{StreamID: streamID, Done: true, Error: why.Error()}})
 }
 
 // completeArgs reports whether accumulated tool-call arguments can be stored and sent back.
@@ -953,7 +971,7 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 			Ms:         ms,
 		})
 		if aerr != nil {
-			s.emit(Event{Type: EvtError, Info: "commit tool result: " + aerr.Error()})
+			s.refuseToolResult(run, aerr)
 			return aborted
 		}
 		run.Status = "ok"
@@ -970,6 +988,21 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 		s.emitState()
 	}
 	return aborted
+}
+
+// refuseToolResult is a tool run's closeStreamErr: the call happened, the path refused to take its result,
+// and the card that has been waiting since the call started is still on screen waiting. A card is keyed by
+// the run's id and only a tool_result names that id, so this is the frame that has to carry the news — an
+// error event beside it says "the run stopped" and leaves the card spinning, which reads as a call still
+// running. The status is the ordinary "error" (a tool that failed is drawn the same way), the reason rides
+// along, and no entry id is invented: the link a finished card grows is earned by the entry that answers the
+// call, and here there is nothing to point at. The error event is kept too — the run did stop, and the two
+// sentences are for two different readers, the card and the operator.
+func (s *Session) refuseToolResult(run *RunInfo, why error) {
+	run.Status = "error"
+	run.Error = "commit tool result: " + why.Error()
+	s.emit(Event{Type: EvtToolResult, Run: run})
+	s.emit(Event{Type: EvtError, Info: run.Error})
 }
 
 // countImages counts the images in a tool result — the number the UI reports, and text parts

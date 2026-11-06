@@ -78,6 +78,13 @@ type Delta struct {
 	ToolCall *ToolCallProgress `json:"toolCall,omitempty"`
 	// Done closes the stream buffer in the UI.
 	Done bool `json:"done,omitempty"`
+	// Error says this stream ends with nothing committed, and why. It rides on the Done rather than on an
+	// error event beside it for two reasons: the Done is what every reader already treats as the end (the
+	// hub forgets the stream's fragments on it), and a delta is the only frame that carries a stream id —
+	// so it is the only one that can reach the one node that is wrong. A reply storage refused otherwise
+	// looks, to the page that watched it being written, exactly like a reply that arrived: see
+	// closeStreamErr.
+	Error string `json:"error,omitempty"`
 }
 
 // ToolCallProgress tracks one streamed tool call.

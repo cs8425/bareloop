@@ -601,6 +601,14 @@ was on the wire, a compaction summary — omit the key. The entry arrives before
 its stream, which is the other half of the promise: nothing closes a buffer before the entry that would
 inherit it exists.
 
+A `delta` frame that closes a stream says `done`, and normally nothing else. The one case where that is a lie
+is a reply storage refused — a message already streamed out that will never be on the path — and there the
+closing frame carries `error` beside the `done`, holding the sentence the run reports. It rides on that frame
+because a live buffer is keyed by a stream id and an `error` event has none: without it the page that watched
+the text arrive keeps showing a message that looks finished, beside a toast about a run that stopped. A tool
+result the path refuses is the same case on the other frame that ends a thing - the `tool_result` which closes
+a card carries the refusal as its error, since a card left spinning reads as a call still running.
+
 ### Three moments for a message
 
 A message can arrive at three moments, and they are not the same transaction.

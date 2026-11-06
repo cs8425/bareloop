@@ -1,5 +1,6 @@
-// Two promises about one streamed reply, both learned the hard way from a run stopped between two
-// argument fragments (2026-11-05, a Stop landing inside fs_list's arguments):
+// Promises about the frames that end a thing — a streamed reply, a tool run — the first two learned the hard
+// way from a run stopped between two argument fragments (2026-11-05, a Stop landing inside fs_list's
+// arguments):
 //
 //  1. What reaches the log has to be storable. A tool call's arguments are kept as the provider
 //     wrote them (json.RawMessage), so a half-written object is not a field that fails to parse —
@@ -8,13 +9,20 @@
 //     that reloads mid-run can catch up, forgetting a stream's fragments only when the frame that
 //     closes them arrives. A stream that ends without that frame is replayed to every later reload:
 //     a tool card forever marked running, with nothing behind it in the log.
+//  3. When the log refuses what the browser was already shown, the frame that ends the thing has to say so
+//     (2026-11-06). A refusal leaves a buffer of text, or a card that has been spinning since the call, and
+//     each reads as exactly what it read as a moment ago: an answer, a call in flight. Only the closing frame
+//     can correct it, because only those frames carry the id the thing is keyed by — an error event can shout
+//     at the page, but not at one node.
 //
-// The first belongs to generate's accumulation, the second to every exit generate has.
+// The first belongs to generate's accumulation, the second to every exit generate has, the third to the two
+// places a commit can fail.
 package agent
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -130,6 +138,158 @@ func TestAGenerateThatReturnsNothingClosesItsStream(t *testing.T) {
 		t.Errorf("generate returned without a reply after emitting %d closing frames, want exactly 1;"+
 			" the stream it opened is still open in the hub, and every page that reloads will replay it"+
 			" as a tool call that never finishes", closes)
+	}
+}
+
+// TestARefusedReplyClosesItsStreamSayingSo is the frame a page gets when storage refuses a reply that was
+// already streamed out (the "commit assistant entry" way out of a turn). What the page was shown is
+// unreadable either way — the Done is what makes the hub forget the fragments, so no reload brings them
+// back — but the page that watched the text arrive keeps holding a message that looks finished, and only
+// the closing delta can tell it otherwise, because a delta names the stream and an error event does not.
+// So the promise pinned here is that the reason and the Done travel on one frame: a reason without a Done
+// would arrive mid-stream and close a buffer still being written into, and a Done without a reason is the
+// silence this replaces.
+func TestARefusedReplyClosesItsStreamSayingSo(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		frames []Event
+	)
+	m := NewManager(t.TempDir(), false, Config{}, func(e Event) {
+		mu.Lock()
+		frames = append(frames, e)
+		mu.Unlock()
+	}, nil)
+	s, err := m.Create(context.Background(), Config{ID: "refused", LLM: llm.Config{BaseURL: "http://127.0.0.1:1/v1"}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	s.emit(Event{Type: EvtDelta, Delta: &Delta{StreamID: "refused-t1-1", Content: "here is the answer"}})
+	s.closeStreamErr("refused-t1-1", errors.New("no space left on device"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	var (
+		closes  int
+		reasons []Delta
+	)
+	for _, e := range frames {
+		if e.Type != EvtDelta || e.Delta == nil || e.Delta.StreamID != "refused-t1-1" {
+			continue
+		}
+		if e.Delta.Done {
+			closes++
+		}
+		if e.Delta.Error != "" {
+			reasons = append(reasons, *e.Delta)
+		}
+	}
+	if closes != 1 {
+		t.Errorf("a refused reply closed its stream %d times, want exactly 1:%s", closes, describeFrames(frames))
+	}
+	if len(reasons) != 1 {
+		t.Fatalf("the refused stream carried %d reason(s), want 1 — a page holding that text has to be told it was"+
+			" thrown away, in the one frame that reaches it:%s", len(reasons), describeFrames(frames))
+	}
+	r := reasons[0]
+	if !r.Done {
+		t.Errorf("the reason travels on a frame that does not close the stream: a page reads a Done as the end, so"+
+			" this one lands mid-stream — and the hub, which forgets a stream's fragments on the Done, keeps the"+
+			" refused fragments for every later reload: %+v", r)
+	}
+	if !strings.Contains(r.Error, "no space left on device") {
+		t.Errorf("the closing frame says %q, which is not the reason", r.Error)
+	}
+
+	// Both wire shapes: the client reads the reason at delta.error, and a client that has never heard of
+	// the field must receive exactly the frame it received before — no key, not an empty one.
+	said, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(said) != `{"streamId":"refused-t1-1","done":true,"error":"no space left on device"}` {
+		t.Errorf("the frame a page reads is not this one: %s", said)
+	}
+	plain, err := json.Marshal(Delta{StreamID: "x-t1-1", Done: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(plain), "error") {
+		t.Errorf("an ordinary goodbye grew a key of its own: %s", plain)
+	}
+}
+
+// TestARefusedToolResultStillEndsItsCard is promise three on the other frame that ends a thing. A tool card
+// is keyed by the run's id and only a tool_result names it, so when the path refuses a result the one frame
+// that could say so is the one the loop used not to send: the card kept reading "running", forever, next to
+// an error event about a run that had stopped. Pinned here: the card gets its terminal frame, it says error
+// and why, and it invents no entry for the card to link to.
+func TestARefusedToolResultStillEndsItsCard(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		frames []Event
+	)
+	m := NewManager(t.TempDir(), false, Config{}, func(e Event) {
+		mu.Lock()
+		frames = append(frames, e)
+		mu.Unlock()
+	}, nil)
+	s, err := m.Create(context.Background(), Config{ID: "refused-tool", LLM: llm.Config{BaseURL: "http://127.0.0.1:1/v1"}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	run := &RunInfo{ID: "call-1", CallID: "call-1", Server: "stub", Tool: "fs_list", Status: "running"}
+	s.emit(Event{Type: EvtToolCall, Run: run})
+	s.refuseToolResult(run, errors.New("no space left on device"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	var (
+		ended  *RunInfo
+		toasts int
+		toast  string
+	)
+	for _, e := range frames {
+		switch {
+		case e.Type == EvtToolResult && e.Run != nil:
+			if ended != nil {
+				t.Errorf("one refused call ended its card twice")
+			}
+			ended = e.Run
+		case e.Type == EvtError:
+			toasts++
+			toast = e.Info
+		}
+	}
+	if ended == nil {
+		t.Fatalf("a refused tool result ended no card — the one still on screen reads running forever:%s", describeFrames(frames))
+	}
+	if ended.Status != "error" {
+		t.Errorf("the card a refusal ended says %q, not error", ended.Status)
+	}
+	if !strings.Contains(ended.Error, "commit tool result") || !strings.Contains(ended.Error, "no space left on device") {
+		t.Errorf("the card says %q, which is not the reason it was refused", ended.Error)
+	}
+	if ended.EntryID != "" {
+		t.Errorf("the frame points the card at %s, an entry this refusal never wrote", ended.EntryID)
+	}
+	if toasts != 1 || !strings.Contains(toast, "no space left on device") {
+		t.Errorf("the run got %d error event(s) (%q): the card and the operator are two readers, each needs the sentence",
+			toasts, toast)
+	}
+
+	body, err := json.Marshal(ended)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(body), `"status":"error"`) {
+		t.Errorf("the frame a card reads does not end it: %s", body)
+	}
+	if strings.Contains(string(body), "entryId") {
+		t.Errorf("a call with no entry grew a link anyway: %s", body)
 	}
 }
 
@@ -262,7 +422,7 @@ func describeFrames(frames []Event) string {
 		case e.Entry != nil:
 			fmt.Fprintf(&b, "\n  %d %s %s stream=%q", i, e.Type, e.Entry.Kind, e.StreamID)
 		case e.Delta != nil:
-			fmt.Fprintf(&b, "\n  %d delta %s done=%v", i, e.Delta.StreamID, e.Delta.Done)
+			fmt.Fprintf(&b, "\n  %d delta %s done=%v err=%q", i, e.Delta.StreamID, e.Delta.Done, e.Delta.Error)
 		default:
 			fmt.Fprintf(&b, "\n  %d %s", i, e.Type)
 		}
