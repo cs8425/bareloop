@@ -35,20 +35,21 @@ func region(n int) []*ir.Entry {
 	return out
 }
 
-// TestChunkFitLeavesRoomForTheAnswer is the whole point of the chain: instruction + partial summary
-// + part + max_tokens must stay inside n_ctx, otherwise the summary call dies exactly like the turn.
-func TestChunkFitLeavesRoomForTheAnswer(t *testing.T) {
+// TestAPartIsFilledToTheThresholdPosition is the whole definition of the chain: a part stops where the
+// conversation would have triggered a summary anyway (threshold% × n_ctx), and it asks for the same
+// answer the single call asks for. The arithmetic this replaces — n_ctx − (max + max/2 + an allowance)
+// — reserved a guess at the previous part's summary on every call, which is how a chain ended up with
+// parts far smaller than the window offered and an answer budget the model could not think inside.
+func TestAPartIsFilledToTheThresholdPosition(t *testing.T) {
 	for _, nctx := range []int{2048, 8192, 40960, 262144} {
-		for _, keep := range []int{10, 20, 50} {
-			p := Params{ThresholdPct: 70, KeepTargetPct: keep, SummaryMaxPct: 70}
-			fit, out := p.ChunkFit(nctx), p.ChunkMaxTokens(nctx)
-			if fit <= 0 {
-				t.Fatalf("nctx %d keep %d: fit %d must be positive", nctx, keep, fit)
-			}
-			if used := fit + out + out/2 + InstructionAllowance; used > nctx {
-				t.Fatalf("nctx %d keep %d: one request could cost %d tokens (fit %d + answer %d + partial %d + instruction %d)",
-					nctx, keep, used, fit, out, out/2, InstructionAllowance)
-			}
+		p := Params{ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70}
+		if got, want := p.ChunkFit(nctx), p.TriggerLevel(nctx); got != want {
+			t.Fatalf("nctx %d: a part fills to %d, want the threshold position %d", nctx, got, want)
+		}
+		// The cap on the answer belongs to summaryMax, not to the acceptance cap of the final summary:
+		// a summary written over three parts must not be thinner than the one call would have written.
+		if got, want := p.ChunkMaxTokens(nctx), p.SummaryMaxTokens(nctx); got != want {
+			t.Fatalf("nctx %d: a part may answer with %d tokens, the single call may use %d", nctx, got, want)
 		}
 	}
 	if got := (Params{}).ChunkFit(0); got != 0 {
@@ -56,21 +57,22 @@ func TestChunkFitLeavesRoomForTheAnswer(t *testing.T) {
 	}
 }
 
-func TestNeedsIterativeOnlyWhenItReallyDoesNotFit(t *testing.T) {
-	p := Params{ThresholdPct: 70, KeepTargetPct: 20, SummaryMaxPct: 70}
-	fit := p.ChunkFit(40960)
-	small := region(4)
-	if RegionTokens(small, nil) > fit {
-		t.Fatalf("fixture is too big to test the negative case: %d > %d", RegionTokens(small, nil), fit)
+// TestNeedsIterativeOnlyWhenTheRequestDoesNotFit fixes the boundary: over n_ctx splits, at or under it
+// goes out as one call. The 6924-of-8192 case is the live session that got folded into two serial parts
+// for nothing — it fitted, it was sent, it came back with a summary; the region's priced sum is what
+// said otherwise, and it is no longer in the room.
+func TestNeedsIterativeOnlyWhenTheRequestDoesNotFit(t *testing.T) {
+	if NeedsIterative(6924, 8192) {
+		t.Fatal("a request that fits must be sent: the chain pays several calls to summarise less")
 	}
-	if NeedsIterative(small, nil, 40960, p) {
-		t.Fatal("a region that fits must not switch to the chain (it would pay several calls for nothing)")
+	if NeedsIterative(8192, 8192) {
+		t.Fatal("exactly the window is not over it")
 	}
-	if !NeedsIterative(region(400), nil, 40960, p) {
-		t.Fatal("a region larger than one request must switch to the chain")
+	if !NeedsIterative(8193, 8192) {
+		t.Fatal("one token over the window is a request the provider turns down")
 	}
-	if NeedsIterative(region(400), nil, 0, p) {
-		t.Fatal("without n_ctx there is no plan")
+	if NeedsIterative(100000, 0) {
+		t.Fatal("without a configured window there is no ceiling to exceed")
 	}
 }
 

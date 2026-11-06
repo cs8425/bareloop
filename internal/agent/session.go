@@ -311,10 +311,31 @@ func (s *Session) effective() (path []*ir.Entry, kept []*ir.Entry, cmp *ir.Entry
 
 // build runs the single assembler over the effective path (§5.4 choke point).
 func (s *Session) build() (*asm.Built, *asm.Sizes, []llm.Tool) {
-	_, kept, cmp := s.effective()
+	path, kept, cmp := s.effective()
 	built := asm.Assemble(asm.Payload{System: s.Config().SystemPrompt, Kept: kept, Summary: cmp}, s.cfgOptions())
-	sizes := asm.DeriveSizes(built)
-	return built, sizes, s.visibleTools()
+	tools := s.visibleTools()
+	head := headTokens(s.Config().SystemPrompt, tools)
+	// Ask the path for its measurements before anything reads a size table: the numbers a later
+	// compaction will need are only available while the requests that made them are still adjacent
+	// to each other. Held with the log because measuring writes onto the entries, and a second
+	// reader must not see a half-written count.
+	s.mu.Lock()
+	asm.Stamp(path, head, built.StructuredCap)
+	sizes := asm.DeriveSizes(built, head)
+	s.mu.Unlock()
+	return built, sizes, tools
+}
+
+// headTokens estimates the part of every prompt that is nobody's message: the system prompt and the
+// tool schemas. A server's count never separates them from the first message — the first request is
+// the only thing that ever held them apart from each other — so this is the estimated floor of a
+// size table, estimated by the one code that can see both the prompt and the array.
+func headTokens(system string, tools []llm.Tool) int {
+	n := asm.TokensOf(system)
+	for _, t := range tools {
+		n += asm.TokensOf(t.Name + t.Description + string(t.Parameters))
+	}
+	return n
 }
 
 // visibleTools is the tool array of the payload being built: the run's snapshot while a run is in

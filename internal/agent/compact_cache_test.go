@@ -354,7 +354,7 @@ func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message
 	if refs.warm != warm {
 		t.Fatalf("warm = %v, want %v", refs.warm, warm)
 	}
-	ruler := compact.NewRuler(built.Entries, built.StructuredCap, 0)
+	ruler := compact.NewRuler(built.StructuredCap)
 	text, size, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1)
 	if err != nil {
 		t.Fatalf("the chain failed: %v", err)
@@ -492,7 +492,7 @@ func TestTheChainNeverSummarisesNothing(t *testing.T) {
 		t.Fatal("the fixture was supposed to produce a payload that cannot be sliced")
 	}
 	p := compact.Params{SummaryMode: compact.ModeIterative, ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70, Marker: compact.DefaultMarker}
-	ruler := compact.NewRuler(built.Entries, built.StructuredCap, 0)
+	ruler := compact.NewRuler(built.StructuredCap)
 	text, _, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1)
 	if err != nil {
 		t.Fatalf("an unsliceable payload is a reason to fall back, not a reason to fail: %v", err)

@@ -143,6 +143,14 @@ type Entry struct {
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Model       string `json:"model,omitempty"`
 	Usage       *Usage `json:"usage,omitempty"`
+	// Tokens is this entry's own measured size in tokens: what sending it costs, worked out as the
+	// difference between two prompt counts a server made (see asm.Stamp). It is derived, not recorded —
+	// the counts it comes from are the log's, and it is recomputed from them whenever the path is
+	// assembled — so it is never written out: a stored copy would be a second truth about a conversation,
+	// and one that quietly goes stale the moment the bytes it was measured over change (a tool array, an
+	// assembler mode). Zero means it has not been worked out yet, which is why no estimate lives here
+	// either: an estimate is derived fresh from the bytes every time it is needed.
+	Tokens int `json:"-"`
 	// Finish is the provider's finish reason ("stop", "tool_calls", "length", …).
 	Finish string `json:"finishReason,omitempty"`
 	// Ms is how long generating this entry / running this tool took.

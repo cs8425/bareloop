@@ -257,17 +257,12 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 
 	before, available := s.usedNow()
 	res.Before = before
-	// The size table walks the boundary — that is what its telescoping sum is for (§2.4) — but it must
-	// never price one entry, so the summary's own arithmetic gets a ruler of its own. It reads the same
-	// usage the table reads, per reply: between two of the server's own prompt counts sits the measured
-	// size of everything in between, spread over the entries that caused it rather than dropped on the
-	// last one. What the server never counted falls back to an estimate, and only that estimate is
-	// calibrated against the request total (§0).
-	var realTotal int
-	if available {
-		realTotal = before
-	}
-	ruler := compact.NewRuler(built.Entries, built.StructuredCap, realTotal)
+	// Cutting a region into serial parts prices one entry at a time, which is not what the boundary
+	// table is for (§2.4). The ruler reads each entry's own measured cost — the difference between two
+	// of the server's prompt counts, which asm.Stamp worked out from the log and keeps on the entry —
+	// so a part is planned against what a server counted, and only an entry no request ever carried
+	// falls back to an estimate (§0).
+	ruler := compact.NewRuler(built.StructuredCap)
 	if nctx <= 0 {
 		// Without n_ctx there is no basis for a budget, so refuse and keep everything (§3.10).
 		res.Skipped = string(compact.ReasonNCTXUnknown)
@@ -311,12 +306,9 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 	if plan.Cut < len(region) {
 		sumRegion = region[:plan.Cut]
 	}
-	if p.SummaryMode != compact.ModeIterative && p.SummaryMode != compact.ModeMapReduce &&
-		compact.NeedsIterative(sumRegion, ruler, nctx, p) {
-		s.logf("compaction (%s): region of %d tokens does not fit a %d-token request, summarising serially",
-			trig, compact.RegionTokens(sumRegion, ruler), p.ChunkFit(nctx))
-		p.SummaryMode = compact.ModeIterative
-	}
+	// Whether this summary is one request or a serial chain is decided below, next to `refs`: the
+	// question is "can the request I am about to send be sent", and the bytes it is made of — the
+	// payload, the instruction, the entries that were never sent — are only all visible there.
 
 	// The summary request is cut from the last payload actually sent (§5.2), because that is the byte
 	// sequence the provider's KV cache holds: a first call that starts anywhere else is a new
@@ -330,6 +322,15 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		// something was and the path has moved since (a time travel, a deleted entry). Either way the
 		// provider has nothing to reuse and the summary is worth what a full prefill costs.
 		s.logf("compaction (%s): the payload this process sent is not a prefix of the path, so the summary is cut from the one assembled now: expect a full prefill", trig)
+	}
+
+	// The shape is decided here, not above, because it is a question about these bytes.
+	if p.SummaryMode != compact.ModeIterative && p.SummaryMode != compact.ModeMapReduce {
+		if one := s.summaryRequestSize(refs, sumRegion, strings.TrimSpace(instruction), plan.Split, p); compact.NeedsIterative(one, nctx) {
+			s.logf("compaction (%s): one summary request would be %d tokens against a %d-token window, summarising serially",
+				trig, one, nctx)
+			p.SummaryMode = compact.ModeIterative
+		}
 	}
 
 	summaryModel := cfg.LLM.Model
@@ -472,9 +473,6 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 			return "", 0, fmt.Errorf("part %d/%d: %w", i+1, len(chunks), err)
 		}
 		text := strings.TrimSpace(res.Content)
-		if text == "" {
-			return "", 0, fmt.Errorf("part %d/%d: empty summary", i+1, len(chunks))
-		}
 		if res.Usage != nil {
 			reported = res.Usage.CompletionTokens
 		}
@@ -501,6 +499,20 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		s.logf("compaction: part %d/%d read %s ≈%d tokens → prompt %s, reused %s (%s), answer %s",
 			i+1, len(chunks), entriesUnit(len(c.Entries)), c.Tokens, prompt, reused,
 			map[bool]string{true: "prefix of the last request", false: "payload rebuilt"}[refs.warm], answer)
+		// Said after the numbers, never before them: "empty summary" on its own is not a fact anybody can
+		// act on, and the two ways it happens want opposite fixes — a model that spent the whole completion
+		// reasoning ends a request exactly like a model that refused to answer.
+		if text == "" {
+			reason, tokens := "unknown", "n/a"
+			if res.FinishReason != "" {
+				reason = res.FinishReason
+			}
+			if res.Usage != nil {
+				tokens = fmt.Sprint(res.Usage.CompletionTokens)
+			}
+			return "", 0, fmt.Errorf("part %d/%d: empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
+				i+1, len(chunks), reason, tokens, len(res.Reasoning))
+		}
 		prev = text
 	}
 	if strings.TrimSpace(prev) == "" {
@@ -680,6 +692,38 @@ func summaryRequest(cfg Config, call compact.SummaryCall) llm.Request {
 	return req
 }
 
+// summaryRequestSize is the size of the one request the single-call shape would put on the wire: the
+// prompt the provider counted for the payload this summary is cut from (the same bytes, so the same
+// count), or — when this process never sent those bytes — the region priced with the reference ruler;
+// plus the instruction that gets appended; plus the entries the payload does not carry yet.
+//
+// Attachments ride along at asm's reference cost (an image is 1000) because RegionTokens asks asm.
+// It is compared against n_ctx and nothing else: the question is whether the call can be sent at all,
+// not how long the answer may be (that is compact.Params.SummaryMaxTokens).
+func (s *Session) summaryRequestSize(refs payloadRefs, sumRegion []*ir.Entry, extra string, split bool, p compact.Params) int {
+	size := 0
+	if used, ok := s.usedNow(); ok && refs.warm {
+		size = used
+	} else {
+		size = compact.RegionTokens(sumRegion, nil)
+	}
+	// The payload carries the conversation up to some point of the region; whatever the path holds past
+	// that point is going on the wire for the first time in this request. Only a warm payload says
+	// where that point is — a rebuilt one has no ids worth counting against.
+	if refs.warm {
+		carried := 0
+		for _, id := range refs.ids {
+			if id != "" {
+				carried++
+			}
+		}
+		if carried < len(sumRegion) {
+			size += compact.RegionTokens(sumRegion[carried:], nil)
+		}
+	}
+	return size + compact.TextTokens(p.SummaryInstruction(split)) + compact.TextTokens(extra)
+}
+
 // summarize performs one summary attempt with the complete (non-streaming) call of §3.5.
 func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
 	region []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int) (string, int, error) {
@@ -695,9 +739,9 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	case compact.ModeIterative, compact.ModeMapReduce:
 		return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt)
 	default:
-		if compact.NeedsIterative(sumRegion, ruler, s.nctxLocked(), p) {
-			s.logf("compaction: region of %d tokens does not fit a %d-token request, summarising serially",
-				compact.RegionTokens(sumRegion, ruler), p.ChunkFit(s.nctxLocked()))
+		if one := s.summaryRequestSize(refs, sumRegion, extra, plan.Split, p); compact.NeedsIterative(one, s.nctxLocked()) {
+			s.logf("compaction: one summary request would be %d tokens against a %d-token window, summarising serially",
+				one, s.nctxLocked())
 			return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt)
 		}
 	}
@@ -731,7 +775,15 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	}
 	text := strings.TrimSpace(res.Content)
 	if text == "" {
-		return "", 0, errors.New("empty summary")
+		reason, tokens := "unknown", "n/a"
+		if res.FinishReason != "" {
+			reason = res.FinishReason
+		}
+		if res.Usage != nil {
+			tokens = fmt.Sprint(res.Usage.CompletionTokens)
+		}
+		return "", 0, fmt.Errorf("empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
+			reason, tokens, len(res.Reasoning))
 	}
 	reported := 0
 	if res.Usage != nil {

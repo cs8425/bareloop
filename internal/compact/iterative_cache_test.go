@@ -242,47 +242,37 @@ func TestThePartIsTheMessageItselfNotARenderingOfIt(t *testing.T) {
 
 // ─── the ruler ────────────────────────────────────────────────────────────────
 
-// TestRulerScalesTheEstimateToTheRealTotal is the case where a real number exists and is not per entry:
-// a session whose replies were never measured, where the one number the server gave is a total. The
-// shape of the answer still comes from the estimate and the scale from the real number, and the two are
-// made to meet exactly, because the number the region is cut against has to be the number the server
-// counted. Where the replies ARE measured this calibration is not applied at all - see
-// TestRulerDoesNotPriceTheUnsentTailAtNothing.
-func TestRulerScalesTheEstimateToTheRealTotal(t *testing.T) {
-	all := []*ir.Entry{txt("1", "user", 4000), txt("2", "assistant", 4000)}
-	one := asm.Estimate(all[0], 0)
-	if asm.Estimate(all[1], 0) != one {
-		t.Fatalf("the fixture assumed two identical entries, got %d and %d", one, asm.Estimate(all[1], 0))
-	}
-	// The server says the request that carried both entries was 1.5x what the estimates add up to.
-	real := one * 3
-	r := NewRuler(all, 0, real)
-	if got := r.Tokens(all[0]); got != one*3/2 {
-		t.Fatalf("one entry = %d tokens, want %d (the estimate scaled by the server's ratio)", got, one*3/2)
-	}
-	if got := RegionTokens(all, r); got != real {
-		t.Fatalf("the region = %d tokens, want the %d the server reported for these same entries", got, real)
-	}
-}
+// The ruler is a reader. What an entry costs is measured once, by asm.Stamp, from the difference
+// between two prompt counts a server made, and it lives on the entry until then (ir.Entry.Tokens);
+// how that measurement is worked out, split and kept honest is internal/asm/stamp_test.go. What is
+// left for a ruler is the two ends: take the number that was counted, and for the entries no request
+// ever carried, estimate the way the assembler would send them.
 
-// TestRulerWithoutARealNumberIsTheEstimate: a fresh session, or one that has never been measured, must
-// not become more confident than it was. A nil ruler is the same answer, which is what lets every
-// existing caller keep its numbers.
-func TestRulerWithoutARealNumberIsTheEstimate(t *testing.T) {
-	all := region(5)
-	r := NewRuler(all, 0, 0)
-	var none *Ruler
-	for _, e := range all {
-		if got := r.Tokens(e); got != asm.Estimate(e, 0) {
-			t.Fatalf("with no real total one entry = %d, want the estimate %d", got, asm.Estimate(e, 0))
-		}
-		if got := none.Tokens(e); got != asm.Estimate(e, 0) {
-			t.Fatalf("a nil ruler = %d, want the estimate %d", got, asm.Estimate(e, 0))
-		}
+// TestRulerTakesTheNumberThatWasCounted: an entry the server priced at 300 tokens is not 10,000 tokens
+// because four bytes makes a token, and it is not the estimate of a document the assembler may not even
+// send. The estimate decides where a part is cut, so the wrong one buys a summariser call over a
+// conversation that fits in one.
+func TestRulerTakesTheNumberThatWasCounted(t *testing.T) {
+	measured := txt("t1", "tool", 40000)
+	measured.Tokens = 300
+	blank := txt("u2", "user", 500)
+
+	r := NewRuler(0)
+	if got := r.Tokens(measured); got != 300 {
+		t.Fatalf("a measured entry = %d tokens, want the 300 that were counted for it (it estimates at %d)",
+			got, asm.Estimate(measured, 0))
 	}
-	// A real total is only useful if there is something to divide it over.
-	if got := NewRuler(nil, 0, 100000).Tokens(txt("x", "user", 100)); got != asm.Estimate(txt("x", "user", 100), 0) {
-		t.Fatalf("a real total with no entries to calibrate against still changed the answer: %d", got)
+	if got, want := r.Tokens(blank), asm.Estimate(blank, 0); got != want {
+		t.Fatalf("an entry nobody counted = %d tokens, want its estimate %d", got, want)
+	}
+	var none *Ruler
+	if got, want := none.Tokens(blank), asm.Estimate(blank, 0); got != want {
+		t.Fatalf("a nil ruler = %d tokens, want the estimate %d it has always been", got, want)
+	}
+	// An entry no request ever carried is not free because the ones beside it were counted: it is the
+	// huge thing about to be sent, and it is the reason the summary is being asked for.
+	if RegionTokens([]*ir.Entry{measured, blank}, r) != 300+asm.Estimate(blank, 0) {
+		t.Fatalf("the region did not add a measurement to an estimate: %d", RegionTokens([]*ir.Entry{measured, blank}, r))
 	}
 }
 
@@ -293,8 +283,8 @@ func TestRulerWithoutARealNumberIsTheEstimate(t *testing.T) {
 func TestRulerPricesAStructuredDocumentAtTheCeilingTheAssemblerHonours(t *testing.T) {
 	doc := json.RawMessage(strings.Repeat("{}", 20000)) // 40 KB of structuredContent
 	e := &ir.Entry{ID: "t", Kind: ir.KindTool, Role: "tool", Content: "ok", Structured: doc}
-	capped := NewRuler([]*ir.Entry{e}, 16384, 0).Tokens(e)
-	wide := NewRuler([]*ir.Entry{e}, 200000, 0).Tokens(e)
+	capped := NewRuler(16384).Tokens(e)
+	wide := NewRuler(200000).Tokens(e)
 	if capped >= wide {
 		t.Fatalf("a 16 KB ceiling and a 200 KB ceiling priced the same entry alike: %d vs %d", capped, wide)
 	}
@@ -303,29 +293,28 @@ func TestRulerPricesAStructuredDocumentAtTheCeilingTheAssemblerHonours(t *testin
 	}
 }
 
-// TestNeedsIterativeFollowsTheRealTotalAndNotTheSumOfEstimates is the live failure, reduced: a region
-// whose per-entry numbers add up to more than one request can carry, while the same conversation
-// measured by the server fits inside one. The first says "cut it into a chain of 0%-reused calls";
-// the second says one call, on the cache. The real number wins, because it is the one the server
-// counted.
-func TestNeedsIterativeFollowsTheRealTotalAndNotTheSumOfEstimates(t *testing.T) {
-	p := chainParams()
+// TestNeedsIterativeIsBlindToThePricedRegion is the live failure, reduced. The region's estimated sum
+// said "fold this into a chain of near-zero-reuse calls" while the prompt the server had counted
+// fitted one request — the first is a guess about bytes, the second is a fact about a request. The
+// decision now takes the fact and nothing else: a priced sum cannot reach it at all, which is what the
+// two-int signature is for (the caller counts the payload, the instruction and the never-sent tail,
+// because only it can see all three).
+func TestNeedsIterativeIsBlindToThePricedRegion(t *testing.T) {
 	const nctx = 40960
-	fit := p.ChunkFit(nctx)
-	if fit <= 0 {
-		t.Fatal("no fit means no plan to test")
-	}
 	var all []*ir.Entry
-	for RegionTokens(all, nil) < 2*fit {
+	for RegionTokens(all, nil) < 2*nctx {
 		all = append(all, txt("e"+strconv.Itoa(len(all)), "user", 500))
 	}
-	if !NeedsIterative(all, nil, nctx, p) {
-		t.Fatal("the fixture has to look too big before the real number can say otherwise")
+	if RegionTokens(all, nil) < 2*nctx {
+		t.Fatal("the fixture has to look enormous for the ruler's sum to be worth comparing")
 	}
-	r := NewRuler(all, 0, fit/2)
-	if NeedsIterative(all, r, nctx, p) {
-		t.Fatalf("the server measured these entries at half a request: one call, on the cache, must be enough (%d tokens against a fit of %d)",
-			RegionTokens(all, r), fit)
+	// The same conversation, counted by a server: 24k of a 40k window. One call, on the cache.
+	if NeedsIterative(24000, nctx) {
+		t.Fatalf("a prompt the server counted inside the window must be sent: the ruler priced %d entries at %d",
+			len(all), RegionTokens(all, nil))
+	}
+	if !NeedsIterative(2*nctx, nctx) {
+		t.Fatal("a prompt twice the window is a call the provider rejects: that is the chain's job")
 	}
 }
 
@@ -336,7 +325,7 @@ func TestNeedsIterativeFollowsTheRealTotalAndNotTheSumOfEstimates(t *testing.T) 
 func TestChunkPlanReportsWhereAndHowMuch(t *testing.T) {
 	p := chainParams()
 	const nctx = 40960
-	r := region(220)
+	r := region(400) // worth ~50k tokens against a part of 28672: two parts, and a place to cut between them
 	chunks := PlanChunks(r, nil, nctx, p)
 	if len(chunks) < 2 {
 		t.Fatalf("expected several parts, got %d", len(chunks))
@@ -362,100 +351,5 @@ func TestChunkPlanReportsWhereAndHowMuch(t *testing.T) {
 	}
 	if sum != RegionTokens(r, nil) {
 		t.Fatalf("the parts add up to %d of the region's %d tokens", sum, RegionTokens(r, nil))
-	}
-}
-
-// ─── the ruler, per entry ──────────────────────────────────────────────────────
-
-// measuredReply is an assistant entry the server counted: it was handed `prompt` tokens, `cache` of
-// them reused, and it answered with `completion`. The real numbers live here, on the entries, and a
-// ruler that does not read them is estimating a conversation it was told the size of.
-func measuredReply(id string, prompt, cache, completion int) *ir.Entry {
-	e := txt(id, "assistant", 500)
-	e.Usage = &ir.Usage{PromptTokens: prompt, CacheTokens: cache, CompletionTokens: completion, HasPrompt: true, HasCompletion: true}
-	return e
-}
-
-func estSum(all []*ir.Entry) int {
-	out := 0
-	for _, e := range all {
-		out += asm.Estimate(e, 0)
-	}
-	return out
-}
-
-// TestRulerUsesTheNumbersTheServerCountedPerEntry is the live failure, reduced to five entries: a tool
-// result that looks like ten thousand tokens at four bytes each, inside a stretch of conversation the
-// provider measured at three hundred. The estimate decides where the parts are cut, so the session pays
-// for a document that is not there - and the real number, which is on the reply beside it, is never read.
-func TestRulerUsesTheNumbersTheServerCountedPerEntry(t *testing.T) {
-	tool := txt("t1", "tool", 40000)
-	all := []*ir.Entry{
-		txt("u1", "user", 500),
-		measuredReply("a1", 1000, 900, 200),
-		tool,
-		txt("u2", "user", 500),
-		measuredReply("a2", 1500, 1000, 50),
-	}
-	r := NewRuler(all, 0, 0)
-
-	// The second reply was handed the first reply's prompt, its answer, and whatever came between: the
-	// server's own arithmetic adds up to the whole path, and the ruler has to add up to the same number.
-	if got, want := RegionTokens(all, r), 1500+50; got != want {
-		t.Fatalf("the measured path is priced at %d tokens, want the %d the server counted for it (its entries estimate to %d)",
-			got, want, estSum(all))
-	}
-	if got := r.Tokens(all[1]); got != 200 {
-		t.Fatalf("a reply costs what it generated: %d, want 200", got)
-	}
-	// The 300 tokens of growth between the two answers belong to the two entries between them, to both:
-	// the size table gave the whole segment to the last one and zeros to the rest, which is a table for
-	// walking a boundary and not a ruler for cutting a part.
-	if got := r.Tokens(tool) + r.Tokens(all[3]); got != 300 {
-		t.Fatalf("the entries between the measured replies are worth %d tokens, want the 300 the server counted", got)
-	}
-	if r.Tokens(all[3]) < 1 {
-		t.Fatalf("the segment landed on one entry after all: %d and %d", r.Tokens(tool), r.Tokens(all[3]))
-	}
-	if got := r.Tokens(tool); got >= 300 {
-		t.Fatalf("the huge tool result was handed the whole segment (%d of 300)", got)
-	}
-	if got, est := r.Tokens(tool), asm.Estimate(tool, 0); got >= est {
-		t.Fatalf("the entry still costs its estimate: measured %d, estimated %d", got, est)
-	}
-}
-
-// TestRulerDoesNotPriceTheUnsentTailAtNothing: the total the caller has is the last request's context,
-// which cannot contain the message that has not been sent yet. Scaling the estimates so they land on
-// that total is right when nothing was counted entry by entry, and would price the reason for the
-// compaction - the huge thing about to go out - at nothing at all once the replies explain it.
-func TestRulerDoesNotPriceTheUnsentTailAtNothing(t *testing.T) {
-	tail := txt("u9", "user", 40000)
-	all := []*ir.Entry{txt("u1", "user", 500), measuredReply("a1", 1000, 900, 100), tail}
-	r := NewRuler(all, 0, 1100)
-	if got, want := r.Tokens(tail), asm.Estimate(tail, 0); got != want {
-		t.Fatalf("the unsent tail = %d tokens, want its estimate %d", got, want)
-	}
-	if got := r.Tokens(all[1]); got != 100 {
-		t.Fatalf("the measured reply = %d, want the 100 tokens it generated", got)
-	}
-}
-
-// TestRulerIgnoresAnArithmeticThatNoLongerDescribesThePath: prompt counts are only a difference when
-// they are about the same conversation. Time travel, a deleted entry or a rollback makes the second
-// number smaller than the first, and the difference is then not a size - it is a subtraction between two
-// unrelated requests, and a negative one is the worst possible size for a part.
-func TestRulerIgnoresAnArithmeticThatNoLongerDescribesThePath(t *testing.T) {
-	mid := txt("t1", "tool", 4000)
-	all := []*ir.Entry{txt("u1", "user", 500), measuredReply("a1", 1000, 900, 100), mid, measuredReply("a2", 500, 0, 20)}
-	r := NewRuler(all, 0, 0)
-	if got, want := r.Tokens(mid), asm.Estimate(mid, 0); got != want {
-		t.Fatalf("a segment whose arithmetic went negative = %d tokens, want the estimate %d", got, want)
-	}
-	if got := r.Tokens(all[3]); got != 20 {
-		t.Fatalf("a reply costs what it generated even after a rollback: %d", got)
-	}
-	if RegionTokens(all, r) <= 0 {
-		t.Fatal("the region priced itself out of existence")
 	}
 }

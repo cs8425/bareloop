@@ -52,7 +52,7 @@ func selNoBoundaryPath() []*ir.Entry {
 
 // selSizes goes through the assembler's own sizing code rather than inventing a table.
 func selSizes(path []*ir.Entry) *asm.Sizes {
-	return asm.DeriveSizes(&asm.Built{Entries: path})
+	return asm.DeriveSizes(&asm.Built{Entries: path}, 0)
 }
 
 func TestSelectTailIsTheGreaterOfCapAndFloor(t *testing.T) {

@@ -52,177 +52,50 @@ const (
 	InstructionAllowance = 1200
 )
 
-// ChunkMaxTokens is max_tokens for one call of the chain: the acceptance cap, because an answer
-// longer than that is thrown away by Accepts anyway, and never more than a quarter of the window -
-// the part has to fit next to it.
+// ChunkMaxTokens is max_tokens for one call of the chain — the SAME number the single summary call
+// uses, because a chain is that question asked about one part of the conversation at a time, and the
+// spec asks nothing more of it. A summary written over parts is therefore not allowed to be thinner
+// than the one a single call would have written, and it is not allowed to be thicker either: the cap
+// that decides whether the summary is worth keeping is SummaryCap, applied to the final answer, never
+// to an intermediate one — the two used to be conflated here, and the quarter of the window this
+// clamped to before that charged the window for its own answer twice. On an 8k window the clamp landed
+// below one honest round of thinking: the model spent all 2048 completion tokens reasoning and
+// returned no summary text at all.
 func (p Params) ChunkMaxTokens(nctx int) int {
-	if nctx <= 0 {
-		return 0
-	}
-	out := p.SummaryCap(nctx)
-	if quarter := nctx / 4; out > quarter {
-		out = quarter
-	}
-	if out < 64 {
-		out = 64
-	}
-	return out
+	return p.SummaryMaxTokens(nctx)
 }
 
-// ChunkFit is how much conversation one call of the chain may carry:
-// n_ctx - max_tokens - (the previous partial summary, asked to stay at most half the cap) - the
-// instruction allowance. The floors below only apply when they still fit that arithmetic: a fit
-// that quietly exceeds the window is the exact bug this function exists to prevent.
+// ChunkFit is where a part of the chain stops: the threshold position, threshold% × n_ctx — the same
+// number that decided this conversation needs a summary at all, so a part is "the conversation as the
+// loop would have sent it, up to the message that tipped it past the threshold".
+//
+// What it used to be, and why that is not coming back: n_ctx − (max_tokens + max_tokens/2 + an
+// instruction allowance), where the half was a guess at how big the previous part's summary would be.
+// The previous summary is not a guess — it is text the caller is holding — and reserving for it here
+// is how a chain ended up with parts smaller than the window had to offer.
 func (p Params) ChunkFit(nctx int) int {
-	if nctx <= 0 {
-		return 0
-	}
-	out := p.ChunkMaxTokens(nctx)
-	rest := out + out/2 + InstructionAllowance
-	fit := nctx - rest
-	if fit < nctx/8 && nctx/8+rest <= nctx {
-		fit = nctx / 8
-	}
-	if fit < 512 && 512+rest <= nctx {
-		fit = 512
-	}
-	if fit < 0 {
-		return 0
-	}
-	return fit
+	return p.TriggerLevel(nctx)
 }
 
 // Ruler is the size used for cutting.
 //
-// Two numbers get confused here, and this type exists to keep them apart. What the provider counted,
-// reply by reply, is on the entry: every assistant entry carries the usage of the request that produced
-// it (ir.Entry.Usage), and the difference between one reply's prompt count and the next, less the
-// answer in between, is exactly how much the conversation grew on the wire in between - a real number,
-// per entry, with no estimate in it anywhere. What one entry costs on its own is a different question,
-// which no server answers, because an entry does not have one: a prompt is a prefix, and its cost
-// belongs to the request.
-//
-// Why the size table cannot do this job: asm.DeriveSizes reads that same usage, gets the arithmetic
-// right, and then attributes a whole segment's growth to that segment's LAST entry while zeroing the
-// others - the right table for walking one boundary, where only the cumulative sum is ever read. Used
-// as the size of ONE entry it prices the same text twice, and a cut made from it was measured: a region
-// reported as 314,524 tokens for a payload the server had just measured at 184,383, and serial parts of
-// 4,378 / 4,416 / 80,641 prompt tokens, because one entry carrying a whole request's spike becomes its
-// own part while everything measured at zero piles up in the last one.
-//
-// So the ruler keeps the measured numbers and fixes the attribution: a segment's measured growth is
-// spread over the entries that caused it, weighted by how big each one looks, and an assistant entry
-// costs what the server said it generated. Only where the server never counted anything - the unsent
-// tail of a path, or a server that reports no usage at all - does an estimate stand on its own, and even
-// that one is calibrated against the request total when a total is known (spec §0: a real number where
+// Why a ruler at all: the size table an assembler builds is keyed by entry id and priced for walking
+// one boundary, while cutting a region asks for one entry at a time. The numbers are the same — the
+// measurement each entry carries (ir.Entry.Tokens, written by asm.Stamp where a server's own two
+// prompt counts made the difference) — and a ruler is simply the reader of them that does not need a
+// payload to ask. Only where no server ever counted an entry — the unsent tail of a path, a server
+// that reports no usage at all — does an estimate stand on its own (spec §0: a real number where
 // there is one, an estimate only for what the server has never seen).
 type Ruler struct {
 	structuredCap int
-	// marginal is what the server counted, per entry: one segment's measured growth shared over the
-	// entries that made it, and an assistant reply's own completion tokens. Keyed by pointer, because a
-	// region is a slice of these very entries, so no id lookup is needed to agree about which entry is
-	// being sized.
-	marginal map[*ir.Entry]int
-	// k scales the entries the server never counted; 1 when nothing was ever measured either.
-	k float64
 }
 
-// NewRuler reads the sizes out of the payload the request was built from: the growth the server
-// measured between its own replies, and an estimate only for what it never counted.
+// NewRuler makes a ruler for a payload whose assembler capped structuredContent at structuredCap.
 //
-// structuredCap must be the ceiling the assembler used (asm.Built.StructuredCap): pricing a capped
-// tool document at its stored size is the same mistake in the other direction.
-func NewRuler(all []*ir.Entry, structuredCap, realTotal int) *Ruler {
-	r := &Ruler{structuredCap: structuredCap, marginal: make(map[*ir.Entry]int, len(all)), k: 1}
-	raw := make([]int, len(all))
-	for i, e := range all {
-		raw[i] = r.raw(e)
-	}
-
-	// Anchors are the replies the server measured. Between two of them the prompt counts say exactly
-	// how much the conversation grew, which is the number a cut needs; the cached prefix is already
-	// inside PromptTokens (ir.Usage), so CacheTokens is not added to it.
-	prevPrompt, prevAnswer, start := -1, 0, 0
-	for i, e := range all {
-		if e == nil || e.Kind != ir.KindAssistant || e.Usage == nil || !e.Usage.HasPrompt {
-			continue
-		}
-		attrib := e.Usage.PromptTokens
-		if prevPrompt >= 0 {
-			attrib = e.Usage.PromptTokens - prevPrompt - prevAnswer
-		}
-		if attrib < 0 {
-			// The path moved between the two requests (a rollback, a deleted entry), so these two numbers
-			// are not about the same conversation. Leave that segment to the estimates rather than let a
-			// negative number cancel the size of a part.
-			attrib = -1
-		}
-		if attrib >= 0 {
-			spread(r.marginal, all[start:i], raw[start:i], attrib)
-		}
-		answer := 0
-		if e.Usage.HasCompletion {
-			answer = e.Usage.CompletionTokens
-		}
-		r.marginal[e] = answer
-		prevPrompt, prevAnswer, start = e.Usage.PromptTokens, answer, i+1
-	}
-
-	// realTotal is the prompt size the server counted for the request that carried `all`. It calibrates
-	// the estimates only when nothing was counted per entry, because when the replies are measured the
-	// total is derivable from them and adds nothing: summing the measured entries IS the last request's
-	// context. Scaling the unsent tail down to make that sum land on the total would price the very
-	// message that is about to be sent at nothing.
-	if len(r.marginal) == 0 && realTotal > 0 {
-		est := 0
-		for _, n := range raw {
-			est += n
-		}
-		if est > 0 {
-			r.k = float64(realTotal) / float64(est)
-		}
-	}
-	return r
-}
-
-// spread shares one segment's measured growth over the entries of that segment, weighted by how big
-// each one looks, because that is the only question an estimate is still good for: not how many tokens
-// an entry is worth on its own, but which of them the tokens were spent on.
-//
-// The sum is preserved exactly, with the integer division's remainder going to the largest entry, for
-// two reasons: a ruler that loses a few tokens per segment is the same bug in miniature, and a ruler
-// that leaves the remainder on the last entry is the bug this function replaces.
-func spread(dst map[*ir.Entry]int, seg []*ir.Entry, raw []int, attrib int) {
-	if len(seg) == 0 || len(seg) != len(raw) {
-		return
-	}
-	total := 0
-	for _, n := range raw {
-		if n > 0 {
-			total += n
-		}
-	}
-	given, big := 0, -1
-	for i, e := range seg {
-		if e == nil {
-			continue
-		}
-		n := attrib / len(seg)
-		if total > 0 {
-			n = attrib * raw[i] / total
-		}
-		if n < 1 && raw[i] > 0 {
-			n = 1 // an entry that exists is not free, whatever the division says
-		}
-		dst[e] = n
-		given += n
-		if big < 0 || raw[i] > raw[big] {
-			big = i
-		}
-	}
-	if rest := attrib - given; rest > 0 && big >= 0 && seg[big] != nil {
-		dst[seg[big]] += rest
-	}
+// The cap must be the one the assembler used (asm.Built.StructuredCap): pricing a capped tool
+// document at its stored size is the same mistake in the other direction.
+func NewRuler(structuredCap int) *Ruler {
+	return &Ruler{structuredCap: structuredCap}
 }
 
 // raw is the uncapped estimate: what the entry will cost on the wire, including a structuredContent
@@ -238,32 +111,27 @@ func (r *Ruler) raw(e *ir.Entry) int {
 	return asm.Estimate(e, r.structuredCap)
 }
 
-// Tokens is one entry's size: what the server counted for it where it counted anything, and a
-// calibrated estimate only where it did not. A floor of 1 is kept for an estimated entry with content:
-// the cutting below walks entries one at a time, and an entry that measures 0 never ends a part, so a
-// region of nothing-but-zero entries would produce no part at all and the summary would answer
-// "nothing to summarise" over a conversation that plainly exists.
+// Tokens is one entry's size: the number a server counted for it where one counted anything, and an
+// estimate only for the entries no request ever carried. A measured zero is kept: a reply the server
+// says it generated in no tokens is not going to grow the next request, and pretending otherwise is
+// how one long answer reads as a short one.
+//
+// A floor of 1 is kept for an estimated entry with content: the cutting below walks entries one at a
+// time, and an entry that measures 0 never ends a part, so a region of nothing-but-zero entries would
+// produce no part at all and the summary would answer "nothing to summarise" over a conversation that
+// plainly exists.
 func (r *Ruler) Tokens(e *ir.Entry) int {
 	if e == nil {
 		return 0
 	}
-	if r == nil {
-		return r.raw(e)
-	}
-	// A measured zero is kept: a reply the server says it generated in no tokens is not going to grow
-	// the next request, and pretending otherwise is how one long answer reads as a short one.
-	if v, ok := r.marginal[e]; ok {
-		return v
+	if e.Tokens > 0 {
+		return e.Tokens
 	}
 	n := r.raw(e)
-	if r.k == 1 {
-		return n
+	if n < 1 && (e.Content != "" || len(e.ToolCalls) > 0 || len(e.Parts) > 0 || len(e.Structured) > 0) {
+		n = 1
 	}
-	out := int(float64(n) * r.k)
-	if out < 1 && n > 0 {
-		out = 1
-	}
-	return out
+	return n
 }
 
 // RegionTokens is the ruler's size of a region — the number that decides whether one summary call
@@ -277,15 +145,25 @@ func RegionTokens(region []*ir.Entry, ruler *Ruler) int {
 	return total
 }
 
-// NeedsIterative reports whether the region cannot be summarised in one call. It is the automatic
-// fallback: normal compaction keeps its prefix-stable, cache-friendly shape.
-func NeedsIterative(region []*ir.Entry, ruler *Ruler, nctx int, p Params) bool {
-	fit := p.ChunkFit(nctx)
-	if fit <= 0 || len(region) == 0 {
-		return false
-	}
-	return RegionTokens(region, ruler) > fit
-}
+// NeedsIterative is the conservative form of a simpler rule: split only when the request goes over the
+// model's window. It takes the size of the one request the single call would put on the wire — the
+// caller counts it (agent.Session.summaryRequestSize) because only the caller can see the payload, the
+// instruction and the entries that were never sent in the same view.
+//
+// What it deliberately does NOT look at is the region's priced sum: the ruler overestimates tool
+// results (§3.9.1's 20x), and that is exactly how a conversation that fits one request ended up being
+// folded in serial parts. Over n_ctx means "this call would be rejected", and the chain is what makes
+// a rejected-by-size request into a summary anyway.
+//
+// The reactive form — send it, split when the provider answers 400 — is the rule this approximates.
+// It needs a new error class first: 400 is currently filed "never retry" (§3.9's retry table), so an
+// over-long summary would end as an ordinary failure instead of a split.
+func NeedsIterative(oneRequest, nctx int) bool { return nctx > 0 && oneRequest > nctx }
+
+// TextTokens prices a string with the reference ruler: four bytes to a token, which is the same
+// fallback SummarySize uses when a server counted nothing. An instruction and a summary are therefore
+// measured with one stick — the number is only ever compared against a window, never billed.
+func TextTokens(s string) int { return (len(s) + 3) / 4 }
 
 // Chunk is one instalment of the region.
 type Chunk struct {

@@ -1,27 +1,29 @@
 package asm
 
-// Per-message sizing (spec §2.4).
+// Per-entry sizing (spec §2.4).
 //
-// Servers only report counts per request / per assistant turn, so real per-message sizes
-// are obtained by subtracting adjacent turns:
+// A server counts tokens per request, never per message, so a message's own cost is only ever a
+// difference between two of its counts — and a difference is a fact about one message, not about
+// the conversation that happened to precede it. That is what makes the number worth keeping:
+// Stamp measures each entry once, along the path in the order the requests were made, and writes
+// the result on the entry (ir.Entry.Tokens). Anything reading sizes afterwards — the boundary
+// walk, a compaction's "after", a chunk plan — takes the number that was counted instead of
+// re-deriving it from a payload that may since have been rewritten by another compaction.
 //
-//	size(assistant i)                = predicted_n[i]
-//	real total of a non-assistant segment
-//	                                 = (prompt_n[i+1]+cache_n[i+1]) - (prompt_n[i]+cache_n[i]) - predicted_n[i]
-//	first segment                    = prompt_n[0] + cache_n[0]
-//	system head                      = 0 (already inside the first segment)
-//	the unsent tail (after the last assistant) -> no real value -> bytes/4 estimate
-//
-// A negative segment total means "no data" (typically the previous in-loop compaction
-// shrank the prompt), NOT zero: those entries stay absent so consumers fall back to
-// estimates instead of showing a fake ~0.
+// One piece is never counted as itself: the system prompt and the tool schemas sit in front of
+// every request, so the first request's prompt contains them and no subtraction can separate them
+// from the first message. The caller who can see both hands that floor in as headFloor; it is an
+// estimate, it is kept separate from every entry, and it is the only estimated part of a Total.
 
 import "bareloop/internal/ir"
 
+// TokensOf is the bytes/4 estimate of text nobody has counted.
+func TokensOf(s string) int { return (len(s) + 3) / 4 }
+
 // Size is one entry's derived size.
 type Size struct {
-	Tokens int  // real when Real, otherwise the bytes/4 estimate
-	Real   bool // covered by server data
+	Tokens int  // measured when Real, otherwise the bytes/4 estimate
+	Real   bool // counted by a server
 	Bytes  int  // helper column only
 }
 
@@ -29,64 +31,26 @@ type Size struct {
 type Sizes struct {
 	per   map[string]Size
 	order []string
+	floor int // the head no request count attributes: system prompt and tool schemas
 }
 
-// DeriveSizes computes the size table from the payload plus the real usage recorded on the
-// assistant entries it contains.
-func DeriveSizes(b *Built) *Sizes {
-	s := &Sizes{per: map[string]Size{}}
-	// Mark all entries as estimates first (also covers the unsent tail).
+// DeriveSizes reads the size table of a payload: every entry's own measured number where a server
+// counted one (see Stamp), an estimate of its bytes where nobody has. headFloor is the estimate of
+// the system prompt and tool schemas in front of it, which no entry can carry.
+func DeriveSizes(b *Built, headFloor int) *Sizes {
+	s := &Sizes{per: map[string]Size{}, floor: headFloor}
 	for _, e := range b.Entries {
-		s.per[e.ID] = Size{Tokens: Estimate(e, b.StructuredCap), Real: false, Bytes: entryBytes(e)}
+		size := Size{Tokens: e.Tokens, Real: e.Tokens > 0, Bytes: entryBytes(e)}
+		if !size.Real {
+			size.Tokens = Estimate(e, b.StructuredCap)
+		}
+		s.per[e.ID] = size
 		s.order = append(s.order, e.ID)
-	}
-
-	// Anchors = assistant entries with a real prompt count. Everything between two anchors
-	// is one segment; its total is attributed to the segment's last entry.
-	prevSum := -1
-	prevPredicted := 0
-	windowStart := 0
-	for i, e := range b.Entries {
-		if !(e.Kind == ir.KindAssistant && e.Usage != nil && e.Usage.HasPrompt) {
-			continue
-		}
-		// One prompt number: under the ir.Usage semantics the cached prefix is already inside
-		// PromptTokens, so adding CacheTokens here would double it.
-		segSum := e.Usage.PromptTokens
-		var attrib int
-		if prevSum < 0 {
-			attrib = segSum
-		} else {
-			attrib = segSum - prevSum - prevPredicted
-		}
-		// Attribute the segment (entries windowStart..i-1) to its last entry.
-		if attrib >= 0 && i > windowStart {
-			last := b.Entries[i-1]
-			s.per[last.ID] = Size{Tokens: attrib, Real: true, Bytes: entryBytes(last)}
-			for j := windowStart; j < i-1; j++ {
-				id := b.Entries[j].ID
-				s.per[id] = Size{Tokens: 0, Real: true, Bytes: entryBytes(b.Entries[j])}
-			}
-		} else if i > windowStart {
-			// No data: keep the estimates for this window (do not write real zeros).
-			for j := windowStart; j < i; j++ {
-				id := b.Entries[j].ID
-				s.per[id] = Size{Tokens: Estimate(b.Entries[j], b.StructuredCap), Real: false, Bytes: entryBytes(b.Entries[j])}
-			}
-		}
-		pred := 0
-		if e.Usage.HasCompletion {
-			pred = e.Usage.CompletionTokens
-		}
-		s.per[e.ID] = Size{Tokens: pred, Real: true, Bytes: entryBytes(e)}
-		prevSum = segSum
-		prevPredicted = pred
-		windowStart = i + 1
 	}
 	return s
 }
 
-// Tokens returns the size used for the boundary walk (real when available, else estimate).
+// Tokens returns the size used for the boundary walk (measured when there is one, else estimate).
 func (s *Sizes) Tokens(id string) int {
 	if v, ok := s.per[id]; ok {
 		return v.Tokens
@@ -100,14 +64,18 @@ func (s *Sizes) Get(id string) (Size, bool) {
 	return v, ok
 }
 
+// Head is the estimated floor in front of every payload.
+func (s *Sizes) Head() int { return s.floor }
+
 // Order returns the payload entry ids in send order.
 func (s *Sizes) Order() []string { return s.order }
 
-// Total is the telescoping sum over the payload. Use it only for the boundary walk: after
-// an in-loop compaction it inflates relative to the real usage (spec §2.4), so display
-// "before/after" numbers must come from the real contextUsed instead.
+// Total is the whole payload: the measured entries, the estimated entries nobody has counted yet,
+// and the estimated head. The head is what it was counted for: after a compaction the entries that
+// survived carry their own numbers and the deleted ones are simply gone, so the total moves with
+// the conversation instead of standing where the last request left it.
 func (s *Sizes) Total() int {
-	n := 0
+	n := s.floor
 	for _, id := range s.order {
 		n += s.per[id].Tokens
 	}

@@ -139,6 +139,23 @@ false` and `compact.inLoop: false` still refuse and say what to do instead; and 
 `status.contextUsed` reports `0` / `contextKnown: false` until the next successful turn, because there is
 no measurement yet and pretending otherwise would drive the trigger off a guess.
 
+**Where a size comes from.** A server counts one request, never one message, so a message's own cost is
+only ever a difference: the prompt of the next counted request, less the answer in between, less the
+prompt before. `asm.Stamp` walks the path in the order the requests were actually made, does that
+subtraction once per entry, and keeps the result on the entry in memory — never in the log, because it is
+computable from the counts that are, and a stored copy would be a second truth that goes stale when the
+bytes underneath it change. Three kinds of number therefore appear in a size table, and they are not
+interchangeable: what was **counted** (an entry that has been on the wire), an **estimate** at bytes over
+four (an entry no request has carried yet, which is why the huge message that just arrived is never priced
+at nothing), and the **head** — the system prompt and the tool schemas, which sit inside the first
+request's prompt and belong to no entry, so the code that can see both hands that one estimate in.
+A difference is a fact about one message rather than about the conversation in front of it, which is what
+lets the numbers outlive a compaction: the entries the summary replaced were what made the difference
+measurable, and they are still in the log, so the messages that survived keep the cost that was counted
+for them. A summary prices itself from what the summariser was charged for, recorded on the compaction,
+and no subtraction is ever taken across that record — the request after it was counted against a payload
+the earlier ones never formed.
+
 ## Summarising serially
 
 When the conversation is too large to hand to the summariser in one request - which is also what happens
