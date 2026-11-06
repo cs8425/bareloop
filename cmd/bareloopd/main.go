@@ -64,6 +64,7 @@ func main() {
 		addr      = flag.String("addr", "", "listen address, e.g. 127.0.0.1:8090")
 		dataDir   = flag.String("data", "", "directory for session logs (default ./data)")
 		webDir    = flag.String("web", "", "serve the UI from this directory instead of the copy embedded in the binary")
+		testdata  = flag.String("testdata", "", "development files: a directory served at /testdata/ (off by default; nothing authenticates on this port)")
 		fsync     = flag.Bool("fsync", false, "fsync every log append")
 		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
@@ -101,6 +102,20 @@ func main() {
 	if cfg.Web != "" {
 		if st, err := os.Stat(filepath.Join(cfg.Web, "index.html")); err != nil || st.IsDir() {
 			logger.Fatalf("web dir: %s holds no index.html — name a directory that has the UI, or drop the -web flag and this file's \"web\" key to serve the copy embedded in the binary", cfg.Web)
+		}
+	}
+	// Development files are off unless a directory is named, and the mount is only ever a window onto
+	// that one directory — a name is cleaned against it before it is used, so nothing climbs out of it.
+	// What it is a window onto is the operator's business, except for one case: the directory bareloopd
+	// runs from holds the config file with its API key and the session logs with their conversations, and
+	// there is nothing in front of the API port. So that spelling is refused rather than warned about.
+	if *testdata != "" {
+		if st, err := os.Stat(*testdata); err != nil || !st.IsDir() {
+			logger.Fatalf("testdata dir: %s is not a directory — name a directory of test files, or drop the flag and there is no mount at all", *testdata)
+		}
+		switch filepath.Clean(*testdata) {
+		case ".", "..":
+			logger.Fatalf("testdata dir: %s is the directory bareloopd runs from — it holds the config file and the session logs, and this port is unauthenticated; name a directory of test files instead", *testdata)
 		}
 	}
 	if *fsync {
@@ -148,6 +163,13 @@ func main() {
 		logger.Fatalf("embedded UI: %v", err)
 	}
 	srv := server.New(mgr, hub, embeddedUI, cfg.Web, logf)
+
+	// The development mount, put in place before Handler builds the routes (ServeTestdata). The startup
+	// line makes the same promise pprof's does: this is an unauthenticated port, so it says what is on it.
+	if *testdata != "" {
+		srv.ServeTestdata(*testdata)
+		logf("testdata: %s is served at http://%s/testdata/ — unauthenticated, like everything else on this port", *testdata, cfg.Addr)
+	}
 
 	// pprof is off unless asked for, and asking has two shapes: an address (a listener of its own) or
 	// "same" (the API port, under /debug/pprof/). The difference matters because /debug/pprof/profile is

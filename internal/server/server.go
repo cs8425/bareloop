@@ -35,7 +35,13 @@ type Server struct {
 	// etags caches the ETag of an embedded file by name, because its content cannot change while the
 	// process runs and hashing it once beats hashing it per request. Files from a directory are never
 	// cached here: their identity has to be re-derived every request or an edit goes unnoticed.
+	// The table is keyed by name alone, and only one filesystem is ever immutable (the copy inside the
+	// binary), so names cannot collide across sources.
 	etags sync.Map
+	// testdata is the development mount: a directory on disk served under /testdata/, or nil when no
+	// directory was named (ServeTestdata). It is never the copy inside the binary — a page that is still
+	// being written has no business shipping — so its files always carry a modification time.
+	testdata fs.FS
 	// pprof is the operator's "serve Go's runtime profiles on the API port too" switch (EnablePprof).
 	pprof bool
 }
@@ -96,6 +102,13 @@ func (s *Server) Handler() http.Handler {
 	// prefers the more specific pattern.
 	if s.pprof {
 		mux.Handle("/debug/pprof/", PprofHandler())
+	}
+
+	// Development files, when a directory was named (ServeTestdata). Off unless asked for is the point:
+	// a released binary serves the UI and nothing else. It wins over the catch-all below for the same
+	// reason the profiler does.
+	if s.testdata != nil {
+		mux.HandleFunc("/testdata/{rest...}", s.handleTestdata)
 	}
 
 	mux.HandleFunc("/", s.handleStatic)
@@ -815,7 +828,46 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	// index.html is the entry point that names every asset, so it is never reused without asking;
 	// that is what makes an edited UI, or an embedded one from a new binary, show up on navigation.
-	s.serveFile(w, r, name, name == "index.html")
+	s.serveFile(w, r, s.web, name, s.dir == "", name == "index.html")
+}
+
+// ServeTestdata mounts a directory of development files at /testdata/, and it has to be called before
+// Handler because that is where the routes get built.
+//
+// It exists so a page that is still being written can be opened in a browser without being compiled
+// into the binary, and without a second web server: fixtures too, which are the reason a test page
+// cannot simply be a file:// URL (a module import and a fetch both refuse the scheme). The directory is
+// never searched for: naming none is the default, and a released binary therefore has one fewer surface.
+//
+// What is served is whatever the operator pointed at, on a port with nothing in front of it, so cmd
+// refuses the one spelling that turns that into an exposure — the directory bareloopd runs from, which
+// is where config.json and the session logs live.
+func (s *Server) ServeTestdata(dir string) { s.testdata = os.DirFS(dir) }
+
+// handleTestdata serves the mount. It shares handleStatic's safety rule — a name is cleaned against an
+// artificial root, so no spelling of ".." ends up above the mount — and its ETag machinery, but it makes
+// three different decisions because this is a directory being edited rather than an application being
+// delivered:
+//
+//   - a missing file is a 404 and never the entry point. The single-page fallback is what a route needs,
+//     and what turns a mistyped fixture name into a response full of HTML;
+//   - nothing is cacheable, because a staleness budget on a file you are editing reads as a browser that
+//     will not refresh;
+//   - and a directory is a 404 too: no listing, so a mount is a set of known URLs rather than a window
+//     onto the disk.
+func (s *Server) handleTestdata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeErr(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	// The wildcard is whatever came after /testdata/, and cleaning it against a root the client cannot
+	// name is what makes "/testdata/../../config.json" a file inside the mount or nothing at all.
+	name := strings.TrimPrefix(path.Clean("/"+r.PathValue("rest")), "/")
+	if st, err := fs.Stat(s.testdata, name); err != nil || st.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveFile(w, r, s.testdata, name, false, true)
 }
 
 // noWeb words the one way this can fail that the operator can fix: the named UI directory has no entry
@@ -828,9 +880,12 @@ func (s *Server) noWeb() string {
 	return fmt.Sprintf("web UI not found in %s: point -web at a directory holding an index.html, or drop it to serve the copy embedded in the binary", s.dir)
 }
 
-// serveFile writes one static file with an ETag.
-func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string, isPage bool) {
-	f, err := s.web.Open(name)
+// serveFile writes one static file with an ETag. The two booleans are what differs between the sources
+// that call it: immutable says the bytes cannot change while this process runs (only the copy inside
+// the binary), and noCache asks for the entry point's answer — revalidate every time — which is also
+// what the development mount wants.
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string, immutable, noCache bool) {
+	f, err := fsys.Open(name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -841,14 +896,14 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string, 
 		http.NotFound(w, r)
 		return
 	}
-	etag, err := s.etag(name, st)
+	etag, err := s.etag(fsys, name, st, immutable)
 	if err != nil {
 		s.logf("static %s: %v", name, err)
 		http.Error(w, "static file", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("ETag", etag)
-	if isPage {
+	if noCache {
 		w.Header().Set("Cache-Control", pageCache)
 	} else {
 		w.Header().Set("Cache-Control", assetCache)
@@ -883,13 +938,14 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string, 
 }
 
 // etag is the identity of a static file, and it means one of two things depending on where the file
-// lives. A file from a directory is its size plus its modification time, re-read on every request:
+// lives: what is inside the binary cannot change while the process runs, and a file on disk can.
+// A file that can change is its size plus its modification time, re-read on every request:
 // that pair is exactly what an edit changes, and caching the answer is how an edit gets hidden. A file
 // from the binary has no modification time to talk about (the archive does not carry one), so its
 // identity is a hash of its bytes — and those cannot change while the process runs, so they are worth
 // remembering. Either way the client sees the same one header and the same 304.
-func (s *Server) etag(name string, st fs.FileInfo) (string, error) {
-	if s.dir != "" {
+func (s *Server) etag(fsys fs.FS, name string, st fs.FileInfo, immutable bool) (string, error) {
+	if !immutable {
 		return fmt.Sprintf(`"%x-%x"`, st.ModTime().Unix(), st.Size()), nil
 	}
 	if cached, ok := s.etags.Load(name); ok {
@@ -897,7 +953,7 @@ func (s *Server) etag(name string, st fs.FileInfo) (string, error) {
 			return et, nil
 		}
 	}
-	b, err := fs.ReadFile(s.web, name)
+	b, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		return "", err
 	}

@@ -72,6 +72,14 @@ of the file. `-data` is where sessions live (default `./data`). The web UI is co
 there is nothing else to copy to another machine; `-web <dir>` serves it from a directory on disk instead,
 which is what you want while editing it, because an edit then shows up on the next reload with no rebuild.
 
+`-testdata <dir>` is the same idea for files that are not the UI: it serves that directory at `/testdata/`,
+and none of it is compiled into the binary. That is how a page that is still being written gets a URL, and
+how such a page fetches a fixture — a page opened from disk can import neither a module script nor a JSON
+file. It is off unless you name it, a file that is not there is a 404 rather than the single page, and
+nothing in it is cached. Naming the directory `bareloopd` runs from is refused, because that is where
+`config.json` and `data/` are and nothing in front of this port authenticates. `testdata/bench-stream.html`
+lives there today.
+
 The UI puts the session in the URL (`#/s/<id>`): reload, bookmark or paste the link and you are back at that
 conversation, the back button steps through the sessions you looked at, and a link naming a session that is
 not there says so and puts the current one back into the address bar.

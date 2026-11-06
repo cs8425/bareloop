@@ -93,6 +93,126 @@ func TestStaticFromTheBinary(t *testing.T) {
 	}
 }
 
+// serveMounted goes through the routes rather than calling a handler, because the two things that keep a
+// mounted directory inside itself — which pattern wins, and what the path looks like by then — are the
+// router's decisions as much as the handler's.
+func serveMounted(t *testing.T, s *Server, method, target string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(method, target, nil)
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	return w
+}
+
+func TestTestdataMount(t *testing.T) {
+	// The mount exists so a page that is still being written can be opened in a browser, fixtures included
+	// — that is the part a file:// URL cannot do, since a module import and a fetch both refuse it. Its
+	// failure modes are the UI's with different answers: a mistyped fixture name that comes back as the
+	// single page instead of a 404 becomes a JSON parse error nobody can read, and an edit that never
+	// arrives is a browser blamed for a cache header.
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "cases.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(fixture, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", fixture, err)
+		}
+	}
+	write(`[{"in": "one"}]`)
+
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("do not serve me"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", secret, err)
+	}
+	secretDir := filepath.Base(filepath.Dir(secret))
+
+	app := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>app")}}
+	s := New(nil, nil, app, "", nil)
+	s.ServeTestdata(dir)
+
+	w := serveMounted(t, s, "GET", "/testdata/cases.json", nil)
+	if w.Code != http.StatusOK || w.Body.String() != `[{"in": "one"}]` {
+		t.Fatalf("GET /testdata/cases.json: got %d %q, want the file", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); !strings.Contains(got, "json") {
+		t.Errorf("content-type %q, want json: a page fetches a fixture as JSON", got)
+	}
+	// Nothing in a directory somebody is editing gets a cache lifetime, and its identity is the
+	// modification time rather than a hash remembered for the life of the process — both are so that an
+	// edit is on the screen after a reload.
+	if got := w.Header().Get("Cache-Control"); got != pageCache {
+		t.Errorf("cache-control %q, want %q", got, pageCache)
+	}
+	etag := w.Header().Get("ETag")
+	write(`[{"in": "two and a half"}]`)
+	changed := serveMounted(t, s, "GET", "/testdata/cases.json", nil).Header().Get("ETag")
+	if changed == etag {
+		t.Errorf("an edit left the ETag at %q, so a page holding the fixture keeps it", etag)
+	}
+	if again := serveMounted(t, s, "GET", "/testdata/cases.json", map[string]string{"If-None-Match": changed}); again.Code != http.StatusNotModified {
+		t.Errorf("revalidating: got %d, want 304", again.Code)
+	}
+
+	// A name that is not there is a 404 and never the entry point: the single-page answer is what a route
+	// needs, and here it is what turns a fixture typed one character wrong into a response full of HTML.
+	if w := serveMounted(t, s, "GET", "/testdata/case.json", nil); w.Code != http.StatusNotFound ||
+		strings.Contains(w.Body.String(), "<html>app") {
+		t.Errorf("GET /testdata/case.json: got %d %q, want a 404 with no entry point in it", w.Code, w.Body.String())
+	}
+	// A directory is a 404 too: a mount is a set of known URLs, not a window onto the disk.
+	for _, target := range []string{"/testdata", "/testdata/"} {
+		if w := serveMounted(t, s, "GET", target, nil); w.Code == http.StatusOK {
+			t.Errorf("GET %s: got 200, want no listing", target)
+		}
+	}
+	// And nothing outside it, which is refused twice over — the router cleans the path before choosing a
+	// handler and the handler cleans the name again against the mount — so the promise worth testing is
+	// simply that the answer is never the file.
+	for _, target := range []string{
+		"/testdata/../" + secretDir + "/secret.txt",
+		"/testdata/%2e%2e/" + secretDir + "/secret.txt",
+		"/testdata/" + strings.Repeat("../", 8) + "etc/passwd",
+	} {
+		if w := serveMounted(t, s, "GET", target, nil); strings.Contains(w.Body.String(), "do not serve me") {
+			t.Errorf("GET %s: the mount served a file from outside itself", target)
+		}
+	}
+
+	// A client that does not normalise the path before sending it — `curl --path-as-is` — is the only
+	// thing the handler's own cleaning is for, and the router never lets such a request reach it. So this
+	// is the one test that hands handleTestdata a name still carrying "..", and what it pins is that the
+	// answer is a 404 rather than a file reached by climbing out of the mount.
+	dirty := httptest.NewRequest("GET", "/testdata/x", nil)
+	dirty.SetPathValue("rest", "../../../../etc/passwd")
+	wd := httptest.NewRecorder()
+	s.handleTestdata(wd, dirty)
+	if wd.Code != http.StatusNotFound || strings.Contains(wd.Body.String(), "do not serve me") {
+		t.Errorf("a dirty name handed to the handler directly: got %d %q, want a 404", wd.Code, wd.Body.String())
+	}
+
+	// HEAD because GET is (asking whether a fixture exists is a thing a page does), and not POST because
+	// there is nothing to write.
+	if w := serveMounted(t, s, "HEAD", "/testdata/cases.json", nil); w.Code != http.StatusOK || w.Body.Len() != 0 {
+		t.Errorf("HEAD: got %d with %d bytes, want 200 and no body", w.Code, w.Body.Len())
+	}
+	if w := serveMounted(t, s, "POST", "/testdata/cases.json", nil); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST: got %d, want 405", w.Code)
+	}
+
+	// Without a named directory — which is every binary nobody is developing against — there is no mount,
+	// and the catch-all answers exactly as it would for any other path.
+	plain := New(nil, nil, app, "", nil)
+	if w := serveMounted(t, plain, "GET", "/testdata/cases.json", nil); w.Code != http.StatusNotFound {
+		t.Errorf("no mount: GET /testdata/cases.json got %d, want the 404 an unknown asset gets", w.Code)
+	}
+	if w := serveMounted(t, plain, "GET", "/testdata/anything", nil); w.Body.String() != "<html>app" {
+		t.Errorf("no mount: GET /testdata/anything got %q, want the entry point", w.Body.String())
+	}
+}
+
 func TestStaticFromADirectory(t *testing.T) {
 	dir := t.TempDir()
 	page := filepath.Join(dir, "index.html")

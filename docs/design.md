@@ -679,6 +679,18 @@ There is deliberately no search of the usual places for a `web` directory any mo
 its own UI uses it, and quietly serving a stale `./web` because it happened to be the working directory is
 the worse surprise. While developing the UI, say so out loud - `-web web`.
 
+Development files are not the UI and have no business inside a binary, so they get a mount of their own:
+`-testdata <dir>` puts a directory on disk at `/testdata/`. The one page that lives there today is a
+benchmark somebody opens once a month, which used to be compiled into every release. It is one more pattern
+on the same mux, so it wins over the catch-all for `/` exactly as the profiler does, and it shares the
+handler's safety rule - a name is cleaned against the mount, so no spelling of `..` ends up above it. Two
+answers differ from the UI's, both because this is a directory being edited rather than an application being
+delivered: a name that is not there is a 404 rather than the entry point (a fixture typed one character
+wrong arriving as a page full of HTML is a JSON parse error nobody can read), and nothing in it is cacheable.
+Off unless named, so a released binary has no mount to serve - and the one directory it refuses to serve is
+the one `bareloopd` runs from, since that is where the config file and the session logs are and this port
+authenticates nothing.
+
 ## Markdown rendering
 
 `web/js/md.js` is a dependency-free renderer that escapes first and only then builds markup, so pasted

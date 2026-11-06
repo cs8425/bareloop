@@ -26,6 +26,11 @@
     mid-stream     the L2 invariant, checked while the stream runs: what has been frozen must never be
                    redrawn, and must be exactly the head of what the finished reply will render to.
 
+  This page lives in testdata/, not in web/: a released binary carries the UI and nothing else, so the
+  daemon serves a second directory only when told to. Run it with -testdata testdata and open
+  http://127.0.0.1:8090/testdata/bench-stream.html. The files this page borrows are asked for from /,
+  because the app is served at / and this page is a neighbour of it rather than a folder inside it.
+
   Drive it from the console (that is how the numbers in _state/render-throttle-plan.md were taken):
     await window.__benchRun({ sizes: [8, 40], gap: 3, chunk: 12 })
     window.__boundaryTests()
@@ -34,7 +39,7 @@
 -->
 <meta charset="utf-8" />
 <title>bench · stream rendering</title>
-<link rel="stylesheet" href="app.css" />
+<link rel="stylesheet" href="/app.css" />
 <style>
   body { padding: 18px 20px 40px; }
   h1 { font-size: 15px; margin: 0 0 4px; }
@@ -84,8 +89,8 @@
 <div id="stage"><div class="msg assistant"><div class="body md"></div></div></div>
 
 <script type="module">
-import md from './js/md.js';
-import { makeStreamDrawer } from './js/transcript.js';
+import md from '/js/md.js';
+import { makeStreamDrawer } from '/js/transcript.js';
 
 const q = (s) => document.querySelector(s);
 const q2 = new URLSearchParams(location.search);
