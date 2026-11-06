@@ -264,14 +264,24 @@ export function onCompaction(r) {
   const box = el('div', 'compact-banner');
   const head = r.committed ? 'compacted' : r.skipped ? `compaction skipped (${r.skipped})` : 'compaction not accepted';
   box.appendChild(el('div', '', `${head} · ${r.trigger || 'manual'}${r.manual ? ' (manual)' : ''}${r.gate ? ` · gate: ${r.gate}` : ''}`));
-  box.appendChild(
-    el(
-      'div',
-      '',
-      `context ${fmtN(r.before)} \u2192 ${fmtN(r.after)} · replaced ${r.replaced ?? 0} entries · summarised ${fmtN(r.summarizeTokens)} \u2192 kept ${fmtN(r.keptTokens)} · attempts ${r.attempts ?? 0}${r.empty ? ' · context emptied' : ''}${r.split ? ' · split turn' : ''}`,
-    ),
-  );
-  if (r.boundary) box.appendChild(el('div', '', `boundary ${r.boundary}${r.entryId ? ` · entry ${r.entryId}` : ''}`));
+  // The `before → after` row is a measurement of a change, and an aborted compaction changed nothing.
+  // `after` is only ever assigned when the summary entry is written, so printing it otherwise renders
+  // "context 6.9k → 0" — the one outcome §1.1 promises never happens, asserted by the very line that is
+  // trying to report a failure. An abort owes the reader two things: that nothing was written, and why.
+  // The head line above carries the reason (`compaction skipped (<why>)`), so this row carries the first.
+  if (r.committed) {
+    box.appendChild(
+      el(
+        'div',
+        '',
+        `context ${fmtN(r.before)} \u2192 ${fmtN(r.after)} · replaced ${r.replaced ?? 0} entries · summarised ${fmtN(r.summarizeTokens)} \u2192 kept ${fmtN(r.keptTokens)} · attempts ${r.attempts ?? 0}${r.empty ? ' · context emptied' : ''}${r.split ? ' · split turn' : ''}`,
+      ),
+    );
+  } else {
+    box.appendChild(el('div', '', `nothing was written — the history still holds ${fmtN(r.before)} tokens of context`));
+  }
+  // Same rule as the row above: a boundary that was never written is not a fact about the path.
+  if (r.committed && r.boundary) box.appendChild(el('div', '', `boundary ${r.boundary}${r.entryId ? ` · entry ${r.entryId}` : ''}`));
   logEl().appendChild(box);
   if (r.committed) refresh().catch(() => {});
   scrollDown();
