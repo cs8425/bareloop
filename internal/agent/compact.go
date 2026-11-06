@@ -428,7 +428,7 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 			compact.RegionTokens(cut, ruler), p.ChunkFit(nctx))
 	}
 
-	prev, reported := "", 0
+	prev, reported, reasoned := "", 0, 0
 	for i, c := range chunks {
 		if err := ctx.Err(); err != nil {
 			return "", 0, err
@@ -475,6 +475,10 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		text := strings.TrimSpace(res.Content)
 		if res.Usage != nil {
 			reported = res.Usage.CompletionTokens
+			// The reasoning that belongs to this part's completion: SummarySize shares the completion out
+			// between the reasoning and the text, and a later part's numbers must not be blamed on an
+			// earlier part's chain of thought.
+			reasoned = len(res.Reasoning)
 		}
 		// What the part was supposed to carry and what the server counted are the same number for any
 		// request that carried its part, so a large gap names a part that never made it into the request.
@@ -518,7 +522,7 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 	if strings.TrimSpace(prev) == "" {
 		return "", 0, errors.New("empty summary")
 	}
-	return prev, compact.SummarySize(reported, prev), nil
+	return prev, compact.SummarySize(reported, reasoned, prev), nil
 }
 
 // ─── what a summary is cut from ─────────────────────────────────────────
@@ -785,11 +789,11 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 		return "", 0, fmt.Errorf("empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
 			reason, tokens, len(res.Reasoning))
 	}
-	reported := 0
+	reported, reasoned := 0, len(res.Reasoning)
 	if res.Usage != nil {
 		reported = res.Usage.CompletionTokens
 	}
-	return text, compact.SummarySize(reported, text), nil
+	return text, compact.SummarySize(reported, reasoned, text), nil
 }
 
 // commitCompaction writes the entry and advances the path tip in one storage write (§3.8).

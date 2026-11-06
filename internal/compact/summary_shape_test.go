@@ -21,26 +21,26 @@ import (
 // interchangeable, which is why a reported number must win even when it disagrees with the text.
 func TestSummarySizeUsesTheReportedNumberFirst(t *testing.T) {
 	text := strings.Repeat("word ", 400) // 2000 bytes → 500 tokens by the fallback ruler
-	if got := SummarySize(1234, text); got != 1234 {
+	if got := SummarySize(1234, 0, text); got != 1234 {
 		t.Fatalf("SummarySize = %d, want the number the server reported (1234): the estimate is for what was never measured", got)
 	}
-	if got := SummarySize(0, text); got != 500 {
+	if got := SummarySize(0, 0, text); got != 500 {
 		t.Fatalf("with nothing reported, SummarySize = %d, want bytes÷4 (500)", got)
 	}
-	if got := SummarySize(-1, text); got != 500 {
+	if got := SummarySize(-1, 0, text); got != 500 {
 		t.Fatalf("a negative report is not a measurement either: %d", got)
 	}
 	// Never raw bytes: a 2000-byte summary is not a 2000-token summary, and a cap read that way
 	// refuses every summary the model can write.
-	if got := SummarySize(0, "abcd"); got != 1 {
+	if got := SummarySize(0, 0, "abcd"); got != 1 {
 		t.Fatalf("a 4-byte summary = %d, want 1 token", got)
 	}
-	if got := SummarySize(0, "abc"); got != 1 {
+	if got := SummarySize(0, 0, "abc"); got != 1 {
 		t.Fatalf("a 3-byte summary rounds up to %d, want 1", got)
 	}
 	// A reported number of 0 completion tokens is indistinguishable from "nothing reported", which is
 	// the honest reading: an empty answer is refused by the caller anyway.
-	if got := SummarySize(0, ""); got != 0 {
+	if got := SummarySize(0, 0, ""); got != 0 {
 		t.Fatalf("an empty summary = %d, want 0", got)
 	}
 }

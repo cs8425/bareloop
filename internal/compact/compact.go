@@ -563,13 +563,28 @@ func Transcript(path []*ir.Entry) string {
 	return sb.String()
 }
 
-// SummarySize is the size used for the acceptance check (§3.4): the completion tokens the
-// server reported, else round(UTF-8 bytes / 4) — note /4, never raw bytes.
-func SummarySize(reported int, text string) int {
-	if reported > 0 {
+// SummarySize is the size used for the acceptance check (§3.4), and with it the size the summary
+// occupies in the context: the completion tokens the server reported, else round(UTF-8 bytes / 4) —
+// note /4, never raw bytes.
+//
+// A reported completion counts everything the model generated, and a thinking model spends most of that
+// on reasoning nobody keeps: the path stores the summary, not the chain of thought (commitCompaction
+// writes the text and drops the reasoning, whatever asm.sendReasoning says about replies). So the
+// reported number is shared out by bytes between the two things it covers — the reasoning and the text —
+// and only the text's share is the summary's size: 200 tokens over 40 bytes of reasoning and 60 of text
+// is 120, not 200. Without reasoning, or without a server count, this is the old behaviour unchanged.
+func SummarySize(reported, reasoningBytes int, text string) int {
+	if reported <= 0 {
+		return TextTokens(text)
+	}
+	if reasoningBytes <= 0 {
 		return reported
 	}
-	return (len([]byte(text)) + 3) / 4
+	share := reported * len([]byte(text)) / (reasoningBytes + len([]byte(text)))
+	if share < 1 {
+		return 1
+	}
+	return share
 }
 
 // Accepts is the acceptance check of §3.4. The kept region is NOT part of it in threshold
