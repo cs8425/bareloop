@@ -514,8 +514,9 @@ were bugs first.
 - **Caching is bounded, and cheap to revalidate.** `index.html` - the file that names every asset - is
   `Cache-Control: no-cache, must-revalidate`, so navigating to the UI always asks the server. Everything
   else is `public, max-age=60, must-revalidate`. Both carry an `ETag`, so a revalidation costs a 304 and
-  no body, and a hard refresh always bypasses the lot. Editing `web/` while the server runs therefore
-  shows up on the next navigation (or immediately on reload).
+  no body, and a hard refresh always bypasses the lot. Serving the UI from a directory (`-web`, see
+  *Embedding the UI*) therefore means an edit under `web/` shows up on the next navigation, or immediately
+  on reload - while the copy inside the binary is exactly what it was built with.
 - **The URL is the session.** `#/s/<id>` is written when a session is picked and read on boot, so a reload, a
   bookmark or a pasted link lands on the conversation it names (a closed one too - a deep link is deliberate,
   while the no-URL default only has to guess), and Back steps through the sessions you looked at. An id the
@@ -634,16 +635,32 @@ would immediately re-ask). For a resume the compaction boundary is the whole poi
 
 ### Embedding the UI
 
-The UI is plain files, served from `-web` (default `./web`, looked up in a few usual places so
-`go run ./cmd/bareloopd` works from the repo root). Shipping a single binary means replacing that
-directory with an embedded filesystem - `//go:embed all:web` plus `http.FS`, one import in `cmd` and one
-field in `server.Server`:
+The UI is plain files, and they are compiled into the binary, so one file is a whole deployment. `embed.go`
+at the module root holds the one `//go:embed all:web` - the directive cannot reach above its own package,
+which is why it sits at the root and not in `internal/server` - and exports `bareloop.WebUI`. `cmd` peels
+the prefix with `fs.Sub(bareloop.WebUI, "web")` and hands `server.New` an `fs.FS` rooted at the UI itself,
+so `server` never imports the module root and never has to know which source it is reading.
 
-- keep the split: the entry point is revalidated, assets have a lifetime;
-- the `ETag` is the only thing that has to change meaning - from "size + modification time" to a hash of
-  the bytes, since embedded files all share the build time;
-- if the asset names ever grow content hashes (`app.4f9c1.js`), drop `max-age` to a year and hash the
-  name into `index.html` instead; until then 60s is the staleness budget that lets an upgrade self-heal.
+`-web <dir>`, or the config's `"web"`, swaps that filesystem for `os.DirFS(dir)` and nothing else changes:
+one handler, one path-cleaning rule, one set of cache headers, the same single-page-app fallback. Two
+things do differ between the two sources, and both are the handler's own business:
+
+- **the `ETag`.** A file from a directory is `size + modification time`, re-derived on every request,
+  because that pair is exactly what an edit changes and caching the answer is how an edit gets hidden. An
+  embedded file has no modification time to speak of - the archive does not carry one - so its identity is
+  a hash of its bytes, remembered per name for the life of the process, and `Last-Modified` simply goes
+  missing on that side.
+- **the failure worth naming.** An embedded UI cannot go missing; a named directory can, and a `-web` that
+  holds no `index.html` stops the daemon at startup with both ways out in the message. The alternative is
+  a browser showing a 404 that the daemon never once mentions on stderr.
+
+What did not change is the cache split: the entry point is revalidated, assets have a lifetime. If the
+asset names ever grow content hashes (`app.4f9c1.js`), drop `max-age` to a year and hash the name into
+`index.html` instead; until then 60s is the staleness budget that lets an upgrade self-heal.
+
+There is deliberately no search of the usual places for a `web` directory any more: a binary that carries
+its own UI uses it, and quietly serving a stale `./web` because it happened to be the working directory is
+the worse surprise. While developing the UI, say so out loud - `-web web`.
 
 ## Markdown rendering
 

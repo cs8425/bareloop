@@ -68,8 +68,9 @@ BARELOOP_API_KEY=sk-... BARELOOP_MODEL=gpt-4.1-mini ./bin/bareloopd -config conf
 ```
 
 `config.json` is optional and `${VAR}` inside it is expanded from the environment, so secrets can stay out
-of the file. `-data` is where sessions live (default `./data`), `-web` where the UI files are (default
-`./web`).
+of the file. `-data` is where sessions live (default `./data`). The web UI is compiled into the binary, so
+there is nothing else to copy to another machine; `-web <dir>` serves it from a directory on disk instead,
+which is what you want while editing it, because an edit then shows up on the next reload with no rebuild.
 
 The UI puts the session in the URL (`#/s/<id>`): reload, bookmark or paste the link and you are back at that
 conversation, the back button steps through the sessions you looked at, and a link naming a session that is
@@ -154,7 +155,7 @@ its own copy in `data/<id>/config.json`.
 
 | field | meaning |
 |---|---|
-| `addr`, `data`, `web`, `fsync`, `debug` | listen address, log directory, static UI directory, synchronous appends, request logging |
+| `addr`, `data`, `web`, `fsync`, `debug` | listen address, log directory, UI directory (empty — the default — is the copy compiled into the binary), synchronous appends, request logging |
 | `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `headers`, `pricing` (`input` for the prompt tokens the server had to compute, `cachedInput` for the ones it served from cache, `output` for what it generated — **all three per 1 000 000 tokens**, and no currency field, because bareloop cannot know which one you are billed in. Leave it out and nothing is priced; an explicit `0` is an answer meaning free. A session inherits it and may override; a price changes no request, so saving one never reconnects anything) |
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script |
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |

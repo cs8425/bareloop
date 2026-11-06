@@ -2,16 +2,20 @@ package server
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"bareloop/internal/agent"
@@ -22,18 +26,35 @@ import (
 type Server struct {
 	mgr  *agent.Manager
 	hub  *Hub
-	web  string
 	logf func(string, ...any)
+	// web is the UI as an fs.FS and dir is where it came from: a directory on disk when one was named,
+	// "" when it is the copy embedded in the binary. Serving it is the only thing that reads them, and
+	// the two sources differ in exactly one respect — whether a file has a usable modification time.
+	web fs.FS
+	dir string
+	// etags caches the ETag of an embedded file by name, because its content cannot change while the
+	// process runs and hashing it once beats hashing it per request. Files from a directory are never
+	// cached here: their identity has to be re-derived every request or an edit goes unnoticed.
+	etags sync.Map
 	// pprof is the operator's "serve Go's runtime profiles on the API port too" switch (EnablePprof).
 	pprof bool
 }
 
 // New creates the HTTP handler set.
-func New(mgr *agent.Manager, hub *Hub, webDir string, logf func(string, ...any)) *Server {
+//
+// embedded is the UI compiled into the binary, rooted at the UI itself (fs.Sub(bareloop.WebUI, "web")),
+// and it is what gets served when webDir is empty. webDir names a directory on disk to serve instead —
+// that is the -web flag and the config's "web" key, and it is what makes an edit under web/ show up
+// without a rebuild.
+func New(mgr *agent.Manager, hub *Hub, embedded fs.FS, webDir string, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Server{mgr: mgr, hub: hub, web: webDir, logf: logf}
+	s := &Server{mgr: mgr, hub: hub, web: embedded, dir: webDir, logf: logf}
+	if webDir != "" {
+		s.web = os.DirFS(webDir)
+	}
+	return s
 }
 
 // Handler returns the routes.
@@ -757,38 +778,48 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 		return
 	}
-	up := strings.TrimPrefix(r.URL.Path, "/")
-	if up == "" {
-		up = "index.html"
-	}
-	if strings.Contains(up, "..") {
-		http.Error(w, "no", http.StatusForbidden)
+	if s.web == nil {
+		http.Error(w, "no web UI: this binary carries no embedded copy and was given no -web directory", http.StatusServiceUnavailable)
 		return
 	}
-	file := filepath.Join(s.web, filepath.Clean(up))
-	st, err := os.Stat(file)
-	if err != nil || st.IsDir() {
+	// The name of a file in an fs.FS is unrooted and slash-separated, and cleaning it against an
+	// artificial root is what makes the handler safe by construction rather than by suspicion: "a/../b"
+	// collapses to "b", and no spelling of ".." — encoded or not — ends up above the UI. Anything that
+	// still tried to escape is therefore just some other file, which is to say a 404 or the entry point.
+	name := strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(r.URL.Path, "/")), "/")
+	if name == "" {
+		name = "index.html"
+	}
+	if st, err := fs.Stat(s.web, name); err != nil || st.IsDir() {
 		// Single page app: unknown paths fall back to index.html.
-		if filepath.Ext(up) != "" {
+		if path.Ext(name) != "" {
 			http.NotFound(w, r)
 			return
 		}
-		file = filepath.Join(s.web, "index.html")
-		if _, err := os.Stat(file); err != nil {
-			http.Error(w, "web UI not found: start the server with -web <dir>", http.StatusNotFound)
+		if _, err := fs.Stat(s.web, "index.html"); err != nil {
+			http.Error(w, s.noWeb(), http.StatusNotFound)
 			return
 		}
+		name = "index.html"
 	}
 	// index.html is the entry point that names every asset, so it is never reused without asking;
 	// that is what makes an edited UI, or an embedded one from a new binary, show up on navigation.
-	s.serveFile(w, r, file, strings.HasSuffix(file, "index.html"))
+	s.serveFile(w, r, name, name == "index.html")
 }
 
-// serveFile writes one static file with an ETag. The identity is size plus modification time, which
-// is exactly what changes when a file on disk is edited; an embed.FS can hand over a content hash
-// here instead and nothing else about the protocol changes.
-func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, path string, isPage bool) {
-	f, err := os.Open(path)
+// noWeb words the one way this can fail that the operator can fix: the named UI directory has no entry
+// point in it. Both ways out are named, because the common cause is a binary that moved away from the
+// tree it was built in and a config still pointing at the old place.
+func (s *Server) noWeb() string {
+	if s.dir == "" {
+		return "web UI not found: the copy embedded in this binary has no index.html"
+	}
+	return fmt.Sprintf("web UI not found in %s: point -web at a directory holding an index.html, or drop it to serve the copy embedded in the binary", s.dir)
+}
+
+// serveFile writes one static file with an ETag.
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string, isPage bool) {
+	f, err := s.web.Open(name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -799,7 +830,12 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, path string, 
 		http.NotFound(w, r)
 		return
 	}
-	etag := fmt.Sprintf(`"%x-%x"`, st.ModTime().Unix(), st.Size())
+	etag, err := s.etag(name, st)
+	if err != nil {
+		s.logf("static %s: %v", name, err)
+		http.Error(w, "static file", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("ETag", etag)
 	if isPage {
 		w.Header().Set("Cache-Control", pageCache)
@@ -814,9 +850,50 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, path string, 
 			}
 		}
 	}
+	body, ok := f.(io.ReadSeeker)
+	if !ok {
+		// Both sources in use — a directory and the embedded one — are seekable, so this is the fallback
+		// and not the rule; a static file is small enough to buffer, which beats serving a body from the
+		// wrong offset.
+		b, err := io.ReadAll(f)
+		if err != nil {
+			s.logf("static %s: %v", name, err)
+			http.Error(w, "static file", http.StatusInternalServerError)
+			return
+		}
+		body = bytes.NewReader(b)
+	}
 	// ServeContent adds Last-Modified, honours If-Modified-Since and Range, and sets the content type
-	// from the extension — a module script has to arrive as JavaScript to be imported.
-	http.ServeContent(w, r, filepath.Base(path), st.ModTime(), f)
+	// from the extension — a module script has to arrive as JavaScript to be imported. It reports nothing
+	// back, which is fine: by then the response is on its way and logWrap has already seen the request.
+	// An embedded file has no modification time, and a zero one leaves Last-Modified off, which is the
+	// right answer — the ETag is what revalidates it.
+	http.ServeContent(w, r, path.Base(name), st.ModTime(), body)
+}
+
+// etag is the identity of a static file, and it means one of two things depending on where the file
+// lives. A file from a directory is its size plus its modification time, re-read on every request:
+// that pair is exactly what an edit changes, and caching the answer is how an edit gets hidden. A file
+// from the binary has no modification time to talk about (the archive does not carry one), so its
+// identity is a hash of its bytes — and those cannot change while the process runs, so they are worth
+// remembering. Either way the client sees the same one header and the same 304.
+func (s *Server) etag(name string, st fs.FileInfo) (string, error) {
+	if s.dir != "" {
+		return fmt.Sprintf(`"%x-%x"`, st.ModTime().Unix(), st.Size()), nil
+	}
+	if cached, ok := s.etags.Load(name); ok {
+		if et, ok := cached.(string); ok {
+			return et, nil
+		}
+	}
+	b, err := fs.ReadFile(s.web, name)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	etag := fmt.Sprintf(`"%x"`, sum[:12])
+	s.etags.Store(name, etag)
+	return etag, nil
 }
 
 // logWrap logs one line per request.

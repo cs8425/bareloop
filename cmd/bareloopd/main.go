@@ -8,6 +8,10 @@
 // the JSON config file, whose "defaults" block is inherited by every new session (each session
 // may still override the model, the system prompt, its own MCP server set and the compaction
 // parameters).
+//
+// The web UI travels inside this binary (see embed.go), so one file is a complete deployment. Naming a
+// directory with -web, or with the config's "web" key, serves the UI from disk instead — which is what
+// you want while editing it, because an edit then shows up without a rebuild.
 package main
 
 import (
@@ -16,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -25,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"bareloop"
 	"bareloop/internal/agent"
 	"bareloop/internal/server"
 )
@@ -35,7 +41,8 @@ type fileConfig struct {
 	Addr string `json:"addr,omitempty"`
 	// Data is where session logs live; the -data flag wins.
 	Data string `json:"data,omitempty"`
-	// Web is the directory of the static UI; the -web flag wins.
+	// Web is the directory of the static UI; the -web flag wins. Empty — the default — means the copy
+	// embedded in the binary.
 	Web string `json:"web,omitempty"`
 	// Fsync makes every append synchronous (safer, slower).
 	Fsync bool `json:"fsync,omitempty"`
@@ -56,7 +63,7 @@ func main() {
 		cfgPath   = flag.String("config", "config.json", "JSON config file (optional)")
 		addr      = flag.String("addr", "", "listen address, e.g. 127.0.0.1:8090")
 		dataDir   = flag.String("data", "", "directory for session logs (default ./data)")
-		webDir    = flag.String("web", "", "directory of the web UI (default ./web)")
+		webDir    = flag.String("web", "", "serve the UI from this directory instead of the copy embedded in the binary")
 		fsync     = flag.Bool("fsync", false, "fsync every log append")
 		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
@@ -85,8 +92,16 @@ func main() {
 	if *webDir != "" {
 		cfg.Web = *webDir
 	}
-	if cfg.Web == "" {
-		cfg.Web = findWeb()
+	// An empty cfg.Web is the UI embedded in the binary. There is deliberately no search of the usual
+	// places any more: a binary that carries its own UI should use it, and quietly serving a stale ./web
+	// because it happened to be the working directory is the worse surprise.
+	//
+	// Naming a directory is a request, so getting it wrong is fatal: the alternative is a daemon that
+	// serves a 404 in the browser and never mentions it on stderr.
+	if cfg.Web != "" {
+		if st, err := os.Stat(filepath.Join(cfg.Web, "index.html")); err != nil || st.IsDir() {
+			logger.Fatalf("web dir: %s holds no index.html — name a directory that has the UI, or drop the -web flag and this file's \"web\" key to serve the copy embedded in the binary", cfg.Web)
+		}
 	}
 	if *fsync {
 		cfg.Fsync = true
@@ -127,7 +142,12 @@ func main() {
 		}
 	}
 
-	srv := server.New(mgr, hub, cfg.Web, logf)
+	// The UI that ships with this binary, rooted at the UI itself rather than at the "web" prefix.
+	embeddedUI, err := fs.Sub(bareloop.WebUI, "web")
+	if err != nil {
+		logger.Fatalf("embedded UI: %v", err)
+	}
+	srv := server.New(mgr, hub, embeddedUI, cfg.Web, logf)
 
 	// pprof is off unless asked for, and asking has two shapes: an address (a listener of its own) or
 	// "same" (the API port, under /debug/pprof/). The difference matters because /debug/pprof/profile is
@@ -174,7 +194,11 @@ func main() {
 	if host == "0.0.0.0" || host == "" || host == "::" {
 		host = "127.0.0.1"
 	}
-	fmt.Fprintf(os.Stderr, "bareloopd listening on http://%s (data=%s web=%s)\n", cfg.Addr, cfg.Data, cfg.Web)
+	webWhat := cfg.Web
+	if webWhat == "" {
+		webWhat = "embedded"
+	}
+	fmt.Fprintf(os.Stderr, "bareloopd listening on http://%s (data=%s web=%s)\n", cfg.Addr, cfg.Data, webWhat)
 	if cfg.Debug {
 		fmt.Fprintln(os.Stderr, "debug logging on")
 	}
@@ -231,15 +255,4 @@ func loadConfig(path string) (fileConfig, error) {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
-}
-
-// findWeb looks for the UI in the usual places so `go run ./cmd/bareloopd` works from the repo
-// root as well as from an installed binary.
-func findWeb() string {
-	for _, cand := range []string{"web", "web/dist", "./web", "../web", "ui"} {
-		if st, err := os.Stat(filepath.Join(cand, "index.html")); err == nil && !st.IsDir() {
-			return cand
-		}
-	}
-	return "web"
 }
