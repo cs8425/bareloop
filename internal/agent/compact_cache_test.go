@@ -355,7 +355,10 @@ func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message
 		t.Fatalf("warm = %v, want %v", refs.warm, warm)
 	}
 	ruler := compact.NewRuler(built.StructuredCap)
-	text, size, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1)
+	var atts []ir.SummaryAttempt
+	text, size, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1, func(a ir.SummaryAttempt) {
+		atts = append(atts, a)
+	})
 	if err != nil {
 		t.Fatalf("the chain failed: %v", err)
 	}
@@ -369,6 +372,18 @@ func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message
 	asks := s.provider.(*chainProvider).all()
 	if len(asks) < 2 {
 		t.Fatalf("the chain ran %d call(s) over a region that does not fit one request", len(asks))
+	}
+	// Every call the chain made owes the bill a line, and a successful chain bills no failures.
+	if len(atts) != len(asks) {
+		t.Fatalf("the chain made %d summariser call(s) and recorded %d: every call costs tokens whether its text was kept or not", len(asks), len(atts))
+	}
+	for i, a := range atts {
+		if a.Failed != "" {
+			t.Fatalf("call %d of a successful chain is marked failed: %s", i+1, a.Failed)
+		}
+		if a.Usage == nil {
+			t.Fatalf("call %d of the chain carries no usage although the fixture reports one", i+1)
+		}
 	}
 	return asks, sent, tools
 }
@@ -493,7 +508,7 @@ func TestTheChainNeverSummarisesNothing(t *testing.T) {
 	}
 	p := compact.Params{SummaryMode: compact.ModeIterative, ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70, Marker: compact.DefaultMarker}
 	ruler := compact.NewRuler(built.StructuredCap)
-	text, _, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1)
+	text, _, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1, func(ir.SummaryAttempt) {})
 	if err != nil {
 		t.Fatalf("an unsliceable payload is a reason to fall back, not a reason to fail: %v", err)
 	}

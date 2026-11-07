@@ -261,7 +261,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		path := sess.Path()
 		entries := make([]usageEntry, 0, len(path))
 		for _, e := range path {
-			entries = append(entries, usageEntry{ID: e.ID, ParentID: e.ParentID, Kind: e.Kind, Role: e.Role, Usage: e.Usage, Finish: e.Finish, Ms: e.Ms, Ts: e.Ts})
+			row := usageEntry{ID: e.ID, ParentID: e.ParentID, Kind: e.Kind, Role: e.Role, Usage: e.Usage, Finish: e.Finish, Ms: e.Ms, Ts: e.Ts}
+			if e.Compaction != nil {
+				row.Summary = e.Compaction.Summary
+			}
+			entries = append(entries, row)
 		}
 		cfg := sess.Config()
 		cfg.LLM.APIKey = "" // the key is never echoed back to the browser
@@ -329,9 +333,12 @@ type usageEntry struct {
 	Kind     string    `json:"kind"`
 	Role     string    `json:"role"`
 	Usage    *ir.Usage `json:"usage,omitempty"`
-	Finish   string    `json:"finishReason,omitempty"`
-	Ms       int64     `json:"ms,omitempty"`
-	Ts       time.Time `json:"ts"`
+	// Summary is the per-call list a compaction's Usage is the total of — the refused
+	// retries included, so the panel can show the line items behind the one row.
+	Summary []ir.SummaryAttempt `json:"summaryRequests,omitempty"`
+	Finish  string              `json:"finishReason,omitempty"`
+	Ms      int64               `json:"ms,omitempty"`
+	Ts      time.Time           `json:"ts"`
 }
 
 // triFlag reads one of this endpoint's picky boolean query parameters: absent, 0 or false is

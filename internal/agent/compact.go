@@ -33,15 +33,19 @@ type CompactResult struct {
 	Empty bool `json:"empty,omitempty"`
 	// Split marks a cut that is not a user-message span boundary (§2.3): the summary covers part of a
 	// turn, or the whole path when Empty.
-	Split         bool   `json:"split,omitempty"`
-	Replaced      int    `json:"replaced,omitempty"`
-	Summarized    int    `json:"summarizeTokens,omitempty"`
-	Kept          int    `json:"keptTokens,omitempty"`
-	Attempts      int    `json:"attempts,omitempty"`
-	Model         string `json:"model,omitempty"`
-	SummaryText   string `json:"-"`
-	SummaryTokens int    `json:"summaryTokens,omitempty"`
-	SummaryCap    int    `json:"summaryCap,omitempty"`
+	Split      bool `json:"split,omitempty"`
+	Replaced   int  `json:"replaced,omitempty"`
+	Summarized int  `json:"summarizeTokens,omitempty"`
+	Kept       int  `json:"keptTokens,omitempty"`
+	Attempts   int  `json:"attempts,omitempty"`
+	// SummaryUsage is every summariser call this compaction made, failures included —
+	// the line items behind the committed entry's usage total, and the whole record for a
+	// round that committed nothing (a stop has no entry to attach a bill to).
+	SummaryUsage  []ir.SummaryAttempt `json:"summaryUsage,omitempty"`
+	Model         string              `json:"model,omitempty"`
+	SummaryText   string              `json:"-"`
+	SummaryTokens int                 `json:"summaryTokens,omitempty"`
+	SummaryCap    int                 `json:"summaryCap,omitempty"`
 	// Before is the real contextUsed before the commit; After is the derived estimate after
 	// it (the real number only comes back with the next completion, spec §3.8.6).
 	Before int `json:"before"`
@@ -346,9 +350,13 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 			size int
 			err  error
 		)
+		// One line per call the summariser actually made, into the result that carries every
+		// outcome — committed, gated or skipped — because a summariser call costs what it costs
+		// whether or not its text was kept.
+		record := func(a ir.SummaryAttempt) { res.SummaryUsage = append(res.SummaryUsage, a) }
 		for attempt := 1; attempt <= tries; attempt++ {
 			res.Attempts = attempt
-			text, size, err = s.summarize(ctx, cfg, p, plan, region, ruler, refs, extra, attempt)
+			text, size, err = s.summarize(ctx, cfg, p, plan, region, ruler, refs, extra, attempt, record)
 			if err != nil {
 				s.logf("compaction (%s): attempt %d failed: %v", trig, attempt, err)
 				extra = ""
@@ -407,7 +415,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 // messages behind the running summary. Cutting the region into parts is a decision about bytes, so
 // it is made against the ruler and reported next to what the server counted.
 func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
-	cut []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int) (string, int, error) {
+	cut []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int, record func(ir.SummaryAttempt)) (string, int, error) {
 
 	nctx := s.nctxLocked()
 	chunks := compact.PlanChunks(cut, ruler, nctx, p)
@@ -468,10 +476,21 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		req := summaryRequest(cfg, call)
 		s.emit(Event{Type: EvtCompact, Data: map[string]any{
 			"stage": "summarizing", "attempt": attempt, "part": i + 1, "parts": len(chunks)}})
+		started := time.Now()
 		res, err := s.provider.Complete(ctx, req)
+		att := ir.SummaryAttempt{Attempt: attempt, Part: i + 1, Parts: len(chunks), Ms: time.Since(started).Milliseconds()}
 		if err != nil {
+			// The Result of a failed call is nil unless the provider read one before it died —
+			// usage rides whichever the provider actually returned, and nothing here may
+			// dereference the one it did not.
+			if res != nil && res.Usage != nil {
+				att.Usage = res.Usage
+			}
+			att.Failed = err.Error()
+			record(att)
 			return "", 0, fmt.Errorf("part %d/%d: %w", i+1, len(chunks), err)
 		}
+		att.Usage = res.Usage
 		text := strings.TrimSpace(res.Content)
 		if res.Usage != nil {
 			reported = res.Usage.CompletionTokens
@@ -514,9 +533,12 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 			if res.Usage != nil {
 				tokens = fmt.Sprint(res.Usage.CompletionTokens)
 			}
-			return "", 0, fmt.Errorf("part %d/%d: empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
-				i+1, len(chunks), reason, tokens, len(res.Reasoning))
+			att.Failed = fmt.Sprintf("empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
+				reason, tokens, len(res.Reasoning))
+			record(att)
+			return "", 0, fmt.Errorf("part %d/%d: %s", i+1, len(chunks), att.Failed)
 		}
+		record(att)
 		prev = text
 	}
 	if strings.TrimSpace(prev) == "" {
@@ -729,8 +751,10 @@ func (s *Session) summaryRequestSize(refs payloadRefs, sumRegion []*ir.Entry, ex
 }
 
 // summarize performs one summary attempt with the complete (non-streaming) call of §3.5.
+// record sees every summariser call this attempt made — kept, refused or broken — for the
+// same reason the serial chain takes it: the money was spent per call, not per kept text.
 func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
-	region []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int) (string, int, error) {
+	region []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int, record func(ir.SummaryAttempt)) (string, int, error) {
 
 	// The summary request is itself bound by n_ctx. When the region does not fit one call there is
 	// no way to summarise it in one piece, and the session is stuck too big to send and too big to
@@ -741,12 +765,12 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	}
 	switch p.SummaryMode {
 	case compact.ModeIterative, compact.ModeMapReduce:
-		return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt)
+		return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt, record)
 	default:
 		if one := s.summaryRequestSize(refs, sumRegion, extra, plan.Split, p); compact.NeedsIterative(one, s.nctxLocked()) {
 			s.logf("compaction: one summary request would be %d tokens against a %d-token window, summarising serially",
 				one, s.nctxLocked())
-			return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt)
+			return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt, record)
 		}
 	}
 
@@ -773,10 +797,20 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	}
 	req := summaryRequest(cfg, call)
 	s.emit(Event{Type: EvtCompact, Data: map[string]any{"stage": "summarizing", "attempt": attempt}})
+	started := time.Now()
 	res, err := s.provider.Complete(ctx, req)
+	att := ir.SummaryAttempt{Attempt: attempt, Ms: time.Since(started).Milliseconds()}
 	if err != nil {
+		// Nil-safe for the same reason as the chain: a failed call has a Result only if the
+		// provider read one before it died.
+		if res != nil && res.Usage != nil {
+			att.Usage = res.Usage
+		}
+		att.Failed = err.Error()
+		record(att)
 		return "", 0, err
 	}
+	att.Usage = res.Usage
 	text := strings.TrimSpace(res.Content)
 	if text == "" {
 		reason, tokens := "unknown", "n/a"
@@ -786,9 +820,12 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 		if res.Usage != nil {
 			tokens = fmt.Sprint(res.Usage.CompletionTokens)
 		}
-		return "", 0, fmt.Errorf("empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
+		att.Failed = fmt.Sprintf("empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
 			reason, tokens, len(res.Reasoning))
+		record(att)
+		return "", 0, errors.New(att.Failed)
 	}
+	record(att)
 	reported, reasoned := 0, len(res.Reasoning)
 	if res.Usage != nil {
 		reported = res.Usage.CompletionTokens
@@ -810,11 +847,16 @@ func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Pa
 		return res
 	}
 	meta := compact.MetaOf(p, plan, model, res.Before, size)
+	meta.Summary = res.SummaryUsage
 	content := p.Prefix(text)
 	entry, err := s.appendEntry(&ir.Entry{
-		Kind:       ir.KindCompaction,
-		Role:       "user",
-		Content:    content,
+		Kind:    ir.KindCompaction,
+		Role:    "user",
+		Content: content,
+		// The entry's own usage is the total of the summariser calls that wrote it, refused
+		// retries included: those requests are exactly what this entry cost, and the cost bill
+		// can then count a compaction like any other request without learning about meta.
+		Usage:      summaryTotal(res.SummaryUsage),
 		Compaction: &meta,
 		Model:      model,
 		Label:      fmt.Sprintf("compaction (%s)", res.Trigger),
@@ -847,6 +889,29 @@ func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Pa
 		entry.ID, res.Before, res.After, res.SummaryTokens, res.SummaryCap, plan.Replaced, plan.Split, plan.Empty)
 	s.emitState()
 	return res
+}
+
+// summaryTotal adds the usage every recorded summariser call reported into one number for
+// the committed entry. nil when no call reported anything: an unknown total is said as
+// unknown, never as zero — zero would bill a compaction as free.
+func summaryTotal(atts []ir.SummaryAttempt) *ir.Usage {
+	var t ir.Usage
+	seen := false
+	for _, a := range atts {
+		if a.Usage == nil {
+			continue
+		}
+		seen = true
+		t.PromptTokens += a.Usage.PromptTokens
+		t.CacheTokens += a.Usage.CacheTokens
+		t.CompletionTokens += a.Usage.CompletionTokens
+		t.HasPrompt = t.HasPrompt || a.Usage.HasPrompt
+		t.HasCompletion = t.HasCompletion || a.Usage.HasCompletion
+	}
+	if !seen {
+		return nil
+	}
+	return &t
 }
 
 // askGate shows the three-option card and waits (§3.4). Aborting the wait counts as skip: so does the

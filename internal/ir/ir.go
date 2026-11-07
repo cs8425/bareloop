@@ -98,6 +98,25 @@ const (
 	KindCompaction = "compaction"
 )
 
+// SummaryAttempt is one real call of the summariser — one part of one attempt, whether
+// or not the text it produced survived. A compaction that retried three times against the
+// cap paid three full prefills, and a bill that prices only the text that was kept is a
+// bill with hidden line items: this is where the hidden ones live.
+type SummaryAttempt struct {
+	// Attempt is the 1-based attempt number; Part/Parts locate this call inside that
+	// attempt's serial chain (both zero when the attempt was a single call).
+	Attempt int `json:"attempt"`
+	Part    int `json:"part,omitempty"`
+	Parts   int `json:"parts,omitempty"`
+	// Usage is what the provider reported for this call; nil when it reported nothing
+	// (an HTTP-level failure has no token count, and unknown is not zero).
+	Usage *Usage `json:"usage,omitempty"`
+	Ms    int64  `json:"ms,omitempty"`
+	// Failed is why this call produced nothing usable (provider error, empty summary).
+	// Empty means this call's text became — or fed — the summary.
+	Failed string `json:"failed,omitempty"`
+}
+
 // CompactionMeta is the metadata of a compaction entry.
 //
 // The three boundary states of spec §2.5 must stay distinguishable:
@@ -113,6 +132,10 @@ type CompactionMeta struct {
 	UsageBefore int     `json:"usageBefore,omitempty"`
 	SummarySize int     `json:"summarySize,omitempty"`
 	SummaryMode string  `json:"summaryMode,omitempty"`
+	// Summary lists every summariser call this compaction made, refused retries included.
+	// The entry's own usage field is their total: this entry is exactly what those requests
+	// wrote, so the cost panel counts a compaction without having to know compaction exists.
+	Summary []SummaryAttempt `json:"summaryRequests,omitempty"`
 	// Broken is computed while resolving the path (never trusted from storage).
 	Broken bool `json:"broken,omitempty"`
 }
