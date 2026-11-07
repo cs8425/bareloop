@@ -8,6 +8,8 @@ package server
 import (
 	"net/http/httptest"
 	"testing"
+
+	"bareloop/internal/ir"
 )
 
 func TestPageQueryReadsEveryWindowName(t *testing.T) {
@@ -19,7 +21,7 @@ func TestPageQueryReadsEveryWindowName(t *testing.T) {
 	if o.Limit != 20 || o.After != "0000003" {
 		t.Errorf("got limit %d after %q, want 20 and 0000003", o.Limit, o.After)
 	}
-	if o.Before != "" || o.Anchor != "" || o.All {
+	if o.Before != "" || o.Anchor != "" {
 		t.Errorf("got %+v, want nothing else set", o)
 	}
 
@@ -46,10 +48,31 @@ func TestPageQueryReadsEveryWindowName(t *testing.T) {
 	}
 }
 
+func TestPageQueryDefaultIsAPage(t *testing.T) {
+	// The endpoint's contract: a GET that names no window buys a page, never the transcript.
+	// (One session's unparameterised read measured 73 MB; this test is why it cannot happen again.)
+	o, err := pageQuery(httptest.NewRequest("GET", "/api/session/s", nil))
+	if err != nil || o.Limit != ir.DefaultPageEntries {
+		t.Errorf("got %+v (%v), want the default page of %d", o, err, ir.DefaultPageEntries)
+	}
+	// A bare place name gets the default page too: "everything older than here" is an unbounded
+	// slice wearing a cursor, and no URL shape buys one any more.
+	for _, q := range []string{"?before=0000003", "?after=0000003"} {
+		o, err := pageQuery(httptest.NewRequest("GET", "/api/session/s"+q, nil))
+		if err != nil || o.Limit != ir.DefaultPageEntries {
+			t.Errorf("pageQuery(%q): got limit %d (%v), want the default page", q, o.Limit, err)
+		}
+	}
+	// An explicit limit still outranks the default.
+	if o, err := pageQuery(httptest.NewRequest("GET", "/api/session/s?limit=7", nil)); err != nil || o.Limit != 7 {
+		t.Errorf("got limit %d (%v), want 7", o.Limit, err)
+	}
+}
+
 func TestTurnsRefusesEveryPlaceName(t *testing.T) {
 	// A turn list that skipped a stretch of the path without saying so is worse than one that refuses,
 	// and `after` names a stretch as precisely as the other two ids do.
-	for _, q := range []string{"before=0000003", "after=0000003", "anchor=0000003", "all=1"} {
+	for _, q := range []string{"before=0000003", "after=0000003", "anchor=0000003"} {
 		if n, err := turnLimit(httptest.NewRequest("GET", "/api/session/s/turns?"+q, nil)); err == nil {
 			t.Errorf("turns with %s: want a refusal, got limit %d", q, n)
 		}

@@ -307,11 +307,12 @@ function serverSwitch(s) {
 }
 
 async function setServerDisabled(s, disabled) {
-  // PATCH needs the whole mcp array, and the only read of it is the same heavy GET the settings
-  // dialog does — so the config is cached in state.cfg the first time it is needed.
+  // PATCH needs the whole mcp array. ?config=1 is the light read for exactly this: the old code
+  // fetched the whole transcript to read one config field out of it, and the comment here used to
+  // admit it was "the same heavy GET the settings dialog does" — the dialog doesn't do that anymore.
   let cfg = state.cfg;
   if (!cfg) {
-    const data = await get('').catch(() => null);
+    const data = await get('?config=1').catch(() => null);
     if (!data) return;
     cfg = state.cfg = data.config || {};
   }

@@ -65,7 +65,10 @@ async function showStats() {
     note('open a session first');
     return;
   }
-  const data = await get('').catch(() => null);
+  // ?usage=1 is the skeleton door: every row's usage and parentage, no content and no images.
+  // A plain GET would now buy one page anyway, and one page priced as a whole bill is a smaller
+  // lie than 73 MB but still a lie — so the bill asks for the shape of a bill.
+  const data = await get('?usage=1').catch(() => null);
   if (!data) return;
   const st = data.status || {};
   const pricing = (data.config && data.config.llm && data.config.llm.pricing) || null;

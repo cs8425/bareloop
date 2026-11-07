@@ -36,18 +36,18 @@ func posID(i int) string { return fmt.Sprintf("%04d", i) }
 
 func TestWholePathIsTheDefault(t *testing.T) {
 	path := msgs(5, 3)
-	for _, o := range []PageOptions{{}, {All: true}} {
-		p, err := PageOf(path, o)
-		if err != nil {
-			t.Fatalf("PageOf(%+v): %v", o, err)
-		}
-		if len(p.Entries) != len(path) || p.HasOlder || p.HasNewer || p.Truncated {
-			t.Errorf("%+v: got %d entries, older=%v newer=%v truncated=%v, want all %d of the path",
-				o, len(p.Entries), p.HasOlder, p.HasNewer, p.Truncated, len(path))
-		}
-		if p.Limit != 0 || p.Total != len(path) {
-			t.Errorf("got limit %d total %d, want 0 and %d", p.Limit, p.Total, len(path))
-		}
+	// The library's zero value is the whole path — an answer no caller can ask for over HTTP,
+	// where every request is sized (see the server's pageQuery and DefaultPageEntries).
+	p, err := PageOf(path, PageOptions{})
+	if err != nil {
+		t.Fatalf("PageOf: %v", err)
+	}
+	if len(p.Entries) != len(path) || p.HasOlder || p.HasNewer || p.Truncated {
+		t.Errorf("got %d entries, older=%v newer=%v truncated=%v, want all %d of the path",
+			len(p.Entries), p.HasOlder, p.HasNewer, p.Truncated, len(path))
+	}
+	if p.Limit != 0 || p.Total != len(path) {
+		t.Errorf("got limit %d total %d, want 0 and %d", p.Limit, p.Total, len(path))
 	}
 }
 
@@ -461,12 +461,8 @@ func TestRejectedRequests(t *testing.T) {
 	path := msgs(3, 3)
 	for name, o := range map[string]PageOptions{
 		"before and anchor together": {Before: "1", Anchor: "2"},
-		"all with a limit":           {All: true, Limit: 5},
-		"all with before":            {All: true, Before: "1"},
-		"all with anchor":            {All: true, Anchor: "1"},
 		"before off the path":        {Before: "not here"},
 		"anchor off the path":        {Limit: 5, Anchor: "not here"},
-		"all with after":             {All: true, After: "1"},
 		"before and after together":  {Before: "1", After: "2"},
 		"after and anchor together":  {After: "1", Anchor: "2"},
 		"after off the path":         {After: "not here"},

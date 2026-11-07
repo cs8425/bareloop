@@ -45,6 +45,7 @@ endpoint.
 | this file | what it is, how to build it, how to use it |
 | [`docs/design.md`](docs/design.md) | how it works and why: the context window, compaction invariants, prompt cache, retries, MCP eras, the UI's shape, the markdown renderer's hooks, and what is deliberately deferred |
 | [`docs/zstd-dictionary.md`](docs/zstd-dictionary.md) | the storage codec and its dictionary: what a payload row is made of, how the shipped zstd book is trained, how to train your own, and what losing one costs |
+| [`docs/api.md`](docs/api.md) | the full HTTP and websocket reference: every endpoint, every query parameter, every event frame — the contract a client relies on, so this README stays prose |
 | [`notes/compact-threshold-mode.en.md`](notes/compact-threshold-mode.en.md) | the compaction spec (the authority when the two docs disagree) |
 | [`config.example.json`](config.example.json) | every config field, documented inline |
 
@@ -518,120 +519,48 @@ otherwise the model answers in whatever it prefers
 
 | method | path | what it does |
 |---|---|---|
-| GET | `/api/health` | liveness |
-| GET | `/api/sessions` | every session with its status, and what each one adds up to - how many entries its path holds, how many records its log holds, and what that log costs the disk. Answered from the index: listing sessions reads no transcript, and a session with no index is listed without those numbers rather than with zeroes. `lastTs` is the newest timestamp any entry of the log carries - the log's newest entry, not the entry the path is standing on, so moving a path backwards never makes it look fresh |
-| POST | `/api/sessions` | create a session (body: a config; `id` is required, lowercase, and becomes the directory name - 400 without it, 409 if the directory exists) |
-| GET | `/api/session/{id}` | config (without the API key), status, **the path** in path order, pending ids, and a `window` saying how much of it came back (see [paging the transcript](#paging-the-transcript)) |
-| PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared. The name of a session is a config field, so this is also how it is renamed |
-| DELETE | `/api/session/{id}` | close and delete the session |
-| POST | `/api/session/{id}/unload` | close the session and forget it **without touching its directory**: the parsed conversation, the log handle and the MCP connections are given back to the process, and the next read of the id opens it again from disk (listing sessions has never needed one open). A session with a run or a summary in flight is refused with a 400 naming the phase — `/stop` first, then put it down. The body is the row this produced (`closed: true`) plus `unloaded`, which is `false` when this process was not holding the session at all: it is shut, which is what was asked for. What only memory had goes — a message held instead of written, and the in-memory half of a parked wait — the same bill a restart pays, and the wait itself is recomputed from the log on the next open |
-| POST | `/api/session/{id}/send` | `{text, images[], files[], label}` - send now: the message is appended, or held in memory until the path is free again ([three moments](#three-moments-for-a-message)) |
-| POST | `/api/session/{id}/interrupt` | `{text, images[], files[], label}` - abort the current generation - or end a wait that has been handed to the daemon - and send this message immediately after. **The body has to carry a message**, by exactly the rule `send` applies (whitespace alone is nothing; a picture is one), and both answer 400 `agent: empty message` - aborting without saying anything is what `/stop` is for. While a manual summary is running it is **refused** - a summary is not a generation to abort, so `/stop` ends it first and this works after |
-| POST | `/api/session/{id}/stop` | abort what is in flight: a run keeps what it produced, a parked wait is ended (that is all there is to stop on a session that is asleep), and a manual summary is abandoned - it writes nothing until it finishes, so stopping one loses nothing |
-| POST | `/api/session/{id}/resume` | continue from the current tip without appending anything; the path must end on a user message, a tool result or a compaction summary |
-| POST | `/api/session/{id}/compact` | `{instruction}` - compact now, even below the threshold. The summary belongs to the session rather than to this request: disconnecting does not end it, and `/stop` is what ends it. While it runs, a `send` is held in memory and written behind the boundary it commits (which is what earns the next run), and an `interrupt` is refused |
-| POST | `/api/session/{id}/gate` | `{id, answer}` - `accept` / `retry` / `skip` for an oversized summary |
-| POST | `/api/session/{id}/elicit` | `{id, behavior, content}` - answer a tool's input request |
-| POST | `/api/session/{id}/entry/patch` | `{id, content}` - rewrite one entry's content **in place**: every path through it changes too, and it does not branch |
-| POST | `/api/session/{id}/entry/delete` | `{id}` - delete a leaf or make an interior entry synthetic |
-| POST | `/api/session/{id}/tip` | `{id}` - move the tip (time travel) |
+| GET | `/api/health` | liveness: `{ok, time}` |
+| GET | `/api/sessions` | every session as a list row — path, log and disk figures and all — answered from the index: listing sessions reads no transcript and opens nothing |
+| POST | `/api/sessions` | create a session (body: a config; `id` is required and becomes the directory name — 400 without it, 409 if the directory exists) |
+| GET | `/api/session/{id}` | config (without the API key), status, **a page of the path**, pending ids, and a `window` saying how much of it came back; `?config=1` answers config and status alone, `?usage=1` the whole path as a usage skeleton |
+| PATCH | `/api/session/{id}` | update the config; refuses while a run is active; a field the body does not carry is kept, not cleared — the name is a config field too, so this is how a session is renamed |
+| DELETE | `/api/session/{id}` | close and delete the session and its directory |
+| POST | `/api/session/{id}/unload` | put the session down without touching its directory; a run or a summary in flight is refused — `/stop` first |
+| POST | `/api/session/{id}/flags` | pin or archive a session without opening it |
+| POST | `/api/session/{id}/send` | `{text, images[], files[], label}` — send now: appended, or held until the path is free ([three moments](#three-moments-for-a-message)) |
+| POST | `/api/session/{id}/interrupt` | abort what is in flight — a generation or a handed-over wait — and send this message immediately after; aborting without saying anything is what `/stop` is for |
+| POST | `/api/session/{id}/stop` | abort what is in flight: a run keeps what it produced, a wait is ended, a manual summary is abandoned |
+| POST | `/api/session/{id}/resume` | continue from the current tip without appending anything |
+| POST | `/api/session/{id}/compact` | `{instruction}` — compact now, even below the threshold; `/stop` ends it, disconnecting does not |
+| POST | `/api/session/{id}/gate` · `/elicit` | answer a gate card (`accept`/`retry`/`skip`) or a tool's input request |
+| POST | `/api/session/{id}/entry/patch` · `/entry/delete` | rewrite one entry's content in place (every path through it changes, and it does not branch), or delete an entry |
+| POST | `/api/session/{id}/tip` | move the tip (time travel) |
 | POST | `/api/session/{id}/reload` | re-read the log from disk |
 | GET | `/api/session/{id}/inspect` | what would be sent: the system head, per-message token sizes, the plan, the tool list |
 | GET | `/api/session/{id}/payload` | the exact body of the next request: `{system, messages, tools}` |
-| GET | `/api/session/{id}/tools` | every server and every tool, with `enabled`, `estTokens`, `uses`, `prefix`, `schema` (its parameters), `renamedFrom` and `pendingChanges` |
-| POST | `/api/session/{id}/tools` | `{server, disabledTools[], toolPrefix}` — set the per-session tool policy; `{}` reads it |
-| GET | `/api/session/{id}/turns` | one row per turn of the path — the id to jump to, its `kind`, its `ts` and the first line of its text — with `total`, and `hasOlder` when the ceiling meant older turns did not come back; `?limit=` takes fewer, from the newest end |
-| GET | `/api/session/{id}/events` | the event stream as SSE (fallback transport) |
-| GET | `/ws` | the event stream as a websocket (primary transport) |
+| GET · POST | `/api/session/{id}/tools` | the tools drawer — every server and tool with cost and use; the POST sets one server's policy, landed at the end of the run |
+| GET | `/api/session/{id}/turns` | one row per turn of the path — each id a legal jump target for the pager — and no content at all |
+| GET | `/api/session/{id}/events` · `/ws` | the event stream as SSE (fallback transport) / as a websocket (primary) |
 
-### Paging the transcript
+The two promises this table rests on are worth memorising; the parameters, the `window` fields,
+the refused combinations and every event frame are in **[`docs/api.md`](docs/api.md)**.
 
-`GET /api/session/{id}` answers with the **path** — the entries that would be sent, oldest first — and
-nothing else. An entry on a branch nobody is standing on is not part of any path, so it stays in the log
-and in `/inspect` instead of crossing the wire to be thrown away.
+**The transcript is paged and cannot be talked out of it.** `GET /api/session/{id}` answers with
+the **path** — the entries that would be sent, oldest first — and no request shape buys the whole
+of it: the largest answer is **one page** (40 by default, 200 the ceiling), cut on whole turns so
+a tool call never sits on one page with its result on the next. Silence buys a page, and so does
+a bare `before` or `after` — one session's unparameterised read measured 73 MB once, and the
+request that made it was "no query string". `?usage=1` is the one whole-path answer left: the
+path as a skeleton of usage rows, content absent by construction rather than by flag, because a
+bill is bounded by arithmetic and a transcript is not.
 
-| parameter | what it asks for |
-|---|---|
-| *nothing* | the whole path — the default on purpose: the cost panel prices a whole session with one unparameterised call |
-| `?limit=40` | the newest page of at most 40 entries; 200 is the ceiling whatever you ask for, and `window.clamped` says when it was used |
-| `?limit=40&before=<id>` | the page before that one — `before` is exclusive and is normally the `oldestId` just received |
-| `?limit=40&after=<id>` | the page after that one — `after` is exclusive too and is normally the `newestId` just received: what comes back begins on the next turn, so nothing a reader holds is handed to it twice |
-| `?anchor=<id>&limit=40` | a page centred on one entry, for a jump that lands far from both ends; an anchor is a place in a page, so it is asked for with a size |
-| `?all=1` | the whole path by name, for inspecting and debugging |
-
-`before` and `after` cut the path whether or not a `limit` came with them, because "everything older than
-this entry" and "everything newer than it" are both questions with an answer. Past the tip `after` has
-nothing left to give: an empty page comes back with `hasNewer` false. An id that is not on the path is a
-400 either way — answering such a request with the whole path would be guessing at it.
-
-`window` is always there: `oldestId`, `newestId`, `hasOlder`, `hasNewer`, `count`, `total`, `bytes`,
-`limit` (what you asked for; 0 means no ceiling was asked for), `maxLimit`, `clamped`, `truncated`.
-
-A page is a run of **whole turns**: it begins on a user message or on a compaction summary, so a tool
-call never sits on one page with its result on the next, and walking `before` back from the newest page
-reproduces the path with no gap and no overlap. The one exception is a single turn larger than the page
-it was asked into: it comes back whole and `truncated` is true, because two pages holding half a tool
-call each are two pages neither can draw. Walking `after` forward from the newest id of a page does the
-same thing in the other direction, which is what lets a reader let go of what it has scrolled past and
-ask for it again later. Combining any two of `before`, `after` and `anchor`, or `all` with anything else,
-is a 400 — as is a `limit` that is not a positive integer, an `anchor` with no `limit`, or an id that is
-not on the path.
-
-`GET /api/session/{id}/turns` reads the same path at the resolution of a ruler instead of a page: one row
-per turn (`id`, `kind`, `ts`, `snippet` — the first line of that entry, capped at 120 runes and marked
-with an ellipsis where it was cut) and no content at all, 500 turns per answer. The ids it offers are
-exactly the positions a page is allowed to begin at, which is what makes them worth jumping to: every row
-is an `anchor` for the pager, so a jump cannot land between a tool call and its result. Asking for 500
-turns of a longer session is not an error — the newest 500 come back, `clamped` is true and `hasOlder`
-says the path goes on before the first row. `before`, `after`, `anchor` and `all` are 400s here, because
-a turn
-list that skipped a stretch of the path without saying so is worse than one that refuses.
-
-### Websocket protocol
-
-Text frames, JSON. The server sends one object per frame: `{type, session, seq, ts, ...}`, plus
-`{type:"reply", req, data}` / `{type:"reply_error", req, error}` answers. The read limit is switched off,
-because images travel as base64 inside one message.
-
-Three commands come in, and none of them touches a session: `ping`, `subscribe` (`{session: "a,b"}`, empty
-means all) and `snapshot` (replay what the hub is still holding for one session). **Every action is REST**, so
-a button never waits on the event transport and `curl` can do everything the page can - the socket that
-carries events is deliberately not a second way to run a session, because two decoders for one action is how a
-frame ends up losing a field the other one kept. Anything else arriving on the socket is answered with an
-error that says where to go instead.
-
-If the websocket drops the UI does not give up on it: it retries with a 0.6 s to 15 s backoff forever and,
-after a few failures, subscribes to SSE (or a 1.5 s poll) as a second channel, saying which of the two it is
-living on and when the next socket attempt is due - a socket that comes back closes the fallback again. The
-status line is the transport's own report, never a guess. Two tabs on one session stay in sync from these
-events, and a tab re-reads the path when the tip moves to an entry it has never seen: another tab moved the
-path or appended to it while this one was in the background.
-
-Event types: `hello`, `entry`, `delta`, `tool_call`, `tool_result`, `state`, `pending`, `compaction`,
-`request`, `request_done`, `log`, `info`, `error`, `removed`, `tools` (the tool set was rebuilt; the body is
-the same view `GET .../tools` returns).
-
-An `entry` frame for a reply that was streamed out carries `streamId` too — the id its `delta` frames came
-on — so a client that has been drawing those deltas can finish *that* node with the committed entry (id chips
-and token counts arriving, the streaming marker going) instead of drawing a second node for a message it
-watched being written. Entries that were never streamed — a tool result, a message accepted while an answer
-was on the wire, a compaction summary — omit the key. The entry arrives before the `delta` frame that closes
-its stream, which is the other half of the promise: nothing closes a buffer before the entry that would
-inherit it exists.
-
-A `delta` frame that closes a stream says `done`, and normally nothing else. The one case where that is a lie
-is a reply storage refused — a message already streamed out that will never be on the path — and there the
-closing frame carries `error` beside the `done`, holding the sentence the run reports. It rides on that frame
-because a live buffer is keyed by a stream id and an `error` event has none: without it the page that watched
-the text arrive keeps showing a message that looks finished, beside a toast about a run that stopped. A tool
-result the path refuses is the same case on the other frame that ends a thing - the `tool_result` which closes
-a card carries the refusal as its error, since a card left spinning reads as a call still running.
-
-The page takes both at their word, because what it has on screen is then the only copy of that text anywhere: a
-refused reply stays where it was, marked `not saved` in the space its id would have stood in, with the refusing
-sentence under it and a rebuild that keeps the node instead of dropping it; a refused tool result puts that
-sentence in the card's tooltip, where the card would otherwise read `error` with nothing to expand it.
-`internal/agent/stream_test.go` pins the two frames, `js/transcript.js` and `js/events.js` render them.
+**Actions are REST, always.** The event socket carries frames out and three transport verbs in
+(`ping`, `subscribe`, `snapshot`) — every action is a `POST`, so a button never waits on the
+event transport, `curl` can do everything the page can, and one action has exactly one decoder.
+Every frame carries a `seq` from the daemon's counter and the socket beats a `heartbeat` every
+~20 s, so a page can tell "nothing happened" from "something happened that I never received";
+after a drop the honest move is the one the shipped UI makes — reconnect, replay what the hub
+still holds, re-read what it does not.
 
 ### Three moments for a message
 

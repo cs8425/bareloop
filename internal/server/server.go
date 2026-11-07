@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -164,14 +165,66 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) (*agent.Session
 
 // handleGet is the transcript endpoint, and the only place a window is chosen.
 //
-// Without a limit it answers with the whole path, which is what it has always promised: the cost panel
-// makes one unparameterised call and prices the entire path from it, so a default page would quote a
-// part of a session as if it were the whole bill. What changed is that the answer is the *path* — the
-// sequence that gets sent and the sequence the transcript draws — instead of every entry in the log
-// including the branches nobody is on, which the browser used to receive and discard.
+// The default is a page, and the page is the ceiling of an answer: silence, a bare place name,
+// an oversized limit — whatever the URL says, the largest transcript this endpoint hands over is
+// one page (ir.MaxPageEntries at most). An endpoint that ships images inline must not answer to
+// the size of the session: one session's unparameterised read measured 73 MB, and no request —
+// silence included — is a promise to pay for it. The answer is the *path* (the sequence that gets
+// sent and the sequence the transcript draws), not every entry in the log including the branches
+// nobody is on.
+//
+// Two other shapes answer alone, each refusing to be combined with a window: ?config=1 returns
+// config and status without walking the path (the settings dialog reads a config, not a
+// transcript), and ?usage=1 returns the whole path as a skeleton — every row's usage and shape,
+// no content and no images — which is all the cost panel has ever needed. The skeleton is the
+// one whole-path answer the endpoint keeps, and keeps because a skeleton row is an order of
+// small bytes: the bill of a session is bounded by its length, not by what was said in it.
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.session(w, r)
 	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	configOnly, err := triFlag(q, "config")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	usageOnly, err := triFlag(q, "usage")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if configOnly && usageOnly {
+		writeErr(w, http.StatusBadRequest, errors.New("config=1 and usage=1 answer different questions; pick one"))
+		return
+	}
+	// Why each alone-shaped request refuses the window names: an answer with no entries inside a
+	// window is a page nobody asked for, and a skeleton has no pages to cut.
+	combos := q.Get("limit") != "" || q.Get("all") != "" || q.Get("anchor") != "" || q.Get("before") != "" || q.Get("after") != ""
+	if configOnly {
+		if combos {
+			writeErr(w, http.StatusBadRequest, errors.New("config=1 answers config and status alone; drop the window parameters"))
+			return
+		}
+		cfg := sess.Config()
+		cfg.LLM.APIKey = "" // the key is never echoed back to the browser
+		writeJSON(w, map[string]any{"config": cfg, "status": sess.Status()})
+		return
+	}
+	if usageOnly {
+		if combos {
+			writeErr(w, http.StatusBadRequest, errors.New("usage=1 answers the whole path as a skeleton; drop the window parameters"))
+			return
+		}
+		path := sess.Path()
+		entries := make([]usageEntry, 0, len(path))
+		for _, e := range path {
+			entries = append(entries, usageEntry{ID: e.ID, ParentID: e.ParentID, Kind: e.Kind, Role: e.Role, Usage: e.Usage, Finish: e.Finish, Ms: e.Ms, Ts: e.Ts})
+		}
+		cfg := sess.Config()
+		cfg.LLM.APIKey = "" // the key is never echoed back to the browser
+		writeJSON(w, map[string]any{"config": cfg, "status": sess.Status(), "entries": entries, "count": len(entries)})
 		return
 	}
 	o, err := pageQuery(r)
@@ -226,10 +279,38 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// usageEntry is one row of the ?usage=1 skeleton: what a request cost, not what it said. The
+// fields are the cost panel's entire vocabulary — the path walk needs parentId, the bill needs
+// usage — and content, reasoning, tool calls and images are absent by construction, not by flag.
+type usageEntry struct {
+	ID       string    `json:"id"`
+	ParentID string    `json:"parentId,omitempty"`
+	Kind     string    `json:"kind"`
+	Role     string    `json:"role"`
+	Usage    *ir.Usage `json:"usage,omitempty"`
+	Finish   string    `json:"finishReason,omitempty"`
+	Ms       int64     `json:"ms,omitempty"`
+	Ts       time.Time `json:"ts"`
+}
+
+// triFlag reads one of this endpoint's picky boolean query parameters: absent, 0 or false is
+// off, 1 or true is on, and anything else is a 400 — silently accepting "yes" is how two
+// dialects accumulate until one of them eventually means the opposite.
+func triFlag(q url.Values, name string) (bool, error) {
+	switch v := q.Get(name); v {
+	case "", "0", "false":
+		return false, nil
+	case "1", "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be 1 or 0, got %q", name, v)
+	}
+}
+
 // pageQuery reads the window parameters out of a request. What they mean — including which
 // combinations are refused and what the ceiling is — is decided in ir.PageOf, where one rule about
-// paging has one home and is testable without a server; this only turns strings into types and
-// refuses a limit that is not a number.
+// paging has one home and is testable without a server; this only turns strings into types,
+// refuses a limit that is not a number, and sizes any request that names a place but no page.
 func pageQuery(r *http.Request) (ir.PageOptions, error) {
 	q := r.URL.Query()
 	o := ir.PageOptions{}
@@ -245,13 +326,6 @@ func pageQuery(r *http.Request) (ir.PageOptions, error) {
 		}
 		o.Limit = n
 	}
-	switch v := q.Get("all"); v {
-	case "", "0", "false":
-	case "1", "true":
-		o.All = true
-	default:
-		return o, fmt.Errorf("all must be 1 or 0, got %q", v)
-	}
 	// An empty value reads as absent: ?before=&limit=20 is what a client that always serialises both
 	// fields sends, and "no id" from an empty field is the same request as no field. A *bad* id is
 	// refused in ir.PageOf, which is also where an anchor with no size is refused.
@@ -260,6 +334,17 @@ func pageQuery(r *http.Request) (ir.PageOptions, error) {
 	o.Before = q.Get("before")
 	o.After = q.Get("after")
 	o.Anchor = q.Get("anchor")
+	// The endpoint's size rule, applied here rather than inside ir: PageOf's zero value stays "no
+	// limit", because that is the right answer for a library, but no shape a URL can take gets an
+	// unbounded answer here. Silence gets the default page, and so does a bare before or after —
+	// "everything older than here" is an unbounded slice wearing a cursor. No name on this
+	// endpoint asks for a whole path at all (the one that did is retired, and it reads as any
+	// unknown parameter now), so the largest transcript answer is one page whatever the request
+	// says. (An anchor with no size stays ir's 400: naming a place asks for a page around it, and
+	// inventing a size the caller never sized would be answering a question nobody asked.)
+	if o.Limit == 0 && o.Anchor == "" {
+		o.Limit = ir.DefaultPageEntries
+	}
 	return o, nil
 }
 
@@ -698,7 +783,7 @@ func (s *Server) handleTurns(w http.ResponseWriter, r *http.Request) {
 // drawing the start of a path it has only seen the end of.
 func turnLimit(r *http.Request) (int, error) {
 	q := r.URL.Query()
-	for _, name := range []string{"before", "after", "anchor", "all"} {
+	for _, name := range []string{"before", "after", "anchor"} {
 		// An empty value reads as absent, which is what this server already does with those fields: a
 		// client that always serialises them all is not asking for anything.
 		if v := q.Get(name); v != "" {

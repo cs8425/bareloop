@@ -67,26 +67,26 @@ const HYST_PX = 2 * REVEAL_PX;
 //
 //  - `tip`, the default: the window ends at the newest message, so reading backwards *grows* it at the
 //    older end — nothing already on screen is dropped, and the parent walk in `pathOf` always starts
-//    from an entry that is present. Once the tab is holding more than a page may carry there is no page
-//    left to ask for, and asking for one would mean agreeing to forget the older entries already on
-//    screen: the whole path is asked for by name instead, which is never more than the unpaged read this
-//    endpoint made on every refresh before it could page. The cost panel is the other reader of this
-//    endpoint and it wants the whole path — it prices every request on the path — so `stats.js` keeps
-//    calling `get('')` unparameterised, and the default of a request with no query string staying "no
-//    page" is what makes that keep working.
+//    from an entry that is present. The window grows to CEIL and slides from there: it never wants
+//    the whole path at once, and the endpoint stopped having one to offer — every transcript read
+//    is a page, whatever the URL claims. The cost panel is the other reader of this endpoint: it
+//    prices every request on the path from the shape of a bill (`?usage=1` — every row's usage,
+//    no content).
 //  - parked: the window is a page *away from* the newest message, because the reader jumped to a turn or slid
 //    the window off the end. `anchor` asks for the page centred on the turn holding `pivot`, `before` for the
 //    page that ends just before it, `after` for the one that starts just after it. `after` is what a forward
 //    slide asks for and the reason a forward slide no longer re-fetches the page it is leaving; it is
-//    `before`'s mirror and just as exclusive. None of the three is ever combined with `all=1`: the endpoint
-//    takes `all` to mean "no page at all" and answers `all` plus anything else with a 400.
+//    `before`'s mirror and just as exclusive.
 function pageQuery() {
   const w = state.win;
   if (!w) return `?limit=${PAGE}`;
   if (w.mode === 'anchor') return `?anchor=${w.pivot}&limit=${w.size}`;
   if (w.mode === 'before') return `?before=${w.pivot}&limit=${w.size}`;
   if (w.mode === 'after') return `?after=${w.pivot}&limit=${w.size}`;
-  return w.max && w.size > w.max ? '?all=1' : `?limit=${w.size}`;
+  // Tip mode: the window is capped at CEIL, and CEIL sits under the server's page ceiling, so a
+  // named page always fits what the tab is holding — there is no "grew past the ceiling, ask for
+  // everything" escape any more, because the ceiling of the window made one moot.
+  return `?limit=${w.size}`;
 }
 
 // One page on its way at a time: a second press, or a second crossing of the same edge, must not move the
@@ -462,7 +462,6 @@ export async function refresh() {
     hasNewer: !!w.hasNewer,
     total: w.total || 0,
     bytes: w.bytes || 0,
-    max: w.maxLimit || 0,
   };
   // Where the viewport goes is a separate question from what the rebuild contains. A parked page has no
   // bottom worth holding on to — the window slid, so both of its ends moved — so it is placed by what the

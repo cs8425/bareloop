@@ -10,9 +10,20 @@ import (
 // The transcript is the expensive surface, and its cost grows with what is on it: forcing a full
 // reflow of one measured 0.14 ms with 221 characters of content and 52.88 ms once it had reached
 // 214 000 pixels of height. A page the size of a whole session is exactly what paging is meant to
-// avoid. This is a ceiling and not a default: asking for no limit still returns the whole path, and
-// the cost panel reads the entire path out of the same endpoint.
+// avoid. This is a ceiling and not a default: PageOf's own zero value answers "no limit" — the
+// library's answer — while the transcript endpoint caps every URL at this ceiling or below.
 const MaxPageEntries = 200
+
+// DefaultPageEntries is what the transcript endpoint answers a request that names no size at
+// all: a page, never the path. "No query string" was never anybody's promise to pay for the
+// whole session — one session's unparameterised read measured 73 MB, images inline — and a
+// server should not be able to be talked into an unbounded transfer by saying nothing, nor by
+// naming a place without a size (a bare before/after gets this page too). No name the endpoint
+// reads asks for the whole path any more — the one that did is gone with its option, before the
+// project had anyone to disappoint; the only whole-path answer left is the cost panel's shape
+// (`?usage=1`), whose rows are bytes of arithmetic rather than bytes of conversation.
+// The number is the web UI's page size; when the two move, one of them is lying about its page.
+const DefaultPageEntries = 40
 
 // IsTurnStart reports whether a boundary may fall immediately before e. This is the one rule the
 // page cutter and the compaction cutter share — compact decides "did this cut split a turn" with
@@ -53,8 +64,6 @@ type PageOptions struct {
 	// holding, so nothing it already has is ever handed back to it a second time. Like Before it cuts
 	// with no Limit, because "everything newer than here" is a question with an answer.
 	After string
-	// All asks for the whole path by name: inspection and debugging.
-	All bool
 }
 
 // Page is a run of whole turns cut out of a path.
@@ -99,9 +108,6 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 		// directions at once. Refused rather than given a precedence.
 		return nil, errors.New("ir: after cannot be combined with before or anchor")
 	}
-	if o.All && (o.Limit > 0 || o.Before != "" || o.After != "" || o.Anchor != "") {
-		return nil, errors.New("ir: all cannot be combined with limit, before, after or anchor")
-	}
 	// why refused rather than answered with no ceiling: an anchored page with no size grows until it
 	// has swallowed the path, so the answer to "centre a page of nothing in particular here" is the
 	// whole transcript — the one thing paging exists to keep out of a response.
@@ -130,7 +136,7 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	}
 	n := len(path)
 	p := &Page{Total: n, Entries: path}
-	if n == 0 || o.All {
+	if n == 0 {
 		return p, nil
 	}
 	// A page is still cut when no size was asked for. "Everything before this entry" is a request, and

@@ -19,8 +19,10 @@ import { wireMcpEditor } from './mcp-form.js';
 const fld = (form, name) => form.elements.namedItem(name);
 
 // currentConfig fetches the config the server is willing to show (an API key is never sent back).
+// The ?config=1 is the whole point: without it this endpoint answers with the entire path — every
+// entry, every image re-inflated — and the dialog reads one field out of it.
 export async function currentConfig() {
-  const data = await get('');
+  const data = await get('?config=1');
   return data.config || {};
 }
 
