@@ -1,0 +1,8 @@
+{"type":"session","harness":"llama.app","id":"conv8tree","name":"Tree","currNode":"u2","lastModified":1762500999000}
+{"message":{"type":"root","id":"r0","role":"system","content":"You are helpful.","children":["u1","u1b"],"timestamp":1762500900000},"type":"message"}
+{"type":"message","message":{"id":"u1","parent":"r0","type":"text","role":"user","content":"first question","children":["a1a","a1b","a1c"],"timestamp":1762500901000}}
+{"type":"message","message":{"id":"a1a","parent":"u1","type":"text","role":"assistant","content":"answer the first","children":[],"timestamp":1762500902000}}
+{"type":"message","message":{"id":"a1b","parent":"u1","type":"text","role":"assistant","content":"regenerated once","children":[],"timestamp":1762500903000}}
+{"type":"message","message":{"content":"regenerated twice","id":"a1c","parent":"u1","type":"text","role":"assistant","children":["u2"],"timestamp":1762500904000}}
+{"type":"message","message":{"id":"u1b","parent":"r0","role":"user","content":"an edited fork of the first question","children":[],"timestamp":1762500905000}}
+{"message":{"role":"user","content":"and now what","id":"u2","parent":"a1c","type":"text","children":[],"timestamp":1762500906000},"type":"message"}

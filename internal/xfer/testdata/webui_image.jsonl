@@ -1,0 +1,4 @@
+{"harness":"llama.app","type":"session","id":"conv0image","name":"Image","currNode":"a1"}
+{"type":"message","message":{"id":"r0","type":"root","role":"system","content":"You see images.","children":["i0"],"timestamp":1762502900000}}
+{"type":"message","message":{"id":"i0","parent":"r0","type":"text","role":"user","content":"what color is this","children":["a1"],"timestamp":1762502901000,"extra":[{"base64Url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==","name":"px.png","size":70,"type":"IMAGE"},{"name":"note.txt","text":"an inline note that v1 leaves out","type":"TEXT"}]}}
+{"type":"message","message":{"id":"a1","parent":"i0","type":"text","role":"assistant","content":"One dark pixel.","children":[],"timestamp":1762502902000}}

@@ -1,0 +1,9 @@
+{"harness":"llama.app","id":"conv9tools","type":"session","name":"Tools","currNode":"a3","lastModified":1762502000000}
+{"type":"message","message":{"id":"r0","type":"root","role":"system","content":"You are a tool user.","children":["u1"],"timestamp":1762501900000}}
+{"type":"message","message":{"id":"u1","parent":"r0","type":"text","role":"user","content":"what time is it","children":["a1"],"timestamp":1762501901000}}
+{"type":"message","message":{"id":"a1","parent":"u1","type":"text","role":"assistant","content":"","children":["t1"],"timestamp":1762501902000,"toolCalls":"[{\"function\":{\"arguments\":\"{}\",\"name\":\"get_datetime\"},\"id\":\"callZ\",\"type\":\"function\"}]"}}
+{"type":"message","message":{"id":"t1","parent":"a1","type":"text","role":"tool","toolCallId":"callZ","content":"2037-01-01T00:00:00Z","children":["a2"],"timestamp":1762501903000}}
+{"type":"message","message":{"id":"a2","parent":"t1","type":"text","role":"assistant","content":"","children":["t2"],"timestamp":1762501904000,"toolCalls":[{"function":{"arguments":"{}","name":"run_javascript"},"id":"callY","type":"function"}]}}
+{"type":"message","message":{"id":"t2","parent":"a2","type":"text","role":"tool","toolCallId":"callY","content":"Tool execution was denied by the user.","children":["a3"],"timestamp":1762501905000}}
+{"type":"message","message":{"id":"a3","parent":"t2","type":"text","role":"assistant","content":"The user declined the computation.","children":["t3"],"timestamp":1762501906000,"toolCalls":[{"function":{"arguments":"{}","name":"wait"},"id":"callW","type":"function"},{"function":{"arguments":"{}","name":"get_datetime"},"type":"function"}]}}
+{"type":"message","message":{"id":"t3","parent":"a3","type":"text","role":"tool","toolCallId":"callW","content":"I will be quiet for a while.","children":[],"timestamp":1762501907000}}

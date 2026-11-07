@@ -551,6 +551,67 @@ func (l *Log) AppendEntry(e *ir.Entry, setTip bool) error {
 	return nil
 }
 
+// ImportAll writes a prepared transcript as one transaction: an import is all entries or
+// none, because half an imported tree is a path nobody can walk and a question nobody can
+// answer. Ids are kept exactly as the file carries them — an import restores a history;
+// only a fork reissues ids — and seq moves past every numeric id in the payload so NextID
+// keeps handing out fresh ones. The tip moves in the same transaction: a session never
+// exists with rows and no story to stand on. A failed import leaves the store exactly as
+// it was found; the caller's rollback (delete the fresh directory) does the rest.
+func (l *Log) ImportAll(entries []*ir.Entry, tip string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(entries) == 0 {
+		return errors.New("store: nothing to import")
+	}
+	tx, err := l.db.Begin() // BEGIN IMMEDIATE, as everywhere
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // harmlessly wrong after Commit
+	for _, e := range entries {
+		if e.ID == "" {
+			return errors.New("store: imported entries must carry their id")
+		}
+		if n, err := strconv.ParseInt(e.ID, 10, 64); err == nil && n > l.seq {
+			l.seq = n // ids sort lexicographically; seq must not walk over them backwards
+		}
+		if e.Ts.IsZero() {
+			e.Ts = time.Now().UTC()
+		}
+		payload, refs, err := l.encodeEntry(e)
+		if err != nil {
+			return err
+		}
+		kind := e.Kind
+		if kind == "" {
+			kind = "unknown"
+		}
+		for _, r := range refs {
+			if err := blobUpsert(tx, r); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`INSERT INTO entry(id, parent, kind, seq, ts, payload) VALUES(?, ?, ?, ?, ?, ?)`,
+			e.ID, nullString(e.ParentID), kind, l.seq, float64(e.Ts.Unix()), maybeCompress(payload)); err != nil {
+			return err
+		}
+	}
+	if tip != "" {
+		if err := upsertMeta(tx, metaTip, tip); err != nil {
+			return err
+		}
+	}
+	if err := upsertMeta(tx, metaSeqNext, strconv.FormatInt(l.seq, 10)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	l.agg = nil
+	return nil
+}
+
 // SetTip moves the path tip. An empty id says "no tip", and Replay then stands the
 // session on its newest entry — the same promise the log's tipString made.
 func (l *Log) SetTip(id string) error {

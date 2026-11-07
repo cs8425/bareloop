@@ -43,11 +43,13 @@ Anything else arriving on the socket is answered with an error that says where t
 | GET | `/api/health` | liveness: `{ok, time}` |
 | GET | `/api/sessions` | every session as a list row (below); answered from the index, opens nothing |
 | POST | `/api/sessions` | create a session; body is a config, `id` required |
+| POST | `/api/sessions/import` | create a session from a transcript file — bareloop's own export or a llama-ui one |
 | GET | `/api/session/{id}` | the transcript endpoint: config, status, a page of the path — or `?config=1` / `?usage=1` |
 | PATCH | `/api/session/{id}` | update the config (refused while a run is active) |
 | DELETE | `/api/session/{id}` | close and delete the session and its directory |
 | POST | `/api/session/{id}/unload` | close the session, touch nothing on disk |
 | POST | `/api/session/{id}/fork` | copy the session — one path or the whole tree — into a new session |
+| GET | `/api/session/{id}/export` | the transcript as one downloadable file, compressed or not |
 | POST | `/api/session/{id}/flags` | pin / archive a session without opening it |
 | GET | `/api/session/{id}/inspect` | what the next request would cost, per row |
 | GET | `/api/session/{id}/payload` | the exact body of the next request |
@@ -196,6 +198,40 @@ The exact body of the next request: `{system, messages, tools}`. Where `/inspect
 prompt, this shows it; nothing about the prompt is hidden behind a byte count. This is the
 debugging endpoint — it is what "what did the model actually see" reads.
 
+### `GET /api/session/{id}/export`
+
+One transcript file in the response body: JSONL, `application/x-ndjson`, sent as an
+attachment whose name follows the llama-ui habit
+(`2026-11-07_15-04_conv_34j9lyjwm6_shopping_list.jsonl`). Line 1 is a header —
+`{harness: "bareloop", format: "bareloop/1", tip, scope, session: {id, name, config}}`,
+the config stripped of the apiKey and custom headers for the same reason the transcript
+never echoes them — and every later line is one entry in exactly the shape the transcript
+endpoint answers it: the export adds no format of its own, so a file can be `jq`-ed with
+whatever one already knows about entries. Ids are kept, not reissued: the file is the
+session's log, and re-importing what one exported answers the same tree, byte for byte.
+
+- `?path=` exports only the path to an entry — `tip` (or any entry id) instead of the
+  whole tree; the header records `scope` either way, and a path export's tip is the cut.
+- `?codec=zstd|gzip|none` picks the encoding, zstd by default. The compressed bytes ride
+  as the response body with **no `Content-Encoding`** — the file named `.zst` is the file
+  the browser stores, whatever proxy sits in between. There is no size ceiling: this is
+  the controlled dump, not the list API.
+
+### `POST /api/sessions/import`
+
+The inverse: the request body is the file, compressed or not — the first bytes and the
+first line decide the dialect (bareloop's own, or llama-ui's `harness: "llama.app"`), not
+a query parameter or a file name. `?id=` is required and the caller's, same rule as
+create and fork; `?name=` overrides the name the file remembers. A native file seeds the
+config (secrets stay stripped); a webui file's system root becomes the session's system
+prompt, its message tree lands entry for entry, its `currNode` becomes the tip. Two doors
+stand on size: the request body caps at 50 MB before a byte is parsed, and the decompressed
+stream caps at 512 MB as it unfolds — a bomb never exists in full anywhere. The whole file
+lands in one store transaction: anything rejected (a duplicate id, a parent the file never
+carries, an unknown dialect) answers `400` and creates no session, `409` for a taken id,
+`413` over either cap. Imports always create new sessions; merging into an existing
+history is not a thing this does.
+
 ### `GET /api/session/{id}/tools` and `POST /api/session/{id}/tools`
 
 The drawer view (`ToolsView`): every server with `name`, `transport`, `connected`, `disabled`,
@@ -248,6 +284,7 @@ message). A message that arrives while the path is not free is **held in memory*
 | `POST .../reload` | — | `{ok, status}` | re-read the log from disk (another writer edited the session) |
 | `POST .../unload` | — | `{ok, unloaded, session}` | gives back the RAM without touching the directory. A run or summary in flight is refused with a 400 naming the phase — `/stop` first. `unloaded: false` is the honest answer for a session this process was not holding: it is shut, which is what was asked for. What only memory had goes — a held message, the in-memory half of a parked wait — the same bill a restart pays |
 | `POST .../fork` | `{id, at?, full?, name?}` | `{id, entries}` | copy the session into a new one whose id the caller picks (required; the daemon invents no directory names, as in create). Default copies the path from the root to `at` — the tip when `at` is empty, any entry on the tree otherwise — as a straight line, leaving abandoned siblings and rewound branches behind; `full:true` copies every branch and the tip, a snapshot at this moment that later turns in the source do not follow. Either way every entry id is reissued and the parent edges, compaction boundaries included, follow the map — the two histories never quote each other's ids. Config copies with the transcript (`name` defaults to "«source» (fork)"); the response never carries an apiKey. `409` for a taken id, `400` for an `at` that is not in the session |
+| `POST /api/sessions/import` | the transcript file itself | `{id, format, entries, status}` | create a session from a file — see the import section under Reads; one transaction or nothing |
 | `POST .../flags` | `{pinned, archived}`, either pointer | `{ok, session}` | pin/archive **without opening** the session (pinning is four bytes of config.json, opening is reading a transcript). Both-true is a change of mind, and the flag just asked for wins. The answer carries the row this produced, `closed: true` included |
 | `PATCH /api/session/{id}` | a config (partial) | `{ok, status}` | a field the body does not carry is kept, not cleared; refused while a run is active. The name is a config field, so this is also how a session is renamed |
 | `DELETE /api/session/{id}` | — | `{ok}` | close and delete the directory |

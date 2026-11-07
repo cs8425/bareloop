@@ -8,6 +8,7 @@ package ir
 
 import (
 	"encoding/json"
+	"sort"
 	"time"
 )
 
@@ -186,6 +187,47 @@ func Path(entries map[string]*Entry, id string) []*Entry {
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// TreeOrder lists every entry parent-before-child. Children walk in id order, and ids are
+// handed out by the store's seq counter, so id order is the store's append order: walking a
+// tree in this order replays it in the timeline it was lived. An entry whose parent is
+// missing walks as a root — that should not happen, and if it ever does, keeping the odd
+// entry beats silently dropping it. A cycle visits each entry once.
+func TreeOrder(entries map[string]*Entry) []*Entry {
+	kids := make(map[string][]*Entry, len(entries))
+	var roots []*Entry
+	for _, e := range entries {
+		if p := e.ParentID; p == "" || entries[p] == nil {
+			roots = append(roots, e)
+		} else {
+			kids[p] = append(kids[p], e)
+		}
+	}
+	byID := func(v []*Entry) func(i, j int) bool {
+		return func(i, j int) bool { return v[i].ID < v[j].ID }
+	}
+	sort.Slice(roots, byID(roots))
+	for _, v := range kids {
+		sort.Slice(v, byID(v))
+	}
+	out := make([]*Entry, 0, len(entries))
+	visited := make(map[string]bool, len(entries))
+	var walk func(*Entry)
+	walk = func(e *Entry) {
+		if visited[e.ID] {
+			return // a cycle would have no end; the first visitor wins
+		}
+		visited[e.ID] = true
+		out = append(out, e)
+		for _, k := range kids[e.ID] {
+			walk(k)
+		}
+	}
+	for _, r := range roots {
+		walk(r)
 	}
 	return out
 }

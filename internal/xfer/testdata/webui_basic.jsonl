@@ -1,0 +1,5 @@
+{"harness":"llama.app","id":"conv7z9aa11","type":"session","name":"Basic","currNode":"m3","lastModified":1762499999000,"reasoningEffort":"default"}
+{"type":"message","message":{"id":"m0","type":"root","role":"system","content":"You are a careful assistant.","children":["m1"],"timestamp":1762499900000}}
+{"message":{"content":"Remember: milk","role":"user","type":"text","timestamp":1762499910000,"id":"m1","parent":"m0","children":["m2"],"extra":[]},"type":"message"}
+{"message":{"content":"Noted: milk.","model":"gemma-test","role":"assistant","id":"m2","parent":"m1","children":["m3"],"type":"text","timestamp":1762499920000},"type":"message"}
+{"type":"message","message":{"type":"text","role":"user","content":"and eggs","parent":"m2","children":[],"timestamp":1762499930000,"id":"m3"}}

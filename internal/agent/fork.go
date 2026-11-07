@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 
 	"bareloop/internal/ir"
 	"bareloop/internal/store"
@@ -154,7 +153,7 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 // full mode hands over the whole tree.
 func forkSet(st *store.State, o ForkOptions) ([]*ir.Entry, string, error) {
 	if o.Full {
-		return treeOrder(st.Entries), st.Tip, nil
+		return ir.TreeOrder(st.Entries), st.Tip, nil
 	}
 	at := o.At
 	if at == "" {
@@ -182,45 +181,4 @@ func forkSet(st *store.State, o ForkOptions) ([]*ir.Entry, string, error) {
 		set = append(set, rev[i])
 	}
 	return set, at, nil
-}
-
-// treeOrder lists every entry parent-before-child. Children walk in id order, and ids are
-// handed out by the store's seq counter, so id order is the source's append order: the copy
-// numbers its entries in the same timeline the source lived them. An entry whose parent is
-// missing walks as a root — that should not happen, and if it ever does, a copy that kept
-// the odd entry beats one that silently dropped it.
-func treeOrder(entries map[string]*ir.Entry) []*ir.Entry {
-	kids := make(map[string][]*ir.Entry, len(entries))
-	var roots []*ir.Entry
-	for _, e := range entries {
-		if p := e.ParentID; p == "" || entries[p] == nil {
-			roots = append(roots, e)
-		} else {
-			kids[p] = append(kids[p], e)
-		}
-	}
-	byID := func(v []*ir.Entry) func(i, j int) bool {
-		return func(i, j int) bool { return v[i].ID < v[j].ID }
-	}
-	sort.Slice(roots, byID(roots))
-	for _, v := range kids {
-		sort.Slice(v, byID(v))
-	}
-	out := make([]*ir.Entry, 0, len(entries))
-	visited := make(map[string]bool, len(entries))
-	var walk func(*ir.Entry)
-	walk = func(e *ir.Entry) {
-		if visited[e.ID] {
-			return // a cycle would have no end; the first visitor wins
-		}
-		visited[e.ID] = true
-		out = append(out, e)
-		for _, k := range kids[e.ID] {
-			walk(k)
-		}
-	}
-	for _, r := range roots {
-		walk(r)
-	}
-	return out
 }
