@@ -301,7 +301,11 @@ func payloadShas(payload string) []string {
 // by the codec the operator picked — and every codec's output carries its own magic, so
 // a reader never asks a flag what a row is: a few bytes say. The knob below is an answer
 // about new writes only; every store reads every store.
-var Compressor = "gzip" // "gzip" | "zstd" | "none" — each CLI's -compress flag wires it
+//
+// zstd is the default because the trained dictionary made it the smaller and the faster
+// answer on every corpus measured (S8.7/S8.8): ~9% under gzip on disk, ~2× the scan
+// speed, with the book itself costing 32KB (docs/zstd-dictionary.md).
+var Compressor = "zstd" // "gzip" | "zstd" | "none" — each CLI's -compress flag wires it
 
 // gzipFloor is the TOAST threshold shrunk to this store's page: under half a kilobyte
 // of JSON, a compressed stream's header alone has eaten the difference. It guards both

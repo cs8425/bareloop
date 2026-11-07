@@ -71,7 +71,7 @@ func main() {
 		fsync     = flag.Bool("fsync", false, "fsync every log append")
 		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
-		comp      = flag.String("compress", "gzip", `compression of new payloads: gzip | zstd | none (old stores read whichever codec wrote them)`)
+		comp      = flag.String("compress", "zstd", `compression of new payloads: zstd | gzip | none (zstd writes stamp the dictionary embedded in the binary, or -zdict; old stores read whichever codec wrote them)`)
 		zdictPath = flag.String("zdict", "", "zstd dictionary file: new zstd payloads are stamped with it — the file is data, not a toggle: frames it writes need it to read back forever")
 	)
 	flag.Parse()

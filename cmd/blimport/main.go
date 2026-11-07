@@ -69,13 +69,13 @@ var idShape = regexp.MustCompile(`^[0-9]{7}$`)
 func main() {
 	force := flag.Bool("force", false, "replace an existing destination store")
 	verify := flag.Bool("verify", false, "re-open imported stores and print aggregates + payload digest")
-	comp := flag.String("compress", "gzip", `compress new payloads: gzip | zstd | none (the -verify digest weighs the text either way)`)
+	comp := flag.String("compress", "zstd", `compress new payloads: zstd | gzip | none (the -verify digest weighs the text either way)`)
 	zdictPath := flag.String("zdict", "", "zstd dictionary file: new zstd writes are stamped with it (keep the file: its frames need it to read back)")
 	gendict := flag.Bool("gendict", false, "train a zstd dictionary from the store payloads under <src-data-dir>, write -dictout, and exit")
 	dictout := flag.String("dictout", "zdict.bin", "output file for -gendict")
 	maxdict := flag.Int("maxdict", 32768, "dictionary budget for -gendict, bytes")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: blimport [-force] [-verify] [-compress gzip|zstd|none] [-zdict file] <src-data-dir> <dst-data-dir> [session ...]")
+		fmt.Fprintln(os.Stderr, "usage: blimport [-force] [-verify] [-compress zstd|gzip|none] [-zdict file] <src-data-dir> <dst-data-dir> [session ...]")
 		fmt.Fprintln(os.Stderr, "       blimport -gendict [-dictout zdict.bin] [-maxdict 32768] <store-data-dir>")
 		flag.PrintDefaults()
 	}
