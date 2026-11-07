@@ -34,7 +34,7 @@ import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
-import { wireStats } from './stats.js';
+import './stats.js'; // registers the cost tab's renderer (js/panel.js); it owns no wiring of its own
 import { wireZoom } from './lightbox.js';
 import { flushStreams } from './transcript.js';
 import { loadSessions, loadSoon, returnToTip, selectSession, refresh, idFromHash, writeHash, wirePaging, wireSessions, renderStatus, jumpTo } from './session.js';
@@ -44,8 +44,8 @@ import { bootIcons } from './icons.js';
 
 // compactNow asks for an extra instruction first: "summarise this" and "summarise this, keep every
 // file name" produce very different summaries, and a compaction is only cheap to redo before it is
-// committed.
-async function compactNow() {
+// committed. Exported because the button that runs it now lives in the panel's context tab (panel.js).
+export async function compactNow() {
   if (!state.id) {
     note('open a session first');
     return;
@@ -235,7 +235,6 @@ function wire() {
   wireSettings();
   wirePanel();
   wireTools();
-  wireStats();
   // One delegated listener for every picture the transcript will ever draw, so an entry rendered next month is
   // zoomable without anything having remembered to wire it (js/lightbox.js).
   wireZoom();
@@ -248,7 +247,6 @@ function wire() {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) flushStreams();
   });
-  $('#btn-compact').onclick = compactNow;
   on(EV_REFRESH, () => refresh().catch(() => {}));
   on(EV_SESSIONS, () => loadSoon());
   // A `→ id` link on a tool card can name an entry the sliding window is not showing. The transcript asks for

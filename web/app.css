@@ -39,13 +39,11 @@ body {
   font: var(--t-3)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans CJK TC", sans-serif;
   overflow: hidden; /* only #log scrolls: the composer and its stop/interrupt buttons stay on screen */
 }
-/* The sidebar's column, in one number. A custom property and not three grid templates, because three rules
-   name that column (`#app`, `#app.with-panel`, and the wider panel of the tools and cost tables): a collapse
-   that had to redefine every one of them is one forgotten rule away from a window that shows a transcript
-   with no way to reach the sessions. `0px` rather than `0` where it is collapsed, which a track list reads
-   as a flexible track. */
+/* The sidebar's column, in one number. A custom property and not three grid templates, because a collapse
+   that had to redefine every rule naming that column is one forgotten rule away from a window that shows a
+   transcript with no way to reach the sessions. `0px` rather than `0` where it is collapsed, which a track
+   list reads as a flexible track. The panel is not this grid's business any more — it floats (see #panel). */
 #app { --side-w: 210px; display: grid; grid-template-columns: var(--side-w) 1fr; height: 100vh; overflow: hidden; }
-#app.with-panel { grid-template-columns: var(--side-w) 1fr 380px; }
 
 /* sidebar */
 /* Why min-height is on this line: a grid item's minimum height is the minimum height of its content, and
@@ -87,14 +85,15 @@ body {
 #session-list .ago,
 #session-list .sub { line-height: 1.2; }
 #session-list .pinmark { flex: 0 0 auto; width: 11px; height: 11px; color: var(--accent); }
-/* The phase dot, sized down from the 9px `.dot` this app already has: the name it sits beside is 12px, and
-   the one difference this dot carries is running / compacting / idle / shut. Closed is the same grey as idle
-   and gets its dimming from the Archived group instead - a dot that fades twice reads as a rendering
-   artefact. */
+/* The phase dot, sized down from the 9px `.dot` this app already has: the name it sits beside is 12px.
+   Shape carries the fact colour could not: filled means the daemon holds the session, hollow means it has
+   put it down - idle and shut were two greys nobody told apart (measured: #556072 against #3f4756), and
+   "is it loaded" is a yes/no question, which is a shape question. Colour still says the phase: blue
+   running, amber compacting, grey idle. A shadow and not a border, so the 7px box stays 7px. */
 #session-list .dot { width: 7px; height: 7px; border-radius: 50%; background: #556072; }
 #session-list .dot.running { background: var(--accent); }
 #session-list .dot.compacting { background: var(--warn); }
-#session-list .dot.off, #session-list .dot.closed { background: #3f4756; }
+#session-list .dot.off, #session-list .dot.closed { background: transparent; box-shadow: inset 0 0 0 1.5px #8290a5; }
 #session-list li.dim { opacity: .55; }
 #session-list li.dim:hover, #session-list li.dim.active { opacity: 1; }
 /* A group's label. It is a button where opening it would show something and a label everywhere else, and
@@ -194,7 +193,6 @@ label.icon-btn { display: inline-grid; place-items: center; width: 30px; height:
    exactly this reason; this is the rest of the row. */
 #topbar > .icon-btn { flex: 0 0 auto; }
 button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
-#btn-compact { display: inline-flex; align-items: center; gap: 6px; }
 #jump { display: inline-flex; align-items: center; gap: 6px; }
 /* An id outranks the `.hidden` utility — the comment on the composer buttons below documents that trap, and
    this button was standing in it: it computed display:flex while carrying class="hidden", so "latest"
@@ -203,12 +201,11 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #jump.hidden { display: none; }
 
 /* The composer's primary slot: send when idle, the red square while it answers, always the same pixels.
-   A thumb that reached for "stop" mid-run must not find the thing that sends another message. */
-.composer-buttons { display: grid; gap: 5px; justify-items: end; align-content: end; }
-.composer-buttons .file-btn { grid-row: 1; }
-#btn-interrupt { grid-row: 2; }
+   A thumb that reached for "stop" mid-run must not find the thing that sends another message. The attach
+   button sits on the opposite side of the box (index.html), so the right column only ever holds things
+   that end the draft - never a fourth round thing to mis-read among them. */
 #btn-send,
-#btn-stop { grid-row: 3; width: 40px; height: 40px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
+#btn-stop { width: 40px; height: 40px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
 #btn-send .ico,
 #btn-stop .ico { width: 17px; height: 17px; }
 #btn-send { background: var(--bg3); border-color: var(--border); color: var(--muted); }
@@ -244,7 +241,19 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
   .msg .act { opacity: 1; width: 34px; height: 32px; }
 }
 
-#statusbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: var(--t-1); flex: 0 0 auto; }
+/* The status strip is gone (r91): its phase went to the top bar in r89, its gauge became the ring, and
+   the last three tenants — busy, asleep, turn — moved up beside the phase they qualify, because
+   "running", "writing the summary", "asleep until 20:41" and "turn 12" are one sentence about one
+   session and they read as one sentence only in one row. All of them hide themselves when they have
+   nothing to say; nothing is left to fold away. */
+/* The phase badge and its companions sit beside the name they describe; they keep the strip's old rung
+   and buy the top bar's refusal to be squeezed (#topbar > .icon-btn has the same argument). */
+#topbar .badge { flex: 0 0 auto; font-size: var(--t-1); }
+#topbar #turn { flex: 0 0 auto; color: var(--muted); font: var(--t-0) var(--mono); }
+/* Of the badges, only the busy sentence has unbounded length — a stage line is the daemon's words, not
+   ours — so it is the one that may ellipsis. The title already carries the full text, and the phase and
+   asleep badges are short by construction. */
+#topbar .badge.busy { max-width: min(40vw, 34ch); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; color: var(--muted); }
 .badge.running { color: #cfe3ff; border-color: #35639f; }
 .badge.compacting { color: #f0d6a0; border-color: #6d5626; }
@@ -252,32 +261,77 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
    `running` on purpose (the composer's Enter key reads that word), and a reader looking at that word needs
    the second fact beside it rather than a third phase for the same moment. */
 .badge.asleep { color: #cbb8f0; border-color: #4a3f6d; }
-/* The bar is a text container with a number drawn in it, so its height is written in the text's own
-   units: `height: 16px` with `font-size: 11px` inside is a box that cannot grow with the number, and the
-   number is the reason the bar exists. 1.35em of the status bar's 12px is the 16px it always was. */
-.ctxbar { position: relative; flex: 1; max-width: 340px; height: 1.35em; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-#ctx-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2f6f4f, #a8853c 70%, #a34238 92%); transition: width .25s; }
-/* Centred rather than pushed down by a fixed line-height, for the same reason the bar has an em height:
-   `line-height: 15px` is only centring while the text is 11px in a 16px box. line-height is then pinned to
-   1 because the inherited 1.5 would make the *line box* (16.5px) taller than the bar that shows it - which
-   is invisible today and a clipped number at a large text size. #ctx-fill shares this rule and has no text.
-   nowrap is not cosmetic: this bar is a one-line gauge, and on a 375px screen its text is 220px in a 179px
-   window ("5.3k / 41k (13%, trigger 70%) · summary"). It used to wrap and have the second line amputated by
-   overflow:hidden; with the centring above, wrapping would have sliced *both* lines. Ellipsis says "there is
-   more" in the browser's own hand instead of cutting a word in half and calling it a day. */
-.ctxbar span {
-  position: absolute;
-  inset: 0;
-  display: grid;
+/* ------------------------------------------------------------------ the context ring
+   The top bar's gauge, drawn the way llama.cpp's UI draws its own: a track circle and one arc whose
+   dashoffset says the share of the window in use — 69.115 is 2πr for r=11 on the 32 viewBox, and
+   js/session.js writes the offset. The colours follow this session's arithmetic, not a constant: grey
+   until the compaction trigger, amber from it, red near full; js/session.js sets those classes.
+   The hover pop repeats the horizontal gauge the status strip used to carry — bar first, figures after:
+   the ring answers "how full" at a glance, the bar answers "how much of each", and the pop is where a
+   glance is not enough. It is not a <button>: it sits inside no form and submits nothing, and the role,
+   the tabindex and the keys arrive with it in index.html. */
+#ctx-ring {
+  position: relative;
+  display: inline-grid;
   place-items: center;
-  text-align: center;
-  font-size: var(--t-0);
-  line-height: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--fg);
+  width: 30px;
+  height: 28px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
 }
+#ctx-ring:hover { background: var(--bg3); }
+#ctx-ring svg { width: 19px; height: 19px; display: block; }
+#ctx-ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
+#ctx-ring .arc {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 69.115;
+  stroke-dashoffset: 69.115; /* empty until a status says otherwise; js/session.js owns the number */
+}
+#ctx-ring.ring-warm .arc { stroke: var(--warn); }
+#ctx-ring.ring-hot .arc { stroke: var(--err); }
+#ctx-ring.ring-off .arc { stroke: transparent; } /* no measurement is not zero */
+#ctx-ring:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: no-preference) {
+  #ctx-ring .arc { transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease; }
+}
+#ctx-ring .ring-pop {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  width: 250px;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  font-size: var(--t-1);
+  color: var(--fg);
+  text-align: left;
+  cursor: default;
+}
+#ctx-ring:hover .ring-pop,
+#ctx-ring:focus-visible .ring-pop { display: flex; }
+#ctx-ring .ring-pop .line { display: flex; justify-content: space-between; gap: 10px; }
+#ctx-ring .ring-pop #ring-nums { font-family: var(--mono); color: var(--muted); }
+#ctx-ring .bar { display: block; height: 6px; border-radius: 3px; background: var(--bg); overflow: hidden; }
+#ctx-ring #ring-bar {
+  display: block;
+  height: 100%;
+  width: 0%;
+  /* The retired strip's gradient lives on here: the colour of the fill's end already says which third
+     of the window you are standing in, which is more than a plain percentage conveys. */
+  background: linear-gradient(90deg, #2f6f4f, #a8853c 70%, #a34238 92%);
+}
+#ctx-ring .ring-pop .dim { font-size: var(--t-0); }
 
 /* The transcript is the only thing that grows: #log-wrap takes the remaining height and #log
    scrolls inside it. Without min-height: 0 a flex item refuses to shrink below its content, the
@@ -471,12 +525,10 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 /* Touch floors for the things in this file that are controls but are not <button>. Everything a finger is
    meant to hit already measures 32px or more (buttons 40, .act 34×32, the filter field 34), and what was
    left were four disclosures drawn as text, so they inherited text's height: a reasoning header at 17, a
-   tool card's header at 24, a folded result's row at 24 — and the token gauge at 16 with role="button"
-   written on it. 9px of padding is .to-result's own trick (the tap area is padding, not size) and it lands
-   every one of them past the 32px floor this project already uses for .act: 35 / 32 / 32 / 32 / 32, each one
-   measured edge to edge with elementFromPoint, not inferred. The gauge costs the status bar nothing: its
-   row is already 53px because the 40px compact button sits in it, and #ctx-text centres itself in whatever
-   height the bar gets (inset:0 + grid). Density was measured rather than assumed — over 66 entries at
+   tool card's header at 24, a folded result's row at 24 — and the context gauge with role="button" written
+   on it. 9px of padding is .to-result's own trick (the tap area is padding, not size) and it lands
+   every one of them past the 32px floor this project already uses for .act, each one measured edge to edge
+   with elementFromPoint, not inferred. Density was measured rather than assumed — over 66 entries at
    375px the transcript grows 532px out of 640 027, which is 0.08% — and it is only a finger that pays it:
    keyed on hover, not on width, a 400px-wide desktop window keeps its 24px rows. */
 @media (hover: none) {
@@ -487,7 +539,7 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
      edge instead of crossing it. Anything larger would let the link swallow taps outside the row, and the
      row toggles the card while the link jumps to the result — a hit box that escapes the row chooses for you. */
   .tool-card .to-result { margin-block: -9px; padding-block: 9px; }
-  .ctxbar { min-height: 32px; }
+  #ctx-ring { min-width: 34px; min-height: 32px; } /* the gauge wears role="button", so it pays the touch floor */
 }
 
 /* The queue is a promise about what the loop will do next, not a thing to read, and it must not be
@@ -515,6 +567,9 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 
 #composer { border-top: 1px solid var(--border); background: var(--bg2); padding: 8px 12px; flex: 0 0 auto; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
+/* The attach button is a fixed tile on the row, not something the growing textarea may squeeze - the
+   `#topbar > .icon-btn` lesson repeated: a flex row is allowed to crush an unpinned button to nothing. */
+.composer-row > .file-btn { flex: 0 0 auto; }
 #input { flex: 1; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; resize: vertical; font: inherit; }
 #input:focus { outline: none; border-color: var(--accent); }
 .composer-buttons { display: flex; flex-direction: column; gap: 5px; }
@@ -530,18 +585,37 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #attachments .x { position: absolute; top: -6px; right: -6px; background: var(--err); color: #fff; border-radius: 50%; width: 17px; height: 17px; display: grid; place-items: center; text-align: center; font-size: var(--t-0); cursor: pointer; }
 
 /* side panel.
+   One surface, four tabs (js/panel.js), and it FLOATS: the panel used to be the grid's third column, so
+   opening it relaid the transcript — every message re-wrapped while the panel was up, and the wide modes
+   took 44vw of the conversation away. Nothing that answers a question about a request should move the
+   conversation the question is about, so the panel is pinned over the page now and the transcript does
+   not know it exists.
    The panel is a column and its *body* is the scroller, and that split is the whole fix for "I have to
    scroll back to the top before I can close it": the inspect table is routinely 30+ rows, and a phone has
    no Escape (the Escape-to-close in app.js needs a keyboard), so a ✕ that scrolls away leaves no way out
    at all. A control that closes a surface may not live inside the region it closes. */
 #panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 94vw);
+  z-index: 31; /* the phone drawer's rank, kept: it rides above the page, below dialogs */
   background: var(--bg2);
   border-left: 1px solid var(--border);
+  box-shadow: -14px 0 44px rgba(0, 0, 0, 0.45); /* it floats, so it has to say so */
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 #panel > .side-head { flex: 0 0 auto; }
+/* The tab bar lives in the head beside the ✕; .tabs brings the settings dialog's shape, and inside the
+   panel that shape's underline and bottom margin are what separate it from the head's own border. */
+#panel .tabs { margin-bottom: 0; border-bottom: 0; flex-wrap: wrap; }
+#panel .tab { font-size: var(--t-1); }
+/* The rule between two owners of one tab (the context tab's arithmetic and its bill both draw into
+   the same body — js/panel.js runs the queue and puts this between what actually drew). */
+#panel-body .tab-sep { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
 #panel.hidden, #pending.hidden, .hidden { display: none; }
 #panel-body {
   padding: 8px 10px;
@@ -555,6 +629,20 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #panel-body .num { text-align: right; font-family: var(--mono); }
 #panel-body .head { color: var(--muted); max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #panel-body pre { white-space: pre-wrap; word-break: break-word; font: var(--t-1) var(--mono); }
+/* The context tab is a wall of same-rung lines, so it gets paragraph marks: the measurement a size up
+   (it is the heading the ring was pressed for), the next compaction in a dashed box of its own - it
+   describes an event that has not happened, and it was reading as one more live measurement - and the
+   action row given air. The margin rule is only for the bare paragraphs the tab appends: every block of
+   the panel that owns its spacing (.srv, .tbar, .pendbar, .tfine) sets its margin via a class selector,
+   which outvotes this element-level one, so the tabs that already breathe breathe as they did. */
+#panel-body > div { margin-top: 4px; }
+#panel-body .ctx-head { font-size: var(--t-2); margin-top: 0; }
+#panel-body .ctx-plan { margin-top: 7px; padding: 6px 9px; border: 1px dashed var(--border); border-radius: 7px; }
+#panel-body .ctx-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 11px 0 2px; }
+/* The compact button used to be a `warn` button and lost its colour when it became an inline icon. Amber
+   is the rung every warning in this app already rings on - the pendbar, the compacting badge. */
+#panel-body button.btn-warn { background: #1d1a12; border-color: #6d5626; color: #f0d6a0; }
+#panel-body button.btn-warn:hover:not(:disabled) { border-color: var(--warn); color: #f8e8c4; }
 
 /* markdown */
 .md h1, .md h2, .md h3 { line-height: 1.3; margin: .7em 0 .35em; }
@@ -847,8 +935,7 @@ button,
   body {
     height: 100dvh;
   }
-  #app,
-  #app.with-panel {
+  #app {
     grid-template-columns: 1fr;
   }
   /* One track now, so the transcript goes back to the first one: left at column 2 it would be placed in an
@@ -897,9 +984,11 @@ button,
   #panel {
     position: fixed;
     z-index: 32;
+    top: auto; /* undo the desktop pin: this is a bottom sheet, anchored low, not a full-height column */
     left: 0;
     right: 0;
     bottom: 0;
+    width: auto;
     max-height: 76dvh;
     border-left: 0;
     border-top: 1px solid var(--border);
@@ -915,16 +1004,6 @@ button,
     flex: 1 1 auto;
     min-width: 0;
     font-size: var(--t-4);
-  }
-  #statusbar {
-    flex-wrap: wrap;
-    gap: 6px;
-    row-gap: 4px;
-    padding: 6px 8px;
-  }
-  .ctxbar {
-    flex: 1 1 110px;
-    max-width: none;
   }
   #log {
     padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
@@ -1082,30 +1161,8 @@ button,
 }
 
 /* ------------------------------------------------------------------ tool catalogue
-   The badge in the top bar is the door to the catalogue, so it has to look pressable: the numbers on
-   it were already worth reading, and now they are worth clicking. */
-#tools,
-.ctxbar {
-  /* Two doors in the chrome: the badge opens the tool catalogue, the token bar opens the cost panel.
-     Both already carry numbers people read, so both have to look pressable. */
-  cursor: pointer;
-  user-select: none;
-}
-#tools:hover,
-#tools:focus-visible,
-.ctxbar:hover,
-.ctxbar:focus-visible {
-  border-color: var(--accent);
-  color: var(--fg);
-}
-
-/* A parameter table and a cost table both need room for their third column, so the panel is wider in
-   these two modes. The first track is `--side-w` and not a second 210px: this rule replaces the whole grid,
-   and a hardcoded copy of the sidebar width would ask 210px back from a window that had just collapsed it. */
-#app.with-panel.tools,
-#app.with-panel.stats {
-  grid-template-columns: var(--side-w) 1fr minmax(430px, 44vw);
-}
+   The door is the panel's tools tab, and its label carries the counts (js/session.js) — the top-bar
+   badge is gone, so nothing here has to look pressable. What is left is the catalogue's own furniture. */
 
 #panel-body .tsum {
   display: flex;
@@ -1359,11 +1416,6 @@ button,
 }
 
 @media (max-width: 860px) {
-  /* the panel is a bottom sheet there: the wider grid belongs to the desktop only */
-  #app.with-panel.tools,
-  #app.with-panel.stats {
-    grid-template-columns: 1fr;
-  }
   #panel-body .tok {
     margin-left: 0;
   }

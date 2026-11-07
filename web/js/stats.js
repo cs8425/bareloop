@@ -11,12 +11,17 @@
 // belongs to neither (r29, D27). There is exactly one rate per request, in the table below, and no
 // average of them anywhere. Total milliseconds are additive, so the time spent prefilling and decoding
 // is totalled — a sum of seconds, not a mean of speeds.
-import { $, el, fmtN, pathOf, sortByNum, tps, MIN_UNCACHED } from './util.js';
+import { el, fmtN, pathOf, sortByNum, tps, MIN_UNCACHED } from './util.js';
 import { state } from './state.js';
 import { get } from './api.js';
-import { note } from './ui.js';
-import { openPanel, panelMode } from './panel.js';
-import { EV_REFRESH, EV_SESSION, on } from './bus.js';
+import { registerRenderer } from './panel.js';
+
+// The bill is the second half of the context tab (js/panel.js) — what is filling the window and what
+// it is doing to the bill are one question — so it registers under that name and lands after the
+// window's arithmetic (panel.js registers first: app.js imports it first), with the queue's rule
+// between the two fetches. The panel redraws this tab on the events it already handles; what used to
+// be this file's own subscriptions and its own door on the status-bar token bar live in that one rule.
+registerRenderer('context', renderCost);
 
 // fmtMoney carries no symbol on purpose: the unit is the user's own business (r29, D28), and a currency
 // sign in front of a number that came from their config would be a guess about it.
@@ -36,35 +41,8 @@ function costOf(u, p) {
   return { input, cache: cacheCost, out, total: input + cacheCost + out };
 }
 
-export function wireStats() {
-  const bar = $('.ctxbar');
-  if (!bar) return;
-  // The context bar already answers "how full is the window"; it is the one element in the status bar
-  // about tokens, so it is the door to the rest of the answer. It is a span, so it is given the role,
-  // the name and the keys a button would have had.
-  bar.onclick = () => showStats().catch(() => {});
-  bar.onkeydown = (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      showStats().catch(() => {});
-    }
-  };
-  // While it is open the panel is a running total, so it follows the transcript. Both handlers re-read
-  // the session themselves: `refresh()` has the data but hands it to the transcript only.
-  on(EV_REFRESH, () => {
-    if (panelMode() === 'stats') showStats().catch(() => {});
-  });
-  on(EV_SESSION, () => {
-    // Money belonging to another session on screen is worse than a closed panel.
-    if (panelMode() === 'stats') showStats().catch(() => {});
-  });
-}
-
-async function showStats() {
-  if (!state.id) {
-    note('open a session first');
-    return;
-  }
+async function renderCost(body) {
+  if (!state.id) return;
   // ?usage=1 is the skeleton door: every row's usage and parentage, no content and no images.
   // A plain GET would now buy one page anyway, and one page priced as a whole bill is a smaller
   // lie than 73 MB but still a lie — so the bill asks for the shape of a bill.
@@ -77,8 +55,6 @@ async function showStats() {
   // Only entries that carry usage are requests: user messages, tool results and compaction markers
   // have none, and counting them as rows would make every number below look like a mystery.
   const requests = entries.filter((e) => onPath.has(e.id) && e.usage && (e.usage.prompt || e.usage.completion));
-
-  const body = openPanel('stats', `tokens and cost · ${state.id}`);
 
   const t = { prompt: 0, cache: 0, completion: 0, msIn: 0, msOut: 0 };
   for (const e of requests) {
@@ -213,12 +189,7 @@ async function showStats() {
     el(
       'div',
       'dim',
-      `These are the ${requests.length} requests on the path the transcript is drawing — the same set the context bar prices. Not here: entries on other branches, attempts that failed before the model answered, and the request that wrote a compaction summary (its own usage stays out of the log). So the money above is a lower bound, never an upper one.`,
+      `These are the ${requests.length} requests on the path the transcript is drawing — the same set the window figures above price. Not here: entries on other branches, attempts that failed before the model answered, and the request that wrote a compaction summary (its own usage stays out of the log). So the money above is a lower bound, never an upper one.`,
     ),
   );
-  if (st.nCtx) {
-    const hint = el('div', 'dim');
-    hint.textContent = `the window itself: ${fmtN(st.contextUsed || 0)} of ${fmtN(st.nCtx)} tokens used (${st.nCtxSource || 'unknown source'} n_ctx, ${st.thresholdPct ?? '-'}% compaction trigger)`;
-    body.appendChild(hint);
-  }
 }

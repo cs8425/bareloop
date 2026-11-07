@@ -29,6 +29,12 @@ const PATHS = {
     '<path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
   raw: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
   inspect: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  // Two sheets with their lines showing, and an ⓘ seal over the corner: "the documents, and what is in
+  // them". It replaces `inspect` (a lone magnifier) on the button that opens the panel, because a
+  // magnifier in a chat UI is a promise of keyword search — and this button searches nothing, it lays
+  // open what the model would be sent.
+  detail:
+    '<path d="M8 3h9a2 2 0 0 1 2 2v8"/><rect width="12" height="14" x="3" y="6" rx="2"/><path d="M7 10.5h6"/><path d="M7 14h3"/><circle cx="17.5" cy="17.5" r="4.2"/><path d="M17.5 15.9v.01"/><path d="M17.5 17.8v1.6"/>',
   compact:
     '<path d="M12 3v6"/><path d="m9 6 3 3 3-3"/><path d="M12 21v-6"/><path d="m9 18 3-3 3 3"/><path d="M4 12h16"/>',
   settings:

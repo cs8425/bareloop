@@ -94,8 +94,8 @@ function renderAttachments() {
 }
 
 // syncComposer is the single place that decides what the composer's right-hand slot offers:
-// idle -> send (dim until there is a draft), running -> the red square and the bolt, compacting -> the
-// square alone. A manual summary is not a generation, so it does not get the bolt, whose promise is
+// idle -> send (dim until there is a draft), running -> the red square plus the bolt once a draft exists,
+// compacting -> the square alone. A manual summary is not a generation, so it does not get the bolt, whose promise is
 // "abort this generation and send this message instead": a summary has written nothing to keep and no answer
 // is owed to anything. Typing still works, and what is typed is not lost - agent.holdMessageLocked keeps it off
 // the path until the boundary the summary is writing exists, then it lands behind that boundary and earns its
@@ -119,7 +119,12 @@ export function syncComposer(running, compacting) {
   // has half an answer worth keeping, a summary has written nothing yet. The words are set here because
   // this function is the only thing that knows which of the two it is showing.
   stop.title = c && !r ? 'stop this summary - nothing is written until it finishes' : 'stop the run';
-  interrupt.classList.toggle('hidden', !r);
+  // The bolt appears only once there is a draft to send with it. Its promise is "abort this generation
+  // and say this instead", and with nothing typed that promise is empty; worse, a bolt standing permanently
+  // above the stop square is a second round target stacked under a thumb, and "queue it" vs "interrupt and
+  // resend" is exactly the pair no mis-tap may confuse. Writing the message is the intent - the button that
+  // acts on it appears with it, and never otherwise.
+  interrupt.classList.toggle('hidden', !r || !has);
   send.disabled = !has || !state.id;
   interrupt.disabled = !has || !state.id;
   // Two things the software keyboard and the placeholder should agree with the handler about, because a

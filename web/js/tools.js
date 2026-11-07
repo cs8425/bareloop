@@ -18,7 +18,7 @@ import { state } from './state.js';
 import { api, call, get } from './api.js';
 import { confirmBox, fail, note } from './ui.js';
 import { EV_REFRESH, EV_SESSION, emit, on } from './bus.js';
-import { hidePanel, openPanel, panelMode } from './panel.js';
+import { openPanel, panelMode, registerRenderer } from './panel.js';
 
 // There is deliberately no prefill-rate constant here. The two numbers an earlier round measured
 // (979 tok/s at 687 tokens, 615 tok/s at 1127) moved 10–19 % when the same two servers were measured
@@ -36,28 +36,20 @@ let countEl = null;
 
 // ---------------------------------------------------------------- open and close
 
-// wireTools binds the one handle into the rest of the page: the tool badge in the top bar. It lives
-// here rather than in session.js because the badge is a door, not a status readout.
+// wireTools hands the catalogue to the panel: the tools tab asks this module for its content, and the
+// tab's label in the top bar's tab bar carries the counts the old top-bar badge used to carry
+// (session.js writes them). There is no badge of its own any more — one door, not two, and the door
+// that stays is the one inside the panel the catalogue already lives in.
 export function wireTools() {
-  const badge = $('#tools');
-  badge.onclick = toggleToolsDrawer;
-  // The badge is a span wearing role=button, and a role without the key handling is a lie: Enter and
-  // Space have to do what the click does.
-  badge.onkeydown = (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    toggleToolsDrawer();
-  };
+  registerRenderer('tools', async () => {
+    if (view) draw();
+    else await openTools();
+  });
   // A session switch used to leave the previous session's catalogue open under the new session's
   // name — which is a claim about what the next request carries.
   on(EV_SESSION, () => {
     if (panelMode() === 'tools') openTools();
   });
-}
-
-export function toggleToolsDrawer() {
-  if (panelMode() === 'tools') hidePanel();
-  else openTools();
 }
 
 export async function openTools() {

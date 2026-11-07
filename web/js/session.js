@@ -687,7 +687,14 @@ function rowNode(s) {
   top.appendChild(ago);
   li.appendChild(top);
 
-  const sub = el('div', 'sub col', s.bytes ? `${fmtN(s.path)} path · ${fmtN(s.log)} log · ${fmtBytes(s.bytes)}` : `${s.closed ? 'shut' : s.phase || 'idle'} · –`);
+  // The sub-line starts with the word the eye is scanning for - "idle" or "shut", the difference the
+  // grey-on-grey dot used to leave unsaid (it gained a hollow for shut, but the word is what reads at a
+  // glance). The three figures follow in label-less shorthand in a fixed order - path, log, size - so the
+  // ellipsis a narrow sidebar applies takes letters off the front half of the line, and the size, the one
+  // figure that never repeats and always differs, is the last thing it would ever reach. Hover spells every
+  // one of them out in full (rowTitle).
+  const how = s.closed ? 'shut' : s.phase || 'idle';
+  const sub = el('div', 'sub col', s.bytes ? `${how} · ${fmtN(s.path)}·${fmtN(s.log)}·${fmtBytes(s.bytes)}` : `${how} · –`);
   // The skipped count is spelled with letters and not a symbol because this line is set in the mono stack
   // and a symbol outside it inherits a fallback face with a taller line box (see the `line-height` on
   // `.sub`). What the marker means is written out in full in the row's title.
@@ -1109,10 +1116,12 @@ function clearStatus() {
   phase.textContent = '—';
   phase.className = 'badge';
   $('#turn').textContent = '';
-  $('#tools').textContent = '';
-  $('#tools').title = '';
-  $('#ctx-text').textContent = '';
-  $('#ctx-fill').style.width = '0%';
+  const toolsTab = document.querySelector('#panel [data-tab=tools]');
+  if (toolsTab) {
+    toolsTab.textContent = 'tools';
+    toolsTab.removeAttribute('title');
+  }
+  resetRing();
   $('#session-name').value = '';
   const wake = $('#wake');
   wake.textContent = '';
@@ -1120,7 +1129,54 @@ function clearStatus() {
   wake.classList.add('hidden');
 }
 
-// showBusy and clearBusy own the one badge in the status bar that answers "why is nothing moving". It is
+// The context ring in the top bar, drawn the way llama.cpp's UI draws its gauge: a track circle and one
+// arc whose dashoffset says the share. r=11 on a 32 viewBox — the constant is written down once here
+// and the dasharray ships in app.css, because only this file knows the percentage.
+//
+// The colours follow the session's own arithmetic, not a constant: amber starts where THIS session's
+// automatic compaction starts (thresholdPct — the ring turning amber and the daemon deciding to compact
+// are one fact seen twice), and red is near-full at 95%. No measurement is not zero: with nothing
+// priced, or with contextKnown=false after a compaction, the ring stays an empty grey track rather
+// than inventing a fill.
+const RING_C = 2 * Math.PI * 11;
+
+function renderRing(st) {
+  const ring = $('#ctx-ring');
+  if (!ring) return;
+  const used = st.contextUsed || 0;
+  const nctx = st.nCtx || 0;
+  const known = st.contextKnown !== false;
+  const pct = nctx > 0 && known ? clamp((100 * used) / nctx, 0, 100) : 0;
+  const arc = ring.querySelector('.arc');
+  if (arc) arc.style.strokeDashoffset = (RING_C * (1 - pct / 100)).toFixed(2);
+  const warm = nctx > 0 && known && pct >= (st.thresholdPct ?? 70);
+  ring.classList.toggle('ring-warm', warm && pct < 95);
+  ring.classList.toggle('ring-hot', nctx > 0 && known && pct >= 95);
+  ring.classList.toggle('ring-off', !(nctx > 0 && known));
+  $('#ring-nums').textContent = nctx > 0 ? `${fmtN(used)} / ${fmtN(nctx)}` : `${fmtN(used)} tokens`;
+  $('#ring-bar').style.width = pct.toFixed(1) + '%';
+  $('#ring-note').textContent =
+    nctx > 0
+      ? known
+        ? `${pct.toFixed(0)}% used · ${fmtN(Math.max(nctx - used, 0))} remaining · compaction past ${st.thresholdPct ?? '-'}%${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
+        : `no real measurement${st.summary ? ' since the last compaction' : ' yet'} — click for the window's arithmetic`
+      : 'n_ctx unknown: set it in Settings, and the ring gets a window to measure';
+}
+
+function resetRing() {
+  const ring = $('#ctx-ring');
+  if (!ring) return;
+  const arc = ring.querySelector('.arc');
+  if (arc) arc.style.strokeDashoffset = RING_C.toFixed(2);
+  ring.classList.remove('ring-warm', 'ring-hot');
+  ring.classList.add('ring-off');
+  $('#ring-nums').textContent = '– / –';
+  $('#ring-bar').style.width = '0%';
+  $('#ring-note').textContent = 'open a session and send a message to measure the window';
+}
+
+// showBusy and clearBusy own the badge beside the phase in the top bar that answers "why is nothing
+// moving". It is
 // deliberately not a note: a note fades in nine seconds, and the thing it would explain — a summariser
 // thinking — is the longest wait in this product and outlives the note. It is also not derived from the
 // phase, because the phase cannot say it: an automatic compaction runs inside a turn and leaves the phase at
@@ -1146,7 +1202,7 @@ export function clearBusy(id) {
 
 // syncBusy paints whatever the session on screen is currently waiting on, and nothing else. Every caller
 // that changes the badge's subject — a frame arriving, a select, a phase moving — ends here, so the badge
-// and the session named in the status line can never disagree.
+// and the session named in the top bar can never disagree.
 export function syncBusy() {
   const box = $('#busy');
   if (!box) return;
@@ -1200,36 +1256,28 @@ export function renderStatus(st) {
   }
   const servers = st.servers || [];
   const failed = servers.filter((s) => s.error || !s.connected);
-  const tools = servers.reduce((n, s) => n + (s.tools || 0), 0);
-  // The badge is the door to the tool catalogue, so it says three things: how many tools a request
-  // would carry, how many the policy still wants once any run in flight ends (that is what ⏳ means),
-  // and how many servers are down. `toolsEnabled`/`toolsTotal` are absent on an older server.
-  const toolsEl = $('#tools');
-  const hidden = st.toolsTotal && st.toolsEnabled !== undefined && st.toolsEnabled !== st.toolsTotal;
-  toolsEl.textContent =
-    `${st.tools ?? tools} tools` +
-    (hidden ? ` · ${st.toolsEnabled}/${st.toolsTotal} on` : '') +
-    (st.toolsPending ? ' ⏳' : '') +
-    (failed.length ? ` · ${failed.length} down` : '');
-  toolsEl.title =
-    (servers.map((s) => `${s.name}: ${s.connected ? s.protocolVersion || s.era || 'connected' : s.disabled ? 'off (disabled)' : 'down'}${s.error ? ' — ' + s.error : ''} (${s.enabled ?? s.tools}/${s.tools} tools on)`).join('\n') ||
-      'no MCP servers') +
-    '\n\nclick for the tool catalogue: descriptions, parameters, cost, and the switches';
+  // The counts the top-bar badge used to carry live on the tools tab's own label now — one door, and
+  // the label of the door is where "do I need to look inside" gets answered. Hidden tools (a policy
+  // waiting for the run to end), servers down, and the ⏳ of an unpublished change are the three facts
+  // worth a glance; the catalogue tab spells out all of them, and its title carries the per-server
+  // summary the badge's title used to.
+  const toolsTab = document.querySelector('#panel [data-tab=tools]');
+  if (toolsTab) {
+    const hidden = st.toolsTotal && st.toolsEnabled !== undefined && st.toolsEnabled !== st.toolsTotal;
+    toolsTab.textContent =
+      'tools' +
+      (hidden ? ` ${st.toolsEnabled}/${st.toolsTotal}` : '') +
+      (failed.length ? ` ⚠${failed.length}` : '') +
+      (st.toolsPending ? ' ⏳' : '');
+    toolsTab.title =
+      (servers.map((s) => `${s.name}: ${s.connected ? s.protocolVersion || s.era || 'connected' : s.disabled ? 'off (disabled)' : 'down'}${s.error ? ' — ' + s.error : ''} (${s.enabled ?? s.tools}/${s.tools} tools on)`).join('\n') ||
+        'no MCP servers') +
+      '\n\n⚠ = servers down · ⏳ = a tool change waits for the run to end';
+  }
   $('#turn').textContent = st.turn ? `turn ${st.turn}` : '';
-  const used = st.contextUsed || 0;
-  const nctx = st.nCtx || 0;
-  // contextKnown=false means the only number we have priced a payload that no longer exists —
-  // right after a compaction, and for the one turn until a request is actually sent. Show a dash
-  // rather than a stale percentage (and never a fake 0%).
-  const known = st.contextKnown !== false;
-  const pct = nctx > 0 && known ? clamp((100 * used) / nctx, 0, 100) : 0;
-  $('#ctx-fill').style.width = pct.toFixed(1) + '%';
-  $('#ctx-text').textContent =
-    nctx > 0
-      ? known
-        ? `${fmtN(used)} / ${fmtN(nctx)} (${pct.toFixed(0)}%, trigger ${st.thresholdPct ?? '-'}%)${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
-        : `– / ${fmtN(nctx)} (no measurement${st.summary ? ' since the last compaction' : ' yet'})${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
-      : `${fmtN(used)} tokens · n_ctx unknown: set it in Settings (the server reported no window)`;
+  // The window's fill is the top bar's ring now; the strip that carried these words retired, and the
+  // turn counter reads here beside the phase it counts.
+  renderRing(st);
   $('#session-name').value = st.name || st.session || '';
   // The queue this status reports is drawn here rather than where the queue changes hands, because a queue
   // that is being held does not change hands and says nothing at all: `Send` takes the message into memory

@@ -43,34 +43,45 @@
                and wants the screen back had no way to ask, and the process had no way to forget any of the
                sessions it opened at boot. -->
           <button id="btn-unload" type="button" class="icon-btn" title="put this session down — the window clears and the daemon stops holding it in memory" aria-label="put this session down"><span data-icon="close"></span></button>
-          <!-- Not decoration: clicking it opens the tool catalogue (descriptions, parameters, cost,
-               switches), so it carries a role and a tabindex rather than being mouse-only. -->
-          <span id="tools" class="badge" role="button" tabindex="0" aria-label="open the tool catalogue" title="MCP tools"></span>
+          <!-- The phase lives beside the name it describes, after the control that changes which session the
+               name is: a reader asking "what is this session doing" asks about the session, not about the
+               strip under the transcript, and the strip is now thin enough to be an afterthought. -->
+          <span id="phase" class="badge">idle</span>
+          <!-- The three sentences a run says out loud live here too, beside the phase they qualify:
+               "running" and "writing the summary" are one question asked twice — what is this session
+               doing right now — and a second row under the top bar made them two answers. A run that
+               stops moving is a run a reader has to be told about, so the busy badge (events.js) is the
+               difference between "it is writing a summary" and "it has hung"; it is deliberately not a
+               note, because a note fades in nine seconds and the summariser outlives the note.
+               The asleep badge says what `running` cannot: this session is parked on a wait (js/park),
+               shown as the moment it is due and never as a countdown — nothing re-renders to watch one
+               go by. And the turn counter, the lightest of the three, goes last. All three are hidden
+               whenever they have nothing to say, which is most idle moments; the status strip they used
+               to share retired with them (r89 had already moved its phase to here and its gauge to the
+               ring — what was left was three badges, and badges belong beside the thing they describe). -->
+          <span id="busy" class="badge busy hidden" role="status"></span>
+          <span id="wake" class="badge hidden"></span>
+          <span id="turn"></span>
           <span class="spacer"></span>
-          <button id="btn-inspect" type="button" class="icon-btn" title="what would be sent next" aria-label="inspect what would be sent"><span data-icon="inspect"></span></button>
+          <!-- The context ring, drawn the way llama.cpp's UI draws it: a track circle plus one arc whose
+               dashoffset says the percentage, grey until the compaction trigger, amber past it, red near
+               full. It is the number the status-bar strip used to spread across 340px, now the size of the
+               icon it sits beside; hovering asks the rest (a bar and the figures), clicking opens the
+               context tab where the compact button lives. -->
+          <span id="ctx-ring" class="ring-off" role="button" tabindex="0" aria-label="context window usage — click for the context panel" title="context window usage — click for details and compact">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <circle class="track" cx="16" cy="16" r="11" />
+              <circle class="arc" cx="16" cy="16" r="11" transform="rotate(-90 16 16)" />
+            </svg>
+            <span class="ring-pop" aria-hidden="true">
+              <span class="line"><b>context</b><span id="ring-nums">– / –</span></span>
+              <span class="bar"><span id="ring-bar"></span></span>
+              <span id="ring-note" class="dim">open a session and send a message to measure the window</span>
+            </span>
+          </span>
+          <button id="btn-inspect" type="button" class="icon-btn" title="the request panel — what would be sent, the window, the cost, the tools" aria-label="open the request panel"><span data-icon="detail"></span></button>
           <button id="btn-settings" type="button" class="icon-btn" title="model, MCP servers, compaction" aria-label="session settings"><span data-icon="settings"></span></button>
         </header>
-
-        <div id="statusbar">
-          <span id="phase" class="badge">idle</span>
-          <span id="turn"></span>
-          <!-- A session asleep on a wait really is `running` — the composer's Enter key reads that word and
-               nothing else may own it — so the wait gets its own badge instead of a new phase. It shows the
-               moment the wait is due rather than a countdown, because nothing here re-renders to watch one
-               go by, and a figure that quietly goes stale is worse than no figure. -->
-          <span id="wake" class="badge hidden"></span>
-          <!-- A run that stops moving is a run a reader has to be told about. Automatic compaction happens
-               inside a run — the phase stays `running` the whole time — and the longest wait in this product is
-               the summariser's own answer, which can sit there for a minute with no token on screen. So the
-               reason goes next to the phase rather than into a note that fades: this badge is the difference
-               between "it is writing a summary" and "it has hung". -->
-          <span id="busy" class="badge busy hidden" role="status"></span>
-          <!-- The token bar is the door to the tokens-and-cost panel: it is the one thing in this row
-               that is about tokens, and "how full is the window" wants a "what did it cost" behind it.
-               It is a span, so it is given the role, the name and the keys a button ships with. -->
-          <span class="ctxbar" role="button" tabindex="0" aria-label="tokens and cost of this conversation" title="tokens and cost of this conversation&#10;click for the totals: prompt, cache hits, time in the model, and the bill if this endpoint has prices"><span id="ctx-fill"></span><span id="ctx-text"></span></span>
-          <button id="btn-compact" type="button" class="warn" title="compact now: fold the oldest turns into a summary"><span data-icon="compact"></span> compact</button>
-        </div>
 
         <div id="log-wrap">
           <div id="log"></div>
@@ -112,6 +123,13 @@
         <div id="composer">
           <div id="attachments"></div>
           <div class="composer-row">
+            <!-- Attach lives on the side away from every sending button, and the right hand keeps one
+                 position forever: "the round thing there sends, and during a run it stops". A plus among
+                 them used to make that round thing a three-way guess on a 375px screen. -->
+            <label class="file-btn icon-btn" title="attach images"
+              ><span data-icon="plus"></span
+              ><input id="files" type="file" accept="image/*" multiple hidden
+            /></label>
             <textarea id="input" rows="3" spellcheck="false" placeholder="message — Enter sends, Shift+Enter adds a line, paste or drop images"></textarea>
             <div class="composer-buttons">
               <!-- One glyph does two jobs, the way llama.cpp's own UI does it: send when the loop is
@@ -122,10 +140,6 @@
               <button id="btn-interrupt" type="button" class="icon-btn hidden" title="interrupt this run and send this message instead"><span data-icon="interrupt"></span></button>
               <button id="btn-send" type="button" class="send-btn" title="send (Enter)" aria-label="send"><span data-icon="send"></span></button>
               <button id="btn-stop" type="button" class="stop-btn hidden" title="stop the run" aria-label="stop"><span data-icon="stop"></span></button>
-              <label class="file-btn icon-btn" title="attach images"
-                ><span data-icon="plus"></span
-                ><input id="files" type="file" accept="image/*" multiple hidden
-              /></label>
             </div>
           </div>
         </div>
@@ -133,7 +147,18 @@
 
       <aside id="panel" class="hidden">
         <div class="side-head">
-          <b id="panel-title">inspect</b>
+          <!-- One surface, three tabs, one mode variable (js/panel.js): the inspect table, the window's
+               numbers with its bill and its compact button, and the tool catalogue were four doors to three
+               rooms — each opened by its own chrome button and each stealing width from the transcript when
+               opened. Now the transcript keeps its column (the panel floats over it) and the questions share
+               a place. Usage and cost are one tab because they are one question — what is filling the window
+               and what it is doing to the bill — answered by two owners (js/panel.js, js/stats.js) into the
+               same body. The tools tab rewrites its own label with the counts the top-bar badge used to carry. -->
+          <div class="tabs" role="tablist" aria-label="panel">
+            <button type="button" class="tab" data-tab="inspect" role="tab">inspect</button>
+            <button type="button" class="tab" data-tab="context" role="tab">context</button>
+            <button type="button" class="tab" data-tab="tools" role="tab">tools</button>
+          </div>
           <button id="panel-close" type="button" class="icon-btn" title="close" aria-label="close the panel"><span data-icon="close"></span></button>
         </div>
         <div id="panel-body"></div>
