@@ -7,3 +7,4 @@ config.json
 cmd/bareloopd/bareloopd
 cmd/llmmock/llmmock
 cmd/mcpstub/mcpstub
+cmd/blimport/blimport

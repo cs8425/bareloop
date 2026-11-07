@@ -9,12 +9,20 @@ endpoint.
 
 ## What it is like
 
-- **Go, standard library only**, plus `github.com/coder/websocket` for the browser transport. No
-  framework, no build step for the UI.
-- **No database.** One append-only JSONL log per session, where every entry is a node of a conversation
-  tree and a `tip` record says which node is current. Moving the tip is time travel: the file is only ever
-  appended to, so an abandoned path stays on disk. It is a tree, but the UI shows one path at a time: what
-  is not on the path is not drawn, and there is no branch switcher yet (`docs/design.md`, Deferred).
+- **A short list of dependencies, all pure Go, deliberately**: the standard library,
+  `github.com/coder/websocket` for the browser transport, `github.com/ncruces/go-sqlite3`
+  (SQLite compiled to WebAssembly — no CGO, no system SQLite, no C toolchain anywhere) and
+  `github.com/klauspost/compress` (zstd, including its dictionary trainer). No framework, no
+  build step for the UI, and a machine that only runs the compiled binary installs nothing.
+- **One SQLite file per session, and nothing else.** The conversation is a tree: entries are
+  rows, the edges are rows, superseded revisions keep their own table, and a `meta` row says
+  which node is current. Moving the tip is time travel: an abandoned path stays in the tree.
+  WAL journalling makes a torn commit a rollback, not a repaired file. Payloads compress per
+  row — zstd with a trained dictionary by default — and a row's own bytes say which codec
+  wrote it, so every store reads every store
+  ([`docs/zstd-dictionary.md`](docs/zstd-dictionary.md)). It is a tree, but the UI shows one
+  path at a time: what is not on the path is not drawn, and there is no branch switcher yet
+  (`docs/design.md`, Deferred).
 - **The loop runs on the server**, not in the browser, so a run survives a page reload and survives
   closing the tab.
 - **Nothing is hidden from you.** `inspect` shows the token count of every message and the exact numbers
@@ -36,6 +44,7 @@ endpoint.
 |---|---|
 | this file | what it is, how to build it, how to use it |
 | [`docs/design.md`](docs/design.md) | how it works and why: the context window, compaction invariants, prompt cache, retries, MCP eras, the UI's shape, the markdown renderer's hooks, and what is deliberately deferred |
+| [`docs/zstd-dictionary.md`](docs/zstd-dictionary.md) | the storage codec and its dictionary: what a payload row is made of, how the shipped zstd book is trained, how to train your own, and what losing one costs |
 | [`notes/compact-threshold-mode.en.md`](notes/compact-threshold-mode.en.md) | the compaction spec (the authority when the two docs disagree) |
 | [`config.example.json`](config.example.json) | every config field, documented inline |
 
@@ -150,11 +159,12 @@ A session's `id` is its directory name under `data/`: lowercase `a-z 0-9 . _ -`,
 ([the rules and their reasons](docs/design.md#session-identity)). The `name` you see in the sidebar is
 separate and free-form, so spaces and non-ASCII text belong there.
 
-Every session directory holds `config.json`, `log.jsonl` - the log itself, one record per line, append-only,
-and the only file that has to survive - and `log.idx`, a derived index of where each record lies. The index
-is rebuilt whenever the log is read, and a log that cannot write one keeps taking writes without it
-([what is on disk, and why](docs/design.md#what-is-on-disk)). It is also what answers the session list, so a
-session nothing has opened still appears in it with its numbers.
+Every session directory holds `config.json` and `store.db` — the SQLite file that is the tree,
+and the only file that has to survive (plus its `-wal` sidecar while a daemon has it open; a clean
+close checkpoints it away, so a resting directory is one file again). The session list is answered
+from each store's summary rows, so a session nothing has opened still appears in it with its
+numbers ([what is on disk, and why](docs/design.md#what-is-on-disk) — written for the JSONL log of
+the `log-text-based` branch; on this branch the answer is one SQLite file).
 
 ## Configuration
 
