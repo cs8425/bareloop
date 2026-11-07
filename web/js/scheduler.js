@@ -84,7 +84,12 @@ export function resolveHz(fallback = DEFAULT_HZ) {
 //          cannot afford even 1 Hz of parsing; the reply is unreadable-styled but never frozen.
 //   full   parse the whole accumulated reply every frame. This is what shipped before the render gate —
 //          kept reachable because a benchmark you can turn off is evidence, and one you cannot is a rumour.
-export const MODES = ['tail', 'plain', 'full'];
+// `rawline` is measured rather than assumed (testdata/bench-stream.html): on LLM-shaped prose — long unwrapped
+// paragraphs — it parses 59% less text and repaints the live region 4 times instead of 150. What it costs is
+// that a line loses its block decoration while it is being typed: no bullet under a list item, a table row
+// sitting below the table, a paragraph's second line hanging under it. On a 14.6 KB reply, tail's 150 repaints
+// cost 31 ms in all, so nothing is buying back a problem by paying that. Reachable, default off.
+export const MODES = ['tail', 'plain', 'full', 'rawline'];
 
 // resolveStreamMode resolves the mode the same way resolveHz resolves the rate: URL, then the pinned
 // setting, then the default. `?mode=full` on a reply is how you compare the two paths side by side.

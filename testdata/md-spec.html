@@ -1,0 +1,515 @@
+<!doctype html>
+<!--
+  md-spec — where this renderer disagrees with CommonMark and GFM, counted rather than passed.
+
+  Why a statistic and not a green bar: `web/js/md.js` is a deliberately small renderer, so it fails
+  hundreds of the 655 examples, and "655 failures" tells nobody what to do next. What is useful is a
+  count per section of the spec, because the spec is already organised by the feature that would have to
+  be built. A section with 40 of 45 failing and named "Raw HTML" is a decision; a section with 33 of 93
+  failing and named "Emphasis and strong emphasis" is a bug.
+
+  What is compared is the DOM, not the markup. Attribute order, quoting, `<br>` against `<br/>`, and the
+  spelling of `&amp;` are a renderer's taste, and comparing them spends the report on noise. Two things
+  that cannot be seen this way are named here rather than hidden:
+    - malformed markup is repaired the same way on both sides, so a `</p>` we forget to close is invisible;
+    - raw HTML is escaped by design, so a `<div>` in the source is a text node on our side and an element
+      on the spec's — which is a real divergence, counted as one, in a section that says what it is.
+  One structural difference is unwrapped from our side before comparing: every table is inside
+  `div.md-scroll` so a wide table scrolls instead of breaking the layout. That is ours, not the spec's.
+
+  Failures come out in two classes, because only one of them is a bug: `diff` is a different tree, and
+  `ws` means the trees are the same once whitespace runs are collapsed (a newline where the spec puts a
+  newline between block tags). `ws` is reported apart from `ok` and apart from `diff` rather than folded
+  into either, since "equal after collapsing whitespace" is a claim, not a fact.
+
+  Drive it from the console the way the stream bench is driven:
+    window.__mdSpec.summary          // per-section rows after the load
+    window.__mdSpec.show(42)         // open one example by its spec number
+    window.__mdSpec.fail('Tables')   // the failing examples of a section, as objects
+    await window.__mdSpec.rerun()    // re-render everything (a md.js edit is one reload away)
+  The cases are vendored from markedjs/marked (test/specs/commonmark/commonmark.0.31.2.json,
+  test/specs/gfm/gfm.0.29.json) into testdata/md/, which the daemon serves only when -testdata names the
+  directory — they are 140 KB of someone else's fixtures and have no business inside a binary.
+-->
+<head>
+  <meta charset="utf-8" />
+  <title>md · spec conformance</title>
+  <link rel="stylesheet" href="/app.css" />
+  <style>
+    body { padding: 18px 20px 48px; }
+    /* app.css is linked for its tokens, and it brings `body { overflow: hidden }` with it. That rule is right
+       for the app, where `#log` is the only scroller and the composer must not be pushed off screen; it is wrong
+       here, where the report *is* the document — a body's overflow value propagates to the viewport, so this page
+       could be scrolled by script and not by a reader (measured: PageDown left scrollTop at 0 before these two
+       lines, 1097 after them). `scroll` rather than `auto` on the root, so the gutter exists before the report
+       grows and nothing about the layout width changes between the start of a run and its end. */
+    body { overflow: visible; }
+    html { overflow-y: scroll; }
+    h1 { font-size: 15px; margin: 0 0 4px; }
+    h2 { font-size: 13px; margin: 22px 0 6px; }
+    p.lede { color: var(--muted); font-size: 12px; margin: 0 0 14px; max-width: 92ch; }
+    table { border-collapse: collapse; font-size: 11.5px; }
+    th, td { padding: 3px 10px; border-bottom: 1px solid var(--border); text-align: right; vertical-align: top; }
+    th:first-child, td:first-child { text-align: left; }
+    td.num { font-family: var(--mono); }
+    td.zero { color: var(--muted); }
+    tr.allbad td.diff { color: var(--err); }
+    td.known { color: var(--warn, #c9a227); }
+    #cases section { margin: 0 0 8px; }
+    #cases summary { font-family: var(--mono); font-size: 11px; cursor: pointer; }
+    #cases summary .why { color: var(--muted); }
+    #cases pre { font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin: 4px 0; }
+    #cases pre.diff-here { border-color: var(--err); }
+    #cases .lbl { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+    .dim { color: var(--muted); }
+  </style>
+</head>
+
+<h1>md · spec conformance</h1>
+<p class="lede">
+  Every example of CommonMark 0.31.2 and GFM 0.29 pushed through <code>md.render()</code> and compared as a
+  tree. The point is the per-section column: a whole section failing is a feature that was left out on
+  purpose, and a handful failing inside a section that mostly passes is a bug worth the read.
+</p>
+<div id="summary" class="dim">loading…</div>
+
+<h2>Sections</h2>
+<div id="sections"></div>
+
+<h2>Failing examples</h2>
+<p class="lede">
+  Click a row to open it: the input, what we emitted, what the spec emits, and the first character where the
+  two canonical serialisations part company — marked in both.
+</p>
+<div id="cases"></div>
+
+<script type="module">
+import md from '/js/md.js';
+
+const SUITES = [
+  { id: 'commonmark', label: 'CommonMark 0.31.2', url: '/testdata/md/commonmark.0.31.2.json' },
+  { id: 'gfm', label: 'GFM 0.29', url: '/testdata/md/gfm.0.29.json' },
+];
+
+// A template parses without letting any of it act: no script runs, no image is fetched, and an
+// `onerror=` attribute in the input stays an attribute. That matters — CommonMark's own examples include
+// a script tag that alerts and an iframe pointed at a javascript: URL, and a conformance page that executes
+// them has answered a question nobody asked. Neither is spelled out here in full: the closing tag of the
+// first one is the place where an inline script silently stops existing (this page was dead for ten
+// minutes for exactly that reason, and the parser says so in about as many words as "unexpected end of
+// input").
+const parse = (html) => {
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  return t.content;
+};
+
+// The scroll wrapper is ours, so it is taken back out before comparing. Unwrapping (rather than teaching
+// the comparison to ignore the tag) keeps every depth count honest: the table is still a child of the
+// same node it is a child of in the spec.
+function unwrapScrollers(frag) {
+  const found = [...frag.querySelectorAll('div.md-scroll')];
+  for (const d of found) {
+    const parent = d.parentNode;
+    while (d.firstChild) parent.insertBefore(d.firstChild, d);
+    parent.removeChild(d);
+  }
+  return found.length;
+}
+
+// The spec files are printed with a newline after every block and after the last one — `<p>a</p>\n<h1>b</h1>\n`
+// — which is a fact about how the fixture was serialised, not about what it renders. Applying this to both
+// sides before the strict comparison is what makes "identical" mean identical; without it not one of the
+// 652 CommonMark examples can match a renderer that does not print its own line breaks, and every failure
+// then has to be explained twice. What is dropped is a whitespace-only text node with at least one element
+// sibling, never inside `pre` or `code`, so the space in `a <em>b</em>` and every byte of a code block stay
+// where they are. The cost, said out loud: whitespace that is only load-bearing for CSS (a `<td>` holding a
+// single space) is invisible to this comparison.
+function dropInterBlockNewlines(frag) {
+  let n = 0;
+  const inside = (el) => ['pre', 'code'].includes(el.localName.toLowerCase());
+  const walk = (node) => {
+    for (const c of [...node.childNodes]) {
+      if (c.nodeType === 3 && !c.data.trim()) {
+        const parent = c.parentNode;
+        const hasElementSibling = [...parent.childNodes].some((x) => x.nodeType === 1);
+        // A fragment counts as a block container: top level is where most of the fixture's newlines are,
+        // and `parent.nodeType === 1` here silently spared every one of them on the first run.
+        const parentTag = parent.nodeType === 1 ? parent.localName.toLowerCase() : '';
+        if (hasElementSibling && !['pre', 'code'].includes(parentTag)) {
+          c.remove();
+          n++;
+          continue;
+        }
+      }
+      if (c.nodeType === 1 && !inside(c)) walk(c);
+    }
+  };
+  walk(frag);
+  return n;
+}
+
+// A canonical serialisation of a DOM, not of the markup. Adjacent text nodes are one token: how a parser
+// chose to split `a<!--x-->b` is not a fact about the rendering, and folding them is also what lets a
+// `<br>` be read back as the newline it replaced.
+function canon(root) {
+  const out = [];
+  let text = '';
+  const flush = () => {
+    if (text) {
+      out.push('text:' + text);
+      text = '';
+    }
+  };
+  const walk = (n) => {
+    if (n.nodeType === 3) {
+      text += n.data;
+      return;
+    }
+    flush();
+    if (n.nodeType === 8) return out.push('comment:' + n.data);
+    if (n.nodeType === 1) {
+      const tag = n.localName.toLowerCase();
+      const attrs = [...n.attributes].map((a) => ` ${a.name}="${a.value}"`).sort().join('');
+      out.push(`<${tag}${attrs}>`);
+      for (const c of n.childNodes) walk(c);
+      // The pending text must be flushed before the closing tag: text nodes are accumulated to fold adjacent
+      // ones, and without this the element's own text was emitted *after* its `</tag>`, which left the
+      // comparison blind to where text sits — and made any policy matching text near a tag unmatchable.
+      flush();
+      out.push(`</${tag}>`);
+      return;
+    }
+    for (const c of n.childNodes) walk(c); // fragments, and nothing else in practice
+  };
+  walk(root);
+  flush();
+  return out.join('');
+}
+
+// Only used to name a failure `ws`, never to decide that two renderings are the same.
+const squash = (s) => s.replace(/\s+/g, ' ').trim();
+
+// The first difference, with room around it on both sides, is the whole report: a reviewer reads one
+// window of 90 characters and knows what is missing.
+// The two windows are named `mine`/`theirs` rather than `ours`/`spec`: this object is merged onto a row
+// that already carries an `ours`, and the first time those names collided the report showed an empty
+// rendering when the renderer had in fact produced a paragraph. A harness that lies about what the code
+// emitted is worse than one that crashes, so the names are part of the contract here.
+function parting(a, b) {
+  let i = 0;
+  const n = Math.min(a.length, b.length);
+  while (i < n && a[i] === b[i]) i++;
+  const win = (s) => s.slice(Math.max(0, i - 40), i + 50);
+  const mark = (s, at) => '▏' + s.slice(at);
+  return {
+    at: i,
+    mine: mark(win(a), Math.min(40, i)),
+    theirs: mark(win(b), Math.min(40, i)),
+    sig: squash((a.slice(i, i + 18) || '∅') + ' ≠ ' + (b.slice(i, i + 18) || '∅')),
+  };
+}
+
+// Everything from here down is a layer that could cheat, so it is written as a list of choices rather than
+// as tolerance in the comparison. Each entry is a divergence that someone already made on purpose, with
+// the place the choice lives named in its own `why`. The strict comparison runs before any of it and the
+// "identical" column is only ever the strict result, so this layer cannot turn a failure into a pass — what
+// it answers is the other question: of the examples we do not match, how many are a decision and how many
+// are simply wrong?
+//
+// `side: 'theirs'` rules rewrite the spec and are the dangerous kind, since a rule can talk a real bug out
+// of existence. The one such rule below mirrors a sentence from the header of md.js (“Raw HTML in the
+// source stays visible as text on purpose”) by making the spec side say the same thing: an element this
+// renderer has no way to produce becomes the text of that element. Anything more generous belongs in a
+// count, not here.
+const CAN_EMIT = new Set(('p em strong del code pre a h1 h2 h3 h4 h5 h6 ul ol li blockquote hr br '
+  + 'table thead tbody tr th td').split(' '));
+
+const POLICY = [
+  {
+    id: 'md-scroll',
+    side: 'ours',
+    why: 'every table is wrapped in div.md-scroll so a wide one scrolls (app.css)',
+    dom: unwrapScrollers,
+  },
+  {
+    id: 'br',
+    side: 'both',
+    why: 'one line ending inside a paragraph is one break here (`<br>`, md.js flushPara) and a `<br />` plus a soft newline in the spec — the same decision spelled two ways, because this renderer does not distinguish a hard break from a soft one',
+    dom: (f) => {
+      let n = 0;
+      for (const b of [...f.querySelectorAll('br')]) {
+        // The spec spells a hard break as `<br />` and then keeps the line ending; this renderer spells every
+        // line ending as `<br>` and keeps nothing. Dropping the tag when a line ending already follows leaves
+        // exactly one line ending on both sides — and only there, so a renderer that emitted two breaks for
+        // one newline would still be caught with two newlines.
+        const next = b.nextSibling;
+        const followed = next !== null && next.nodeType === 3 && next.nodeValue.startsWith('\n');
+        b.replaceWith(document.createTextNode(followed ? '' : '\n'));
+        n++;
+      }
+      return n;
+    },
+  },
+  {
+    id: 'escaped-html',
+    side: 'theirs',
+    why: 'raw HTML stays visible as text, which is md.js\'s first documented property',
+    dom: (f) => {
+      let n = 0;
+      for (const el of [...f.querySelectorAll('*')].reverse()) {
+        if (!CAN_EMIT.has(el.localName.toLowerCase())) {
+          el.replaceWith(document.createTextNode(el.outerHTML));
+          n++;
+        }
+      }
+      return n;
+    },
+  },
+  {
+    id: 'lang-class',
+    side: 'ours',
+    why: 'the fence language is class="lang-go", not the spec\'s class="language-go"',
+    text: (s) => s.replace(/ class="lang-/g, ' class="language-'),
+  },
+  {
+    id: 'newtab',
+    side: 'ours',
+    why: 'every link carries target="_blank" rel="noopener noreferrer"',
+    text: (s) => s.replace(/ target="_blank"/g, '').replace(/ rel="noopener noreferrer"/g, ''),
+  },
+  {
+    id: 'pre-newline',
+    side: 'theirs',
+    // cmark ends code content with a newline; this renderer puts exactly the characters the author wrote
+    // between the fences inside `<code>`. Matching the spec here would buy nothing and cost a visible blank line
+    // at the bottom of every code box, because `<pre>` renders that newline. Narrow on purpose: it only removes a
+    // newline in front of `</code></pre>`, so a missing newline anywhere else in the block still fails.
+    why: 'code content carries no trailing newline (`<pre>` would render it as a blank line)',
+    text: (s) => s.replace(/\n<\/code><\/pre>/g, '</code></pre>'),
+  },
+];
+
+// All of the policies fire at once and the set that fired is reported with the example, because "which one
+// rule explained this" is a question with more than one answer and pretending otherwise would need a rule
+// ordering that means nothing.
+function applyPolicies(ours, theirs) {
+  const fired = [];
+  for (const p of POLICY) {
+    const frags = p.side === 'both' ? [ours, theirs] : [p.side === 'ours' ? ours : theirs];
+    let hit = false;
+    for (const frag of frags) if (p.dom && p.dom(frag)) hit = true;
+    if (hit) fired.push(p.id);
+  }
+  let a = canon(ours);
+  let b = canon(theirs);
+  for (const p of POLICY) {
+    if (!p.text) continue;
+    if (p.side === 'ours' || p.side === 'both') {
+      const next = p.text(a);
+      if (next !== a) {
+        a = next;
+        fired.push(p.id);
+      }
+    }
+    if (p.side === 'theirs' || p.side === 'both') {
+      const next = p.text(b);
+      if (next !== b) {
+        b = next;
+        fired.push(p.id);
+      }
+    }
+  }
+  return { a, b, fired };
+}
+
+async function runAll() {
+  const rows = [];
+  for (const suite of SUITES) {
+    const res = await fetch(suite.url);
+    if (!res.ok) throw new Error(`${suite.url}: ${res.status} — is the daemon running -testdata testdata?`);
+    const cases = await res.json();
+    // Checked once per suite, loudly. A fixture read as the wrong shape used to reach the renderer as
+    // undefined, come back as an empty string, and every example would then have "failed" plausibly.
+    if (!Array.isArray(cases) || !cases.length || typeof cases[0].markdown !== 'string' || typeof cases[0].html !== 'string') {
+      throw new Error(`${suite.url}: not an array of {markdown:string, html:string}`);
+    }
+    for (const c of cases) {
+      const row = { suite: suite.id, example: c.example, section: c.section, md: c.markdown, want: c.html };
+      let ours;
+      try {
+        ours = md.render(c.markdown);
+      } catch (err) {
+        rows.push({ ...row, status: 'threw', sig: String((err && err.message) || err), ours: '' });
+        continue;
+      }
+      const mine = parse(ours);
+      const theirs = parse(row.want);
+      // Both sides get the fixture's own printing convention taken back, once, before anything is compared.
+      dropInterBlockNewlines(mine);
+      dropInterBlockNewlines(theirs);
+      row.ours = ours;
+      const strict = canon(mine);
+      const strictWant = canon(theirs);
+      // Producing nothing for a document the fixture did render is not a difference, it is a broken renderer,
+      // so this names the example instead of scoring it as a diff — and then carries on, because the other 679
+      // still want reading and an aborted run shows none of them. The reverse is the spec being exact: a
+      // document that is nothing but a link reference definition renders to nothing at all.
+      if (!strict && strictWant) {
+        row.status = 'threw';
+        row.sig = 'empty output where the fixture rendered something';
+        rows.push(row);
+        continue;
+      }
+      if (strict === strictWant) {
+        row.status = 'ok';
+        rows.push(row);
+        continue;
+      }
+      // The fragments have not been touched yet, so the strict comparison above is the one that just ran;
+      // from here on they are rewritten by the policy layer and cannot be re-read.
+      const { a, b, fired } = applyPolicies(mine, theirs);
+      row.policy = fired;
+      if (a === b) row.status = 'policy';
+      else if (squash(a) === squash(b)) row.status = 'ws';
+      else {
+        row.status = 'diff';
+        Object.assign(row, parting(a, b));
+      }
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+// Sections where a failure is a decision that was written down somewhere else, not a defect. They stay in
+// every count — a report that subtracts them is how a known gap becomes invisible.
+const DECISIONS = [/^Raw HTML$/i];
+const isDecision = (section) => DECISIONS.some((re) => re.test(section));
+
+function tally(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    const key = `${r.suite} / ${r.section}`;
+    const s = by.get(key) || { key, suite: r.suite, section: r.section, ok: 0, policy: 0, ws: 0, diff: 0, threw: 0, sigs: new Map() };
+    s[r.status]++;
+    if (r.sig) s.sigs.set(r.sig, (s.sigs.get(r.sig) || 0) + 1);
+    if (r.policy) for (const p of r.policy) s[p] = (s[p] || 0) + 1;
+    by.set(key, s);
+  }
+  return [...by.values()].map((s) => {
+    const sigs = [...s.sigs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+    delete s.sigs;
+    return { ...s, bad: s.diff + s.threw, top: sigs.map(([sig, n]) => ({ sig, n })) };
+  });
+}
+
+// Which policies fired, and how often: the page has to be able to say “most of this section is the newline
+// decision”, and the reader then argues with the decision instead of the count.
+const policyTotals = (rows) => {
+  const t = new Map();
+  for (const r of rows) for (const p of r.policy || []) t.set(p, (t.get(p) || 0) + 1);
+  return POLICY.filter((p) => t.has(p.id)).map((p) => `${t.get(p.id)}× ${p.id} (${p.why})`).join('<br />');
+};
+
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const el = (html) => {
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  return t.content.firstChild;
+};
+
+function drawSections(summary, rows) {
+  const total = rows.length;
+  const bad = rows.filter((r) => r.status === 'diff' || r.status === 'threw').length;
+  const ws = rows.filter((r) => r.status === 'ws').length;
+  const explained = rows.filter((r) => r.status === 'policy').length;
+  const bySuite = SUITES.map((s) => {
+    const r = rows.filter((x) => x.suite === s.id);
+    return `${s.label}: ${r.length} examples, ${r.filter((x) => x.status === 'ok').length} identical as trees`;
+  });
+  document.getElementById('summary').innerHTML =
+    `${total} examples · <b>${bad}</b> still differ once the documented choices below are granted · ` +
+    `<span class="dim">${explained} explained by a choice, ${ws} differ only in whitespace</span><br />` +
+    esc(bySuite.join(' · ')) +
+    `<br /><span class="dim">${esc(policyTotals(rows))}</span>`;
+
+  const head = `<tr><th>suite / section</th><th>ex</th><th>ok</th><th>choice</th><th>ws</th><th>diff</th><th>threw</th><th style="text-align:left">most common parting</th></tr>`;
+  const body = summary
+    .slice()
+    .sort((a, b) => b.bad - a.bad || a.key.localeCompare(b.key))
+    .map((s) => {
+      const known = isDecision(s.section);
+      return `<tr class="${s.ok === 0 && s.bad > 0 ? 'allbad' : ''}">
+        <td class="${known ? 'known' : ''}">${esc(s.key)}${known ? ' <span class="dim">— by design</span>' : ''}</td>
+        <td class="num">${s.ok + s.policy + s.ws + s.diff + s.threw}</td>
+        <td class="num ${s.ok ? '' : 'zero'}">${s.ok}</td>
+        <td class="num ${s.policy ? '' : 'zero'}">${s.policy}</td>
+        <td class="num ${s.ws ? '' : 'zero'}">${s.ws}</td>
+        <td class="num diff ${s.diff ? '' : 'zero'}">${s.diff}</td>
+        <td class="num ${s.threw ? '' : 'zero'}">${s.threw}</td>
+        <td class="dim" style="text-align:left">${s.top.map((t) => `${t.n}× ${esc(t.sig)}`).join('<br />') || ''}</td>
+      </tr>`;
+    })
+    .join('');
+  document.getElementById('sections').innerHTML = `<table>${head}${body}</table>`;
+}
+
+// A failure you cannot read is a failure you will not fix, and a page that prints all 676 of them in
+// full is a page that stops being responsive. The parting windows are short and always shown; the whole
+// renderings are cut at 1200 characters and say so.
+const clip = (s, n = 1200) => (s.length > n ? `${s.slice(0, n)}\n… ${s.length - n} more characters` : s);
+
+function drawCases(rows) {
+  const box = document.getElementById('cases');
+  box.innerHTML = '';
+  for (const r of rows.filter((x) => x.status === 'diff' || x.status === 'threw')) {
+    const details = el(`<section><details>
+        <summary>#${r.example} <span class="dim">${esc(r.suite)}</span> ${esc(r.section)} —
+          <span class="why">${esc((r.sig || '').slice(0, 90))}</span></summary>
+        <p class="lbl">markdown</p><pre>${esc(r.md)}</pre>
+        <p class="lbl">ours at the parting</p><pre class="diff-here">${esc(r.mine || '')}</pre>
+        <p class="lbl">spec at the parting</p><pre class="diff-here">${esc(r.theirs || '')}</pre>
+        ${r.policy && r.policy.length ? `<p class="lbl">choices already granted</p><pre>${esc(r.policy.join(', '))}</pre>` : ''}
+        <p class="lbl">ours, in full</p><pre>${esc(clip(r.ours || '(nothing)'))}</pre>
+        <p class="lbl">spec, in full</p><pre>${esc(clip(r.want))}</pre>
+      </details></section>`);
+    box.appendChild(details);
+  }
+}
+
+async function rerun() {
+  const rows = await runAll();
+  const summary = tally(rows);
+  window.__mdSpec.rows = rows;
+  window.__mdSpec.summary = summary;
+  drawSections(summary, rows);
+  drawCases(rows);
+  return summary;
+}
+
+window.__mdSpec = {
+  rerun,
+  summary: null,
+  rows: null,
+  // fail('Tables') or fail(/Emphasis/): the examples that are left after the policy layer — the to-do
+  // list, objects first and foremost, because a number you can only look at is a number you cannot diff
+  // against last week.
+  fail(which) {
+    const re = which instanceof RegExp ? which : new RegExp(String(which), 'i');
+    const rows = (this.rows || []).filter((r) => (r.status === 'diff' || r.status === 'threw') && re.test(`${r.suite} / ${r.section}`));
+    return rows.map(({ md, want, ...rest }) => ({ md, want, ...rest }));
+  },
+  show(example) {
+    const d = [...document.querySelectorAll('#cases details')].find((n) => n.querySelector('summary').textContent.startsWith(`#${example} `));
+    if (!d) return false;
+    d.open = true;
+    d.scrollIntoView({ block: 'center' });
+    return true;
+  },
+};
+
+rerun().catch((err) => {
+  document.getElementById('summary').innerHTML = `<span style="color:var(--err)">${esc(String(err && err.message ? err.message : err))}</span>`;
+});
+</script>

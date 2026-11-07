@@ -42,6 +42,14 @@
 <link rel="stylesheet" href="/app.css" />
 <style>
   body { padding: 18px 20px 40px; }
+  /* app.css brings `body { overflow: hidden }` (right for the app: `#log` is its only scroller), and a body's
+     overflow propagates to the viewport — which left this page unreadable below the fold, since a reader cannot
+     scroll a page that only answers `scrollTop = …`. The measurement is unaffected either way: `#stage` is
+     `position: fixed` at a fixed 720px and `#stage.live` is its own scroller with `overscroll-behavior: contain`,
+     so the document cannot be handed the follow. `scroll`, not `auto`: the gutter is reserved before the report
+     grows, so the layout width is the same at the start of a run as at the end. */
+  body { overflow: visible; }
+  html { overflow-y: scroll; }
   h1 { font-size: 15px; margin: 0 0 4px; }
   h2 { font-size: 13px; margin: 22px 0 6px; }
   p.lede { color: var(--muted); font-size: 12px; margin: 0 0 14px; max-width: 88ch; }
@@ -182,13 +190,26 @@ function frames() {
   return { stop: () => ((alive = false), max), reset: () => (last = 0) };
 }
 
-// The five rows. `hz: 1000` is scheduler.js's documented way of opening the gate all the way.
+// The six rows. `hz: 1000` is scheduler.js's documented way of opening the gate all the way.
+//
+// `rawline` measures a different *strategy*, not a different ceiling: the line still being typed is painted as
+// text and only the completed lines are rendered (transcript.js). Expected before running: less parsed text,
+// because a frame's worth of new characters cannot cost a parse of the whole open tail. Measured, by shape:
+//   line-dense (the sample above, mean line 38 chars) — a wash: 47.6 KB parsed against tail's 52.9, same wall.
+//   realistic doc (markdown-debug.md, mean 62)         — 26.0 KB against 32.7, 44 live repaints against 63.
+//   LLM-shaped prose (mean line 286)                   — 28.5 KB against 69.3, 20.9 ms against 31, and 4 live
+//       repaints against 150: a paragraph is swallowed by the frozen zone at its own blank line, so `live` is
+//       left holding one text node that only ever grows.
+// So the win grows with line length, which is the direction real model output goes. It does not follow: tail's
+// 150 repaints of a 14.6 KB reply cost 31 ms in total, and `rawline` pays for them by drawing a list item
+// without its bullet and a table row outside its table while they are being typed (asserted above).
 const RUNS = [
   { id: 'full', mode: 'full', hz: 1000, name: 'full, no gate (pre-T1)' },
   { id: 'full20', mode: 'full', hz: 20, name: 'full + gate 20Hz' },
   { id: 'tail', mode: 'tail', hz: 1000, name: 'tail, no gate' },
   { id: 'tail20', mode: 'tail', hz: 20, name: 'tail + gate 20Hz (default)' },
   { id: 'plain', mode: 'plain', hz: 20, name: 'plain text, render at done' },
+  { id: 'rawline', mode: 'rawline', hz: 20, name: 'raw line, render on newline (20Hz)' },
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -308,6 +329,11 @@ function boundaryHolds(full, step = 11) {
     const cut = md.lastSafeBoundary(prefix);
     if (cut <= 0) continue;
     const frozenHtml = md.render(prefix.slice(0, cut));
+    // “Frozen HTML stays a prefix of the finished document” is the whole contract, and deliberately nothing
+    // stronger: the tail after the cut is unfinished text, so its own render is expected to change as it grows —
+    // comparing it against the finished tail would fail on every partial reply, including a correct one. What
+    // the mask inside `lastSafeBoundary` buys is that this stays true now that a list is one container: without
+    // it, `- a` would freeze as `<ul><li>a</li></ul>` a moment before the list turned loose and grew a `<p>`.
     if (!md.render(full).startsWith(frozenHtml)) {
       return { ok: false, at: i, cut, why: prefix.slice(Math.max(0, cut - 60), cut + 60) };
     }
@@ -336,10 +362,12 @@ const BOUNDARY_CASES = [
   ['no blank line yet', 'a\nb\nc'],
   ['ends without newline', 'para one\n\npara two\n\nlast line with no newline'],
   ['quote then blank then quote', '> q1\n\n> q2'],
+  ['quote with two paragraphs and a list', '> a\n\n> b\n\n- item\n\npara'],
   ['crlf line endings', 'first para\r\n\r\nsecond para\r\n\r\nthird'],
   ['fence then table', '```\n| a | b |\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nend'],
   ['heading then paragraph', '# h\n\ntext\n\n## h2\n\nmore'],
   ['nested list', '- a\n  - b\n\n  - c\n\n- d'],
+  ['loose list items', '- a\n\n- b\n\n- c\n\npara'],
 ];
 
 // GROWTH_CASES are (what has arrived, what the finished reply turns out to be). The frozen head of the
@@ -350,8 +378,18 @@ const GROWTH_CASES = [
   ['paragraph continues after a newline', 'first para\n\nhello world\n', 'first para\n\nhello world and more words\n\nsecond'],
   ['fence keeps going', 'intro\n\n```\ncode\n', 'intro\n\n```\ncode\nmore code\n```\n\nafter'],
   ['list keeps going', 'intro\n\n- one\n', 'intro\n\n- one\n- two\n\nafter'],
+  // The case that made the list mask necessary: once a list is one container, freezing after `- one` would
+  // freeze `<ul><li>one</li></ul>` — and a loose list would have rewritten that item with a `<p>` around it.
+  ['a second item makes the list loose', 'intro\n\n- one\n', 'intro\n\n- one\n\n- two\n\nafter'],
   ['bold closes later', 'intro\n\ntext **bold\n', 'intro\n\ntext **bold** tail\n\nafter'],
   ['quote keeps going', 'intro\n\n> quoted\n', 'intro\n\n> quoted\n> more quote\n\nafter'],
+  // The blank-line form of the same promise: `> quoted` alone would freeze a closed `</blockquote>`, and the
+  // finished reply holds one quote with two paragraphs inside it.
+  ['a quote gains a second paragraph', 'intro\n\n> quoted\n', 'intro\n\n> quoted\n\n> more quote\n\nafter'],
+  // A definition behind the boundary is resolved by the frozen part alone, which is what keeps a link that a
+  // reader has already seen from changing into something else as the reply goes on.
+  ['definition behind the cut', 'intro\n\n[foo]: /u "t"\n\nsee [foo]\n', 'intro\n\n[foo]: /u "t"\n\nsee [foo]\nmore text\n'],
+  ['a bare label with no definition stays text', 'intro\n\nI said [sic] once\n', 'intro\n\nI said [sic] once\nand meant it\n'],
 ];
 
 window.__boundaryTests = () => {
@@ -379,6 +417,127 @@ window.__boundaryTests = () => {
   // `render` would have removed, is still part of the line, so the answer is 5 and not 4.
   const crlf = md.lastSafeBoundary('a\r\n\r\nb') === 5;
   out.push({ name: 'crlf index is into the string it was given', ok: crlf, cut: md.lastSafeBoundary('a\r\n\r\nb'), src: 7 });
+
+  // Two shapes the flat list branch used to get wrong, pinned so they cannot come back: a list whose items are
+  // separated by blank lines is ONE list holding paragraphs, and a nested list is a child of the `<li>`.
+  const looseHtml = md.render('- a\n\n- b\n');
+  out.push({ name: 'a loose list is one list with paragraphs, not two lists', ok: looseHtml === '<ul><li><p>a</p></li><li><p>b</p></li></ul>', cut: 0, src: 9 });
+  const nestHtml = md.render('- one\n  - nested\n- two\n');
+  out.push({ name: 'a nested list belongs inside its <li>, not beside it', ok: /<\/ul><\/li>/.test(nestHtml) && !/<\/li><ul>/.test(nestHtml), cut: 0, src: 24 });
+
+  // A link reference definition is consumed out of the document, and the set remembering which lines that ate
+  // indexes the *document's* lines — so it must never be consulted with a list item's line numbers. When it
+  // was, the fourth line of a list item vanished from the reply: text the reader never got back.
+  const longItem = md.render('para\n\n[foo]: /u\n\n- a\nb\nc\nd');
+  out.push({ name: 'a definition cannot eat the lines of a list item', ok: longItem.includes('a<br>b<br>c<br>d'), cut: 0, src: 26 });
+  // A quote is a container, which is the only reason these two shapes exist at all: it used to be one
+  // paragraph of inline text, so a heading, a list or a fence inside `>` arrived as words.
+  const quoteHtml = md.render('> ## Title\n> - item\n> - two\n');
+  out.push({ name: 'a quote holds blocks, not one paragraph of text', ok: quoteHtml === '<blockquote><h2>Title</h2>\n<ul><li>item</li><li>two</li></ul></blockquote>', cut: 0, src: 24 });
+
+  // Character references are decoded in text after the syntax has been decided, never inside a code span, and
+  // always re-escaped — which is the whole safety of the feature: `&lt;script&gt;` has to stay a string about a
+  // tag, and a character the author spelled `&#42;` must not start emphasis they did not ask for.
+  const entHtml = md.render("a &#39;b&#39; &amp; &copy; &#128512; &mdash; &eacute; &Euml;");
+  out.push({ name: 'a character reference arrives as the character it names', ok: entHtml === "<p>a 'b' &amp; © \ud83d\ude00 — é Ë</p>", cut: 0 });
+  out.push({ name: 'a decoded character never takes part in the syntax', ok: md.render('&#42;foo&#42;') === '<p>*foo*</p>' && md.render('`&amp;`') === '<p><code>&amp;amp;</code></p>', cut: 0 });
+  out.push({ name: 'an unknown name stays text, an impossible number is the replacement character', ok: md.render('&notanentity; &copy') === '<p>&amp;notanentity; &amp;copy</p>' && md.render('&#0; &#xD800;') === '<p>\ufffd \ufffd</p>', cut: 0 });
+  // The two link shapes are how an entity-encoded scheme would have to arrive: `[x](&#106;avascript:…)`. What
+  // decides safety is not the characters in the markup but the URL the browser ends up with after it has decoded
+  // the attribute once, so that is what is asserted here — resolving each emitted `href` and reading its
+  // protocol. The legitimate link in the same list is the reason the assertion cannot pass by dropping links.
+  const hrefProtocols = (src) => {
+    const box = document.createElement('div');
+    box.innerHTML = md.render(src);
+    return [...box.querySelectorAll('a')].map((a) => {
+      try {
+        return new URL(a.getAttribute('href') || '', 'http://x.invalid/').protocol;
+      } catch {
+        return 'invalid';
+      }
+    });
+  };
+  const allowed = (list) => list.every((p) => p === 'http:' || p === 'https:' || p === 'mailto:');
+  out.push({
+    name: 'no reference or escape turns a link into another protocol',
+    ok: allowed(hrefProtocols('[c](&#106;avascript:alert(1))')) && allowed(hrefProtocols('[c](javascript&colon;alert(1))')) &&
+      allowed(hrefProtocols('[c](&#0000106;avascript:alert(1))')) && !/<script[\s>]/.test(md.render('&lt;script&gt;x&lt;/script&gt;')) &&
+      JSON.stringify(hrefProtocols('[c](https://e.com/?a=1&amp;b=2)')) === '["https:"]',
+    cut: 0,
+  });
+
+  // Where an item ends is a fact about the document, not a guess: after a blank line a line that is not indented
+  // to the item's content column belongs to the document, a thematic break under a bullet is a break, and a
+  // marker shallower than the content column cannot be a nested list's item.
+  out.push({ name: 'a paragraph after a bullet is not part of the bullet', ok: md.render('- one\n\n two\n') === '<ul><li>one</li></ul>\n<p>two</p>', cut: 0 });
+  out.push({ name: 'a break written under a bullet breaks the list instead of joining it', ok: md.render('- foo\n***\n- bar\n') === '<ul><li>foo</li></ul>\n<hr>\n<ul><li>bar</li></ul>', cut: 0 });
+  out.push({ name: 'a marker indented inside the content column is the same list', ok: md.render('- a\n - b\n- c\n') === '<ul><li>a</li><li>b</li><li>c</li></ul>', cut: 0 });
+  // An info string is a language and a hint, not a thing that has to look like a language: refusing to open the
+  // fence on `py {line-numbers=3}` turned the whole code block into a paragraph of prose, in a reply whose entire
+  // point was that code block.
+  out.push({ name: 'an info string opens the fence it is written on', ok: md.render('```py {line-numbers=3}\ncode\n```\n') === '<pre><code class="lang-py">code</code></pre>', cut: 0 });
+  out.push({ name: 'a line with an info string is not a closing fence', ok: md.render('```\naaa\n``` aaa\n') === '<pre><code>aaa\n``` aaa\n</code></pre>', cut: 0 });
+  out.push({ name: 'a heading keeps no closing hashes', ok: md.render('## foo ##\n###   bar    ###\n') === '<h2>foo</h2>\n<h3>bar</h3>', cut: 0 });
+  out.push({ name: 'a heading may be indented up to three spaces', ok: md.render(' ### foo\n  ## foo\n   # foo\n') === '<h3>foo</h3>\n<h2>foo</h2>\n<h1>foo</h1>', cut: 0 });
+  // A task marker is a fact about the item. The box says it without a control that nobody reading a finished
+  // message could operate, and without an `<input>` in a transcript that a stylesheet then has to silence.
+  out.push({ name: 'a task marker is a box, not an input', ok: md.render('- [ ] a\n- [x] b\n') === '<ul><li>☐ a</li><li>☑ b</li></ul>', cut: 0 });
+
+  // A definition is read out of the document, so it must leave nothing behind — not even when it is all there is.
+  out.push({ name: 'a document that is only a definition renders nothing', ok: md.render('[foo]: /u') === '', cut: 0, src: 11 });
+  // ...and a label nobody defined is not a link: prose saying `[sic]` cannot be turned into one by this feature.
+  out.push({ name: 'an undefined label is inert', ok: md.render('I said [sic]') === '<p>I said [sic]</p>', cut: 0, src: 13 });
+  // The documented exception to "a frozen prefix never changes": a shortcut reference may be resolved by a
+  // definition *below* it, so the prefix that froze without the link is allowed to differ from the final
+  // render. That is safe for one reason only — the frame at the end of a stream renders the whole reply once
+  // (`finish` in transcript.js) — and if that ever stops being true, this is the line that says so.
+  const forward = 'see [foo]\n\n[foo]: /u\n';
+  const forwardCut = md.lastSafeBoundary(forward);
+  const forwardMoves = md.render(forward) !== md.render(forward.slice(0, forwardCut)) + md.render(forward.slice(forwardCut));
+  out.push({ name: 'a definition below the cut may resolve later (by design)', ok: forwardCut === 11 && forwardMoves && md.render(forward).includes('<a href="/u"'), cut: forwardCut, src: forward.length });
+
+  // `rawline` mode (transcript.js) paints the line still being typed as text and the lines behind it as
+  // markdown, so what it promises is about *where a partial line lands*. Three of those promises, because each
+  // one is a different way a later change could break it silently: a fence line must stay inside the code
+  // element, an open prose line must be one text node under rendered lines, and `finish` must sweep the text
+  // node away. The visual cost the mode pays — a list item without its bullet while it is typed — is recorded
+  // in the row's `why` so it cannot be mistaken for a bug when someone looks at this in six months.
+  let scratch = q('#drawerscratch');
+  if (!scratch) {
+    scratch = document.createElement('div');
+    scratch.id = 'drawerscratch';
+    document.body.appendChild(scratch);
+  }
+  scratch.innerHTML = '';
+  const probe = (src) => {
+    const host = document.createElement('div');
+    scratch.appendChild(host);
+    let acc = '';
+    const d = makeStreamDrawer(host, () => acc, { mode: 'rawline', hz: 20 });
+    acc = src;
+    d.mark();
+    d.gate.flush();
+    return d;
+  };
+  const fence = probe('intro\n\n```go\nfunc main() {\n\tfmt.Print');
+  out.push({
+    name: 'rawline: a line being typed inside a fence stays inside the code element',
+    ok: /<code[^>]*>[\s\S]*fmt\.Print<\/code>/.test(fence.live.innerHTML) && fence.rawNode.nodeValue === '',
+    cut: 0, at: null, src: 34, why: fence.live.innerHTML.slice(0, 160),
+  });
+  const prose = probe('para one line\npara two l');
+  out.push({
+    name: 'rawline: completed lines are markdown and the open line is one text node',
+    ok: prose.live.innerHTML.startsWith('<p>para one line</p>') && prose.rawNode.nodeValue === 'para two l' && prose.live.lastChild === prose.rawNode,
+    cut: 0, at: null, src: 25, why: prose.live.innerHTML.slice(0, 160),
+  });
+  const ended = probe('- one\n- two\n');
+  ended.finish();
+  out.push({
+    name: 'rawline: finish sweeps the text node away and leaves one clean render',
+    ok: ended.rawNode === null && ended.live.innerHTML === '' && ended.frozen.innerHTML.includes('<li>two</li>'),
+    cut: 0, at: null, src: 12, why: ended.frozen.innerHTML.slice(0, 160),
+  });
 
   const fails = out.filter((t) => !t.ok);
   q('#tests').innerHTML = out

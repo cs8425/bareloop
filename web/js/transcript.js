@@ -596,7 +596,7 @@ export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz
   const live = el('div', 'md live');
   host.append(frozen, live);
   if (mode === 'plain') host.classList.add('plain'); // text mode wants its newlines back (see app.css)
-  const d = { mode, host, frozen, live, frozenLen: 0, draws: 0, parsed: 0 };
+  const d = { mode, host, frozen, live, frozenLen: 0, draws: 0, parsed: 0, rawNode: null, liveLen: -1 };
   d.paint = () => {
     const text = getText();
     d.draws++;
@@ -604,9 +604,44 @@ export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz
       d.live.textContent = text; // one text node per frame: no parse, no subtree rebuild
       return;
     }
-    if (mode !== 'tail') {
+    // `full` and `pre-T1` behaviour: everything, every time. `tail` and `rawline` below share the frozen/live
+    // split and differ only in what they do with the still-open tail.
+    if (mode !== 'tail' && mode !== 'rawline') {
       d.parsed += text.length;
       md.renderTo(d.frozen, text); // everything, every time; `live` stays empty by design
+      return;
+    }
+    if (mode === 'rawline') {
+      // The line a reader is watching is not a markdown block yet, so it is painted as text: no rule can
+      // render half a construct, and the frame costs one text write instead of a parse. When a newline lands
+      // the lines behind it are rendered for real — and they are rendered *together*, because a line is not a
+      // unit of meaning in markdown: a table needs its separator line, a shortcut reference needs its
+      // definition further down, a bold can close on the next line. So the rendered part of `live` is the
+      // text up to the last newline, and the thing still being typed hangs off the end as a text node.
+      const cut = md.lastSafeBoundary(text);
+      if (cut > d.frozenLen) {
+        d.parsed += cut - d.frozenLen;
+        md.renderTo(d.frozen, text.slice(0, cut));
+        d.frozenLen = cut;
+      }
+      const tail = text.slice(d.frozenLen);
+      const hold = tail.lastIndexOf('\n') + 1;
+      // Inside an unclosed fence there is no half-finished construct to protect against — everything between
+      // the ticks is literal — while holding a line back would drop the line being typed out of the code box
+      // and show it as page text. So an open fence renders whole: odd number of fence markers in the tail.
+      const inFence = ((tail.match(/^[ \t]*(?:```|~~~)/gm) || []).length & 1) === 1;
+      const done = inFence ? tail.length : hold;
+      if (done !== d.liveLen) {
+        d.parsed += done;
+        d.liveLen = done;
+        md.renderTo(d.live, tail.slice(0, done)); // wipes `live`, which is why the text node goes back every time
+      }
+      if (d.rawNode === null || d.live.lastChild !== d.rawNode) {
+        if (d.rawNode === null) d.rawNode = document.createTextNode('');
+        d.live.appendChild(d.rawNode);
+      }
+      const raw = tail.slice(done);
+      if (d.rawNode.nodeValue !== raw) d.rawNode.nodeValue = raw; // grown in place: no subtree, no reflow of the rest
       return;
     }
     // `frozen` only ever grows, and only up to a boundary that a blank line guarantees no construct is
@@ -645,6 +680,7 @@ export function makeStreamDrawer(host, getText, { mode = resolveStreamMode(), hz
     d.parsed += text.length;
     md.renderTo(d.frozen, text);
     d.live.innerHTML = '';
+    d.rawNode = null; // it lived inside `live`, and `live` has just been emptied
     d.frozenLen = text.length;
   };
   // repaint is what a tab becoming visible asks for: the gate drew nothing while it was hidden.
