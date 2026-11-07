@@ -6,11 +6,15 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/dict"
+	"github.com/klauspost/compress/zstd"
 
 	"bareloop/internal/ir"
 )
@@ -578,4 +582,206 @@ func TestCorpusScan(t *testing.T) {
 	}
 	t.Logf("BLSTORE %s: %d entries, stored %d bytes over %d of text, one scan of everything in %v",
 		root, totalEntries, totalStored, totalText, time.Since(t0).Round(time.Millisecond))
+}
+
+// TestCorpusDict asks the per-session dictionary question in corpus bytes: for each
+// store, zstd without a dictionary vs zstd with a dictionary trained from that store's
+// own payloads vs zstd with one global dictionary trained from a bounded sample of
+// every store. The dictionary's bytes are part of the bill — one that earns back less
+// than it costs is not a win — so local columns report both with and without it. The
+// break-even threshold is meant to be read off these numbers, not guessed above them.
+func TestCorpusDict(t *testing.T) {
+	root := os.Getenv("BLSTORE")
+	if root == "" {
+		t.Skip("set BLSTORE to the uncompressed data directory to price per-session dictionaries")
+	}
+	// A dictionary is tailored to the level it was built for; this is the production one.
+	const level = zstd.SpeedBetterCompression
+
+	type storeData struct {
+		name  string
+		texts [][]byte
+	}
+	var stores []storeData
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	for _, de := range dirs {
+		dir := filepath.Join(root, de.Name())
+		if _, err := os.Stat(filepath.Join(dir, DBFileName)); err != nil {
+			continue
+		}
+		l := openAt(t, dir)
+		rows, err := l.db.Query("SELECT payload FROM entry ORDER BY seq")
+		if err != nil {
+			l.Close()
+			t.Fatalf("%s: %v", de.Name(), err)
+		}
+		var s storeData
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				break
+			}
+			s.texts = append(s.texts, []byte(payloadText(p)))
+		}
+		rows.Close()
+		l.Close()
+		s.name = de.Name()
+		stores = append(stores, s)
+	}
+	if len(stores) == 0 {
+		t.Fatalf("no stores under %s", root)
+	}
+
+	// The honest global: a per-store dictionary trained WITHOUT that store — what a
+	// stranger's corpus gets from a dictionary shipped in the binary. (The in-sample
+	// global, for reference, scored 5,777,506; heldout minus that is the outsider tax.)
+	// Dictionary cost is not billed per store here: one seed book per released binary.
+	opts := dict.Options{MaxDictSize: 32 << 10, HashBytes: 6, ZstdLevel: level}
+
+	noDict, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer noDict.Close()
+
+	var totalText, totalNo, totalLocal, totalHeld int64
+	for _, s := range stores {
+		var nd, lc, hc int64
+		for _, p := range s.texts {
+			nd += int64(len(noDict.EncodeAll(p, nil)))
+			totalText += int64(len(p))
+		}
+		var hsample [][]byte
+		for _, o := range stores {
+			if o.name == s.name {
+				continue
+			}
+			sum := 0
+			for _, p := range o.texts {
+				if sum >= 128<<10 {
+					break
+				}
+				if len(p) > 2<<10 {
+					p = p[:2<<10]
+				}
+				hsample = append(hsample, p)
+				sum += len(p)
+			}
+		}
+		hd, err := dict.BuildZstdDict(hsample, opts)
+		if err != nil {
+			t.Fatalf("heldout dict for %s: %v", s.name, err)
+		}
+		henc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level), zstd.WithEncoderDict(hd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range s.texts {
+			hc += int64(len(henc.EncodeAll(p, nil)))
+		}
+		henc.Close()
+		// The trainer wants pre-truncated samples; beyond ~32KB the tail of a sample
+		// adds nothing it could not already match on.
+		samples := make([][]byte, len(s.texts))
+		for j, p := range s.texts {
+			if len(p) > 32<<10 {
+				p = p[:32<<10]
+			}
+			samples[j] = p
+		}
+		dT0 := time.Now()
+		d, derr := dict.BuildZstdDict(samples, opts)
+		trainMS := time.Since(dT0).Milliseconds()
+		if derr != nil {
+			// too little content to train on is the threshold speaking, not a failure
+			totalLocal += nd
+			totalNo += nd
+			totalHeld += hc
+			t.Logf("%-22s text=%7d nodict=%7d local=n/a(%v,%dms) heldout=%7d", s.name, totalTextOf(s.texts), nd, derr, trainMS, hc)
+			continue
+		}
+		le, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level), zstd.WithEncoderDict(d))
+		if err != nil {
+			t.Fatalf("%s: dict encoder: %v", s.name, err)
+		}
+		for _, p := range s.texts {
+			lc += int64(len(le.EncodeAll(p, nil)))
+		}
+		le.Close()
+		totalNo += nd
+		totalLocal += lc + int64(len(d)) // the dictionary lives on disk too
+		totalHeld += hc
+		t.Logf("%-22s text=%7d nodict=%7d local+dict=%6d(train %dms) heldout=%7d",
+			s.name, totalTextOf(s.texts), nd, lc+int64(len(d)), trainMS, hc)
+	}
+	t.Logf("TOTAL text=%d | nodict=%d | local(incl dicts)=%d | heldout=%d | gzip reference=6635884 (in-sample global was 5777506)",
+		totalText, totalNo, totalLocal, totalHeld)
+}
+
+func totalTextOf(texts [][]byte) int64 {
+	var n int64
+	for _, p := range texts {
+		n += int64(len(p))
+	}
+	return n
+}
+
+// TestZstdDictionaryRoundTrip writes with a trained dictionary installed: the row must
+// come back as a zstd frame stamped by that book, PayloadText must open it while the
+// pool holds the book, and must fail loudly — raw bytes, not invented text — once the
+// book is gone. A dictionary is data: this is that sentence tested.
+func TestZstdDictionaryRoundTrip(t *testing.T) {
+	// A book of the kind the seed will be: trained on the payload's own shape.
+	var samples [][]byte
+	for i := 0; i < 200; i++ {
+		samples = append(samples, []byte(fmt.Sprintf(`{"schema":1,"id":"%07d","kind":"user","parts":[{"type":"text","text":"dictionary round trip sample %d, padded with common words to train against"}]}`, i, i)))
+	}
+	d, err := dict.BuildZstdDict(samples, dict.Options{MaxDictSize: 4 << 10, HashBytes: 6, ZstdLevel: ZstdLevel})
+	if err != nil {
+		t.Fatalf("train: %v", err)
+	}
+	if err := SetZdict(d); err != nil {
+		t.Fatalf("SetZdict: %v", err)
+	}
+	defer SetZdict(nil)
+
+	old := Compressor
+	Compressor = "zstd"
+	defer func() { Compressor = old }()
+
+	l := openAt(t, t.TempDir())
+	defer l.Close()
+	text := strings.Repeat("dictionary round trip payload with the shipped book. ", 30) // over the floor
+	e := &ir.Entry{Kind: ir.KindUser, Parts: []ir.Part{{Type: ir.PartText, Text: text}}}
+	if err := l.AppendEntry(e, true); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", e.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) < 4 || raw[0] != 0x28 || raw[1] != 0xb5 || raw[2] != 0x2f || raw[3] != 0xfd {
+		t.Fatalf("payload is not a zstd frame: %.40q", raw)
+	}
+	if got := PayloadText(raw); !strings.Contains(got, "shipped book") {
+		t.Errorf("PayloadText with the book: %.80q", got)
+	}
+	SetZdict(nil)
+	if got := PayloadText(raw); got != raw {
+		t.Errorf("a reader without the book invented text: %.80q", got)
+	}
+}
+
+// TestSetZdictRejectsNonDictionary: the book is validated before it is installed, so
+// -zdict pointing at anything else is a startup death, not a store that cannot open.
+func TestSetZdictRejectsNonDictionary(t *testing.T) {
+	if err := SetZdict([]byte("this is not a zstd dictionary")); err == nil {
+		t.Fatal("SetZdict accepted a non-dictionary")
+	}
+	if err := SetZdict(nil); err != nil {
+		t.Fatalf("clearing: %v", err)
+	}
 }

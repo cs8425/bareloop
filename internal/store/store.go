@@ -318,24 +318,106 @@ var gzWriters = sync.Pool{New: func() any {
 
 var gzReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 
-// The zstd pair is built once, lazily, and then shared: EncodeAll/DecodeAll are safe
-// for concurrent use on one instance, and a gzip-default process must never pay either
-// one's buffers. The encoder window is this codec's real RAM note — tens of megabytes,
+// The zstd pair is built lazily and shared, keyed by a fingerprint of the dictionary
+// pool (see SetZdict): swapping a dictionary mid-process costs one fresh pair, never a
+// silent misread of frames stamped by the old one. EncodeAll/DecodeAll are safe for
+// concurrent use on one instance, and a gzip-default process never pays either one's
+// buffers. The encoder window is this codec's real RAM note — tens of megabytes,
 // spent only by a process that chose zstd, which is why the import is lazy.
+type zstdPairVal struct {
+	enc *zstd.Encoder
+	dec *zstd.Decoder
+}
+
 var (
-	zstdOnce sync.Once
-	zstdEnc  *zstd.Encoder
-	zstdDec  *zstd.Decoder
+	zstdMu    sync.Mutex
+	zstdPairs = map[string]zstdPairVal{}
+
+	// userDict is the operator's own trained dictionary (CLI -zdict); seedDict is the
+	// shipped one (seeddict.go). A dictionary is data, not configuration: frames it
+	// stamped stay readable only while the book is kept, which is what the pool and
+	// frame dict_ids are for.
+	userDict []byte
+	userTag  = "-"
+	seedTag  = "-"
+	seedOnce sync.Once
 )
 
+// ZstdLevel is the one level the store writes with and the level dictionaries must
+// be trained for — the trainer tailors a dictionary to its level, so the two live
+// behind one constant on purpose.
+const ZstdLevel = zstd.SpeedBetterCompression
+
+// SetZdict installs the operator's zstd dictionary (nil or empty clears it, leaving
+// the seed). The bytes are validated here so a wrong file fails at startup rather
+// than at the first frame that quietly needed it.
+func SetZdict(b []byte) error {
+	if len(b) > 0 {
+		if _, err := zstd.InspectDictionary(b); err != nil {
+			return fmt.Errorf("store: not a zstd dictionary: %w", err)
+		}
+	}
+	userDict = b
+	userTag = dictTag(b)
+	return nil
+}
+
+func dictTag(b []byte) string {
+	if len(b) == 0 {
+		return "-"
+	}
+	s := sha256.Sum256(b)
+	return fmt.Sprintf("%d-%x", len(b), s[:4])
+}
+
+// zdictPool orders the dictionary pool seed-first, user-last: WithDecoderDicts lets
+// the last dictionary registered win on an id collision, so the operator's copy of a
+// book deliberately outranks the shipped one; the encoder takes the last book too.
+func zdictPool() [][]byte {
+	seedOnce.Do(func() { seedTag = dictTag(seedDict) })
+	var pool [][]byte
+	if len(seedDict) > 0 {
+		pool = append(pool, seedDict)
+	}
+	if len(userDict) > 0 {
+		pool = append(pool, userDict)
+	}
+	return pool
+}
+
 func zstdPair() (*zstd.Encoder, *zstd.Decoder) {
-	zstdOnce.Do(func() {
-		// BetterCompression (≈ level 14): conversion happens offline, and the stance
-		// here is disk over anything the machine keeps in RAM.
-		zstdEnc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
-		zstdDec, _ = zstd.NewReader(nil)
-	})
-	return zstdEnc, zstdDec
+	pool := zdictPool() // also settles seedTag
+	zstdMu.Lock()
+	defer zstdMu.Unlock()
+	key := seedTag + "|" + userTag
+	p, ok := zstdPairs[key]
+	if !ok {
+		p = buildZstdPair(pool)
+		zstdPairs[key] = p
+	}
+	return p.enc, p.dec
+}
+
+func buildZstdPair(pool [][]byte) zstdPairVal {
+	// SpeedBetterCompression — the library's doc says ≈ zstd level 7–8 at ~2–3×
+	// default CPU: conversion happens offline, and the stance here is disk over
+	// anything the machine keeps in RAM. Only the four named levels exist (the
+	// FromZstd helper just picks the closest one), and the library warns that the
+	// constants' mapping itself may shift between versions — for a store whose
+	// bytes live on disk for years, that makes the go.mod pin load-bearing and an
+	// upgrade worth a fresh du of the corpus.
+	eopts := []zstd.EOption{zstd.WithEncoderLevel(ZstdLevel)}
+	var dopts []zstd.DOption
+	if len(pool) > 0 {
+		eopts = append(eopts, zstd.WithEncoderDict(pool[len(pool)-1]))
+		dopts = append(dopts, zstd.WithDecoderDicts(pool...))
+	}
+	enc, err1 := zstd.NewWriter(nil, eopts...)
+	dec, err2 := zstd.NewReader(nil, dopts...)
+	if err1 != nil || err2 != nil {
+		return zstdPairVal{} // callers treat nil as "compress nothing, store text"; SetZdict has already rejected bad books
+	}
+	return zstdPairVal{enc: enc, dec: dec}
 }
 
 // maybeCompress returns the value to store: compressed bytes when the chosen codec

@@ -30,6 +30,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"bareloop"
 	"bareloop/internal/agent"
 	"bareloop/internal/server"
@@ -70,6 +72,7 @@ func main() {
 		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
 		comp      = flag.String("compress", "gzip", `compression of new payloads: gzip | zstd | none (old stores read whichever codec wrote them)`)
+		zdictPath = flag.String("zdict", "", "zstd dictionary file: new zstd payloads are stamped with it — the file is data, not a toggle: frames it writes need it to read back forever")
 	)
 	flag.Parse()
 
@@ -83,6 +86,18 @@ func main() {
 		store.Compressor = *comp
 	default:
 		logger.Fatalf("compress: %q is not gzip, zstd or none", *comp)
+	}
+	if *zdictPath != "" {
+		b, err := os.ReadFile(*zdictPath)
+		if err != nil {
+			logger.Fatalf("zdict: %v", err)
+		}
+		if err := store.SetZdict(b); err != nil {
+			logger.Fatalf("%v", err)
+		}
+		if info, err := zstd.InspectDictionary(b); err == nil {
+			logf("zstd dictionary: %d bytes id=0x%08x from %s — keep this file as long as any store written under it must open", len(b), info.ID(), *zdictPath)
+		}
 	}
 
 	cfg, err := loadConfig(*cfgPath)
