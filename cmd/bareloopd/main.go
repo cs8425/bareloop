@@ -69,17 +69,21 @@ func main() {
 		fsync     = flag.Bool("fsync", false, "fsync every log append")
 		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
-		nocomp    = flag.Bool("nocompress", false, "store entry payloads uncompressed (default: gzip when it pays; old stores read either way)")
+		comp      = flag.String("compress", "gzip", `compression of new payloads: gzip | zstd | none (old stores read whichever codec wrote them)`)
 	)
 	flag.Parse()
-	// The compression knob says so before any store opens — it speaks to new writes only,
-	// and every store still reads every store whichever way each was written.
-	if *nocomp {
-		store.Compress = false
-	}
 
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.Lmsgprefix)
 	logf := logger.Printf
+
+	// The compression knob is set before any store opens — it speaks to new writes only,
+	// and every store still reads every store whichever codec wrote it.
+	switch *comp {
+	case "gzip", "zstd", "none":
+		store.Compressor = *comp
+	default:
+		logger.Fatalf("compress: %q is not gzip, zstd or none", *comp)
+	}
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {

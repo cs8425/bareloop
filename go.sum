@@ -1,5 +1,7 @@
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+github.com/klauspost/compress v1.20.3 h1:zWNoFqq/lSuYQRim3dUXlXeA0IqwuZGicdG5ZTfY5j4=
+github.com/klauspost/compress v1.20.3/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/ncruces/go-sqlite3 v0.37.0 h1:Ps3EH70hhznZ+qkWIrTUlbTRlEv3dGTSQ/LOXlJxpaM=
 github.com/ncruces/go-sqlite3 v0.37.0/go.mod h1:GASdtn4/ABuWBpm283DX4XJymxoVdVqKYpIDEDjqcV0=
 github.com/ncruces/go-sqlite3-wasm/v6 v6.5.35401 h1:GM27MxQNSRvqi44IYsZANqQKGonIRjUcPojI67RJfq4=

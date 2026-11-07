@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -386,30 +387,44 @@ func TestMetaDoorbells(t *testing.T) {
 	l.Close()
 }
 
-// TestPayloadGzipRoundTrip is the compression contract in one sitting: a big payload
-// is stored deflated and reads back byte-identically; the floor and the knob keep
-// short and refused rows plain; a store holding all three shapes at once replays and
+// TestPayloadCompressionRoundTrip is the compression contract, run once per codec: a
+// big payload is stored in its codec's shape and reads back byte-identically; the floor
+// keeps short rows plain text; the "none" promise keeps long rows plain too; a store
+// holding compressed, floor-excluded and knob-excluded shapes at once replays and
 // searches as one; and a patch under compression still archives a readable revision.
-func TestPayloadGzipRoundTrip(t *testing.T) {
-	old := Compress
-	defer func() { Compress = old }()
+func TestPayloadCompressionRoundTrip(t *testing.T) {
+	t.Run("gzip", func(t *testing.T) { payloadRoundTrip(t, "gzip", []byte{0x1f, 0x8b}) })
+	t.Run("zstd", func(t *testing.T) { payloadRoundTrip(t, "zstd", []byte{0x28, 0xb5, 0x2f, 0xfd}) })
+	t.Run("none", func(t *testing.T) { payloadRoundTrip(t, "none", nil) })
+}
+
+func payloadRoundTrip(t *testing.T, codec string, magic []byte) {
+	old := Compressor
+	defer func() { Compressor = old }()
+	Compressor = codec
 
 	long := strings.Repeat("deflate 測試 payload 內容 ", 120) // comfortably past the floor
 	l := openTest(t)
 
-	deflated := user(long)
-	if err := l.AppendEntry(deflated, true); err != nil {
-		t.Fatalf("AppendEntry deflated: %v", err)
+	sealed := user(long)
+	if err := l.AppendEntry(sealed, true); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
 	}
 	var raw []byte
-	if err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", deflated.ID).Scan(&raw); err != nil {
+	if err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", sealed.ID).Scan(&raw); err != nil {
 		t.Fatalf("raw scan: %v", err)
 	}
-	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
-		t.Fatalf("payload stored as %d bytes without gzip's magic, want a deflate stream", len(raw))
-	}
-	if len(raw) >= len(long) {
-		t.Errorf("stored %d bytes for %d of text, want the smaller", len(raw), len(long))
+	if magic == nil {
+		if !bytes.HasPrefix(raw, []byte("{")) {
+			t.Fatalf(`Compressor="none" stored %d bytes not opening a JSON object`, len(raw))
+		}
+	} else {
+		if !bytes.HasPrefix(raw, magic) {
+			t.Fatalf("payload stored as %x does not carry %s's magic", raw, codec)
+		}
+		if len(raw) >= len(long) {
+			t.Errorf("stored %d bytes for %d of text, want the smaller", len(raw), len(long))
+		}
 	}
 
 	// The floor: short stays plain text the shell can read.
@@ -426,7 +441,7 @@ func TestPayloadGzipRoundTrip(t *testing.T) {
 	}
 
 	// The knob: promised plain, long rows arrive plain too.
-	Compress = false
+	Compressor = "none"
 	plain := user(long + " (knob-excluded)")
 	if err := l.AppendEntry(plain, true); err != nil {
 		t.Fatalf("AppendEntry knob: %v", err)
@@ -435,12 +450,12 @@ func TestPayloadGzipRoundTrip(t *testing.T) {
 		t.Fatalf("typeof knob row: %v", err)
 	}
 	if typ != "text" {
-		t.Errorf("Compress=false payload stored as %s, want text", typ)
+		t.Errorf(`Compressor="none" payload stored as %s, want text`, typ)
 	}
 
-	// Mixed store: inflated, floor-excluded, knob-excluded — Replay speaks all three.
+	// Mixed store: sealed, floor-excluded, knob-excluded — Replay speaks all three.
 	st := replayAll(t, l)
-	if st.Entries[deflated.ID].Content != long {
+	if st.Entries[sealed.ID].Content != long {
 		t.Error("inflated content is not the text that went in")
 	}
 	if st.Entries[plain.ID].Content != long+" (knob-excluded)" {
@@ -453,7 +468,7 @@ func TestPayloadGzipRoundTrip(t *testing.T) {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(hits) != 2 {
-		t.Fatalf("hits %d, want 2 (the deflated row and the plain one)", len(hits))
+		t.Fatalf("hits %d, want 2 (the sealed row and the plain one)", len(hits))
 	}
 	for _, h := range hits {
 		if !strings.Contains(h.Snippet, "測試 payload 內容") {
@@ -461,15 +476,15 @@ func TestPayloadGzipRoundTrip(t *testing.T) {
 		}
 	}
 
-	// A patch under compression: the archive is bytes, and PayloadText reads them back.
-	Compress = true
-	revised := *deflated
+	// A patch under the codec: the archive is bytes, and PayloadText reads them back.
+	Compressor = codec
+	revised := *sealed
 	revised.Content = strings.Repeat("修訂版 content ", 120)
 	if err := l.Patch(&revised); err != nil {
 		t.Fatalf("Patch: %v", err)
 	}
 	var revp string
-	if err := l.db.QueryRow("SELECT payload FROM entry_rev WHERE entry_id = ? ORDER BY seq DESC LIMIT 1", deflated.ID).Scan(&revp); err != nil {
+	if err := l.db.QueryRow("SELECT payload FROM entry_rev WHERE entry_id = ? ORDER BY seq DESC LIMIT 1", sealed.ID).Scan(&revp); err != nil {
 		t.Fatalf("rev scan: %v", err)
 	}
 	var got ir.Entry
@@ -479,7 +494,7 @@ func TestPayloadGzipRoundTrip(t *testing.T) {
 	if got.Content != long {
 		t.Error("the archived version is not the one it replaced")
 	}
-	if got := replayAll(t, l).Entries[deflated.ID].Content; got != revised.Content {
+	if got := replayAll(t, l).Entries[sealed.ID].Content; got != revised.Content {
 		t.Error("the live row did not take the revision")
 	}
 }

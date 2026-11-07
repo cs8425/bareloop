@@ -44,6 +44,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	_ "github.com/ncruces/go-sqlite3/driver"
 
 	"bareloop/internal/ir"
@@ -295,14 +297,15 @@ func payloadShas(payload string) []string {
 }
 
 // Payload compression: TOAST's stance, taken at this store's one choke point. A payload
-// column holds whichever shape is smaller — plain JSON text, or the same bytes deflated
-// and marked by gzip's magic — so a reader never asks a flag what it is: two bytes say.
-// The knob below is the operator's answer about new writes only; every store reads every
-// store, whichever way each was written.
-var Compress = true
+// column holds whichever shape is smaller — plain JSON text, or the same bytes compressed
+// by the codec the operator picked — and every codec's output carries its own magic, so
+// a reader never asks a flag what a row is: a few bytes say. The knob below is an answer
+// about new writes only; every store reads every store.
+var Compressor = "gzip" // "gzip" | "zstd" | "none" — each CLI's -compress flag wires it
 
 // gzipFloor is the TOAST threshold shrunk to this store's page: under half a kilobyte
-// of JSON, a deflate stream's header alone has eaten the difference.
+// of JSON, a compressed stream's header alone has eaten the difference. It guards both
+// codecs — zstd's small-data penalty is smaller, not absent.
 const gzipFloor = 512
 
 var gzWriters = sync.Pool{New: func() any {
@@ -315,45 +318,83 @@ var gzWriters = sync.Pool{New: func() any {
 
 var gzReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 
-// maybeGzip returns the value to store: deflated bytes when that is smaller and allowed,
-// the original text otherwise. Losing costs nothing and happens constantly — a short or
-// already-entropic payload compresses to more than it started as — and losing means
-// plaintext, not a marker.
-func maybeGzip(s string) any {
-	if !Compress || len(s) < gzipFloor {
-		return s
-	}
-	zw := gzWriters.Get().(*gzip.Writer)
-	defer gzWriters.Put(zw)
-	var buf bytes.Buffer
-	zw.Reset(&buf)
-	if _, err := zw.Write([]byte(s)); err != nil {
-		return s
-	}
-	if err := zw.Close(); err != nil || buf.Len() >= len(s) {
-		return s
-	}
-	return buf.Bytes()
+// The zstd pair is built once, lazily, and then shared: EncodeAll/DecodeAll are safe
+// for concurrent use on one instance, and a gzip-default process must never pay either
+// one's buffers. The encoder window is this codec's real RAM note — tens of megabytes,
+// spent only by a process that chose zstd, which is why the import is lazy.
+var (
+	zstdOnce sync.Once
+	zstdEnc  *zstd.Encoder
+	zstdDec  *zstd.Decoder
+)
+
+func zstdPair() (*zstd.Encoder, *zstd.Decoder) {
+	zstdOnce.Do(func() {
+		// BetterCompression (≈ level 14): conversion happens offline, and the stance
+		// here is disk over anything the machine keeps in RAM.
+		zstdEnc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+		zstdDec, _ = zstd.NewReader(nil)
+	})
+	return zstdEnc, zstdDec
 }
 
-// payloadText is the read side of maybeGzip: gzip's magic answered in the negative and
-// the bytes are the text already. Plain rows — the floor's, the flag's, and every old
-// store's — travel this same line.
+// maybeCompress returns the value to store: compressed bytes when the chosen codec
+// wins, the original text otherwise. Losing costs nothing and happens constantly — a
+// short or already-entropic payload compresses to more than it started as — and losing
+// means plaintext, not a marker. An unknown codec name reads as "none": plaintext is
+// always the safe answer to a typo.
+func maybeCompress(s string) any {
+	if len(s) < gzipFloor {
+		return s
+	}
+	switch Compressor {
+	case "gzip":
+		zw := gzWriters.Get().(*gzip.Writer)
+		defer gzWriters.Put(zw)
+		var buf bytes.Buffer
+		zw.Reset(&buf)
+		if _, err := zw.Write([]byte(s)); err != nil {
+			return s
+		}
+		if err := zw.Close(); err != nil || buf.Len() >= len(s) {
+			return s
+		}
+		return buf.Bytes()
+	case "zstd":
+		if enc, _ := zstdPair(); enc != nil {
+			if b := enc.EncodeAll([]byte(s), nil); len(b) < len(s) {
+				return b
+			}
+		}
+	}
+	return s
+}
+
+// payloadText is the read side of maybeCompress: each codec's magic answered in the
+// negative and the bytes are the text already. Plain rows — the floor's, the knob's,
+// and every old store's — travel this same line.
 func payloadText(raw string) string {
-	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
-		return raw
+	if len(raw) >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
+		zr := gzReaders.Get().(*gzip.Reader)
+		defer gzReaders.Put(zr)
+		if err := zr.Reset(bytes.NewReader([]byte(raw))); err != nil {
+			return raw // bytes that claim gzip and are not are somebody else's diagnosis
+		}
+		defer zr.Close()
+		out, err := io.ReadAll(zr)
+		if err != nil {
+			return raw
+		}
+		return string(out)
 	}
-	zr := gzReaders.Get().(*gzip.Reader)
-	defer gzReaders.Put(zr)
-	if err := zr.Reset(bytes.NewReader([]byte(raw))); err != nil {
-		return raw // bytes that claim gzip and are not are somebody else's diagnosis
+	if len(raw) >= 4 && raw[0] == 0x28 && raw[1] == 0xb5 && raw[2] == 0x2f && raw[3] == 0xfd {
+		if _, dec := zstdPair(); dec != nil {
+			if out, err := dec.DecodeAll([]byte(raw), nil); err == nil {
+				return string(out)
+			}
+		}
 	}
-	defer zr.Close()
-	out, err := io.ReadAll(zr)
-	if err != nil {
-		return raw
-	}
-	return string(out)
+	return raw
 }
 
 // PayloadText is the exported answer for anyone reading a payload column outside these
@@ -403,7 +444,7 @@ func (l *Log) AppendEntry(e *ir.Entry, setTip bool) error {
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO entry(id, parent, kind, seq, ts, payload) VALUES(?, ?, ?, ?, ?, ?)`,
-		e.ID, nullString(e.ParentID), kind, l.seq, float64(e.Ts.Unix()), maybeGzip(payload)); err != nil {
+		e.ID, nullString(e.ParentID), kind, l.seq, float64(e.Ts.Unix()), maybeCompress(payload)); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -541,7 +582,7 @@ func (l *Log) Patch(e *ir.Entry) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec("UPDATE entry SET payload = ? WHERE id = ?", maybeGzip(payload), e.ID); err != nil {
+	if _, err := tx.Exec("UPDATE entry SET payload = ? WHERE id = ?", maybeCompress(payload), e.ID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -602,7 +643,7 @@ func (l *Log) Delete(id string) error {
 			tx.Rollback()
 			return err
 		}
-		if _, err := tx.Exec("UPDATE entry SET parent = ?, payload = ? WHERE id = ?", nullString(parent.String), maybeGzip(newPayload), k.id); err != nil {
+		if _, err := tx.Exec("UPDATE entry SET parent = ?, payload = ? WHERE id = ?", nullString(parent.String), maybeCompress(newPayload), k.id); err != nil {
 			tx.Rollback()
 			return err
 		}
