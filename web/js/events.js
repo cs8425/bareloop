@@ -287,6 +287,23 @@ export function onCompaction(r) {
     );
   } else {
     box.appendChild(el('div', '', `nothing was written — the history still holds ${fmtN(r.before)} tokens of context`));
+    // A round that wrote nothing still spent tokens — every refused retry, and every call of a chain a
+    // stop interrupted. A committed compaction bills those on its entry, which the cost panel counts;
+    // an aborted one has no entry at all, so the banner is the only place that bill is ever seen, and
+    // it says so instead of letting the round look free.
+    const atts = r.summaryUsage || [];
+    if (atts.length) {
+      const spent = atts.reduce((a, x) => a + ((x.usage && x.usage.prompt) || 0) + ((x.usage && x.usage.completion) || 0), 0);
+      const anyUsage = atts.some((x) => x.usage);
+      box.appendChild(
+        el(
+          'div',
+          'dim',
+          atts.length + ` summariser call${atts.length === 1 ? '' : 's'} were spent on this and no log entry exists to bill them` +
+            (anyUsage ? ` (${fmtN(spent)} prompt+out across those that reported usage)` : ' (the provider reported no usage for any)'),
+        ),
+      );
+    }
   }
   // Same rule as the row above: a boundary that was never written is not a fact about the path.
   if (r.committed && r.boundary) box.appendChild(el('div', '', `boundary ${r.boundary}${r.entryId ? ` · entry ${r.entryId}` : ''}`));

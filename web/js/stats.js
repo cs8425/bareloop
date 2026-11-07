@@ -2,9 +2,11 @@
 //
 // Two rules own this file.
 //
-// (1) The population is the path the transcript is drawing. Off-path branches, failed retries and the
-// request that produced a compaction summary are therefore NOT in these totals, which makes the money a
-// lower bound — so the panel says that out loud instead of implying a bill it cannot see.
+// (1) The population is the path the transcript is drawing. Off-path branches and attempts that died
+// before the model answered are therefore NOT in these totals, which makes the money a lower bound — so
+// the panel says that out loud instead of implying a bill it cannot see. The summariser calls a
+// compaction made ARE in: they ride the entry they wrote (the entry's usage is their total, its meta
+// carries the per-call list, refused retries included) — the row for the summary is where its cost lives.
 //
 // (2) Only additive numbers are totalled. A rate is neither: a warm request re-sends a handful of
 // uncached tokens while a cold one prefills thousands, so averaging their speeds invents a number that
@@ -52,9 +54,14 @@ async function renderCost(body) {
   const pricing = (data.config && data.config.llm && data.config.llm.pricing) || null;
   const entries = sortByNum(data.entries || []);
   const onPath = pathOf(entries, st.tip);
-  // Only entries that carry usage are requests: user messages, tool results and compaction markers
-  // have none, and counting them as rows would make every number below look like a mystery.
+  // Only entries that carry usage are requests: user messages and tool results have none, and counting
+  // them as rows would make every number below look like a mystery. A compaction entry carries the total
+  // of the summariser calls that wrote it (newer ones; a compaction from before that accounting stays a
+  // silent marker, which the footnote admits to).
   const requests = entries.filter((e) => onPath.has(e.id) && e.usage && (e.usage.prompt || e.usage.completion));
+  // The summariser rows the sentence below flags with ✦, and the calls behind them.
+  const summRows = requests.filter((e) => e.kind === 'compaction' && (e.summaryRequests || []).length);
+  const summCalls = summRows.reduce((n, e) => n + e.summaryRequests.length, 0);
 
   const t = { prompt: 0, cache: 0, completion: 0, msIn: 0, msOut: 0 };
   for (const e of requests) {
@@ -72,7 +79,8 @@ async function renderCost(body) {
     el(
       'div',
       '',
-      `${requests.length} request${requests.length === 1 ? '' : 's'} on this path · ${onPath.size - requests.length} entries without usage (your messages, tool results)`,
+      `${requests.length} request${requests.length === 1 ? '' : 's'} on this path · ${onPath.size - requests.length} entries without usage (your messages, tool results)` +
+        (summCalls ? ` · incl. ${summCalls} summariser call${summCalls === 1 ? '' : 's'} (the ✦ rows)` : ''),
     ),
   );
   // Not the `.num` class: that right-aligns, which is what a column of figures wants and not what a
@@ -151,7 +159,11 @@ async function renderCost(body) {
       const outTps = tps(u.completion || 0, u.completionMs, 4);
       const rate = `${inTps ?? '—'} / ${outTps ?? '—'}`;
       const tr = el('tr');
-      const id = el('td', '', e.id);
+      // A compaction row is the bill of the calls that wrote it, so it wears the ✦ that the sentence
+      // above counts, and its title is the line-item list: one line per summariser call — every retry
+      // the cap refused, every part of a chain, failures with whatever the provider still reported.
+      const atts = e.kind === 'compaction' ? e.summaryRequests || [] : [];
+      const id = el('td', '', atts.length ? `${e.id} ✦` : e.id);
       const bits = [];
       if (u.prompt) bits.push(`prompt ${u.prompt}${cached ? ` (cached ${cached}, new ${newTokens})` : ''}`);
       if (u.completion) bits.push(`out ${u.completion}`);
@@ -161,6 +173,22 @@ async function renderCost(body) {
       if (e.ms) bits.push(`${e.ms} ms end to end`);
       if (e.finishReason) bits.push(e.finishReason);
       id.title = bits.join('\n');
+      if (atts.length) {
+        id.title +=
+          '\n\nthe summariser calls this summary cost — the total above, line by line:' +
+          '\n' +
+          atts
+            .map(
+              (a) =>
+                `attempt ${a.attempt}${a.parts ? ` · part ${a.part}/${a.parts}` : ''}: ` +
+                (a.usage
+                  ? `prompt ${fmtN(a.usage.prompt)} · cached ${fmtN(a.usage.cache || 0)} · out ${fmtN(a.usage.completion || 0)}`
+                  : 'no usage reported') +
+                (a.ms ? ` · ${(a.ms / 1000).toFixed(1)} s` : '') +
+                (a.failed ? `\n  refused: ${a.failed}` : ''),
+            )
+            .join('\n');
+      }
       tr.appendChild(id);
       tr.appendChild(el('td', 'num', fmtN(u.prompt || 0)));
       tr.appendChild(el('td', 'num', cached ? fmtN(cached) : '—'));
@@ -183,13 +211,14 @@ async function renderCost(body) {
     body.appendChild(el('div', 'cost', 'most recent first · tok/s is prefill / decode for that one request · dim rows are requests the server gave no timings for'));
   }
 
-  // The lower bound, stated (r29, D29). Anything that left the path, failed before producing usage, or
-  // was spent by compaction itself is real work that this view cannot see.
+  // The lower bound, stated (r29, D29) — and after the summariser rows joined the bill, this is a
+  // narrower bound than it was: the one thing a compaction can still hide is a call the provider
+  // answered with nothing measurable, and compactions older than that accounting never billed at all.
   body.appendChild(
     el(
       'div',
       'dim',
-      `These are the ${requests.length} requests on the path the transcript is drawing — the same set the window figures above price. Not here: entries on other branches, attempts that failed before the model answered, and the request that wrote a compaction summary (its own usage stays out of the log). So the money above is a lower bound, never an upper one.`,
+      `These are the ${requests.length} requests on the path the transcript is drawing — the same set the window figures above price, and the ✦ rows carry each compaction's own summariser calls, refused retries included (hover one for the list). Still not here: entries on other branches, summariser calls that died before the provider reported any usage, and compactions written before summaries kept their own bills. So the money above is a lower bound, never an upper one.`,
     ),
   );
 }
