@@ -121,3 +121,28 @@ export function pathOf(entries, tip) {
 }
 
 export const whoName = (e) => (e.kind === 'compaction' ? 'compaction' : e.role || e.kind);
+
+// Session ids are directory names, and nobody has one ready when a dialog asks for it, so one is
+// suggested here rather than by the server: an id the server invents is a name nobody asked for, and
+// the UI can show, change and keep a suggestion. Two readable words plus a short suffix read well in
+// `ls data/` and cannot contain anything a filesystem would object to. (Everyone who creates a session
+// asks here — the new dialog, a fork, an import — because every one of them would otherwise invent
+// its own spelling of "readable".)
+const ID_ADJECTIVES = ['amber', 'brisk', 'cosmic', 'crisp', 'gentle', 'humble', 'jolly', 'lunar', 'mellow', 'nimble', 'polite', 'quiet', 'quaint', 'solar', 'spry', 'tidy', 'vivid', 'wry', 'zesty', 'zippy'];
+const ID_NOUNS = ['otter', 'cactus', 'beacon', 'kettle', 'maple', 'nebula', 'pixel', 'quill', 'raft', 'saddle', 'thimble', 'violin', 'warbler', 'zephyr', 'anchor', 'cinder', 'dollop', 'ember', 'fathom', 'grotto', 'harbor', 'island', 'lantern', 'orbit'];
+
+function randomBelow(n) {
+  const c = window.crypto;
+  if (c && c.getRandomValues) {
+    const buf = new Uint32Array(1);
+    c.getRandomValues(buf);
+    return buf[0] % n;
+  }
+  return Math.floor(Math.random() * n);
+}
+
+export function newSessionId() {
+  const pick = (list) => list[randomBelow(list.length)];
+  const suffix = randomBelow(46656).toString(36).padStart(3, '0');
+  return `${pick(ID_ADJECTIVES)}-${pick(ID_NOUNS)}-${suffix}`;
+}

@@ -22,13 +22,14 @@
 //   md.js        the markdown subset
 //
 // This file wires the pieces, handles the global keys, and starts the transport.
-import { $ } from './util.js';
+import { $, newSessionId } from './util.js';
 import { isParked, state } from './state.js';
 import { EV_JUMP, EV_REFRESH, EV_SESSIONS, on } from './bus.js';
 import { fail, note, promptBox } from './ui.js';
 import { isPinned, scrollDown, wireScroll } from './scroll.js';
 import { bootNav, closeNav, isCollapsed, isMobile, navIsOpen, setNav } from './nav.js';
 import { api } from './api.js';
+import { u } from './base.js';
 import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
 import { hidePanel, wirePanel } from './panel.js';
@@ -60,28 +61,8 @@ async function compactNow() {
   if (res) onCompaction(res);
 }
 
-// Session ids are directory names, and nobody has one ready when a dialog asks for it, so one is
-// suggested here rather than by the server: an id the server invents is a name nobody asked for, and
-// the UI can show, change and keep a suggestion. Two readable words plus a short suffix read well in
-// `ls data/` and cannot contain anything a filesystem would object to.
-const ID_ADJECTIVES = ['amber', 'brisk', 'cosmic', 'crisp', 'gentle', 'humble', 'jolly', 'lunar', 'mellow', 'nimble', 'polite', 'quiet', 'quaint', 'solar', 'spry', 'tidy', 'vivid', 'wry', 'zesty', 'zippy'];
-const ID_NOUNS = ['otter', 'cactus', 'beacon', 'kettle', 'maple', 'nebula', 'pixel', 'quill', 'raft', 'saddle', 'thimble', 'violin', 'warbler', 'zephyr', 'anchor', 'cinder', 'dollop', 'ember', 'fathom', 'grotto', 'harbor', 'island', 'lantern', 'orbit'];
-
-function randomBelow(n) {
-  const c = window.crypto;
-  if (c && c.getRandomValues) {
-    const buf = new Uint32Array(1);
-    c.getRandomValues(buf);
-    return buf[0] % n;
-  }
-  return Math.floor(Math.random() * n);
-}
-
-function newSessionId() {
-  const pick = (list) => list[randomBelow(list.length)];
-  const suffix = randomBelow(46656).toString(36).padStart(3, '0');
-  return `${pick(ID_ADJECTIVES)}-${pick(ID_NOUNS)}-${suffix}`;
-}
+// Session ids are suggested by util.js (newSessionId) — see the note there for why the UI,
+// not the server, makes them up.
 
 function wireNewSession() {
   const dlg = $('#dlg-new');
@@ -144,6 +125,49 @@ function wireNewSession() {
     dlg.close('create');
     if (data.id) await selectSession(data.id);
   });
+}
+
+// wireImport is the other way a session appears in the list: the sidebar picks a file, the daemon
+// reads it — a bareloop export in any codec, or a llama-ui transcript, the bytes decide — and one
+// usable file is one new session. The id is suggested the way the new-session dialog suggests one,
+// and a collision is retried with a fresh suggestion once, for the same reason: a made-up id is
+// ours to replace, a hand-picked one (there are none here yet) would not be. No dialog: the file
+// already carries the name, and every question the import asks, the file answers.
+function wireImport() {
+  const pick = document.createElement('input');
+  pick.type = 'file';
+  pick.accept = '.jsonl,.zst,.gz,.json,application/json,application/x-ndjson,application/zstd,application/gzip';
+  pick.style.display = 'none';
+  document.body.appendChild(pick);
+  $('#import-session').onclick = () => pick.click();
+  pick.onchange = async () => {
+    const f = pick.files[0];
+    pick.value = ''; // the same file chosen twice in a row is still a choice
+    if (!f) return;
+    // The file goes as the request body itself: the server sniffs magic bytes and the first line,
+    // so neither a content type nor a multipart wrapper means anything here.
+    const send = (theId) =>
+      fetch(u(`/api/sessions/import?id=${encodeURIComponent(theId)}`), { method: 'POST', body: f });
+    let id = newSessionId();
+    let res = await send(id).catch(() => null);
+    if (res && res.status === 409) {
+      id = newSessionId();
+      res = await send(id).catch(() => null);
+    }
+    if (!res) {
+      note('the daemon did not answer the import', 'error');
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      note(data.error || `${res.status} ${res.statusText}`, 'error');
+      return;
+    }
+    const data = await res.json();
+    note(`imported ${data.entries} entries as ${data.id}`);
+    await loadSessions();
+    await selectSession(data.id);
+  };
 }
 
 // Escape works from the top down: a modal dialog closes itself (the browser does that), then the
@@ -216,6 +240,7 @@ function wire() {
   // zoomable without anything having remembered to wire it (js/lightbox.js).
   wireZoom();
   wireNewSession();
+  wireImport();
   wireKeys();
   // The render gate draws nothing while this tab is hidden — a background tab has no reader — so coming
   // back needs one explicit repaint: the fragments that arrived meanwhile are in the stream buffers but

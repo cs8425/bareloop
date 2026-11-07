@@ -52,8 +52,9 @@ export function fail(err) {
 
 // modal builds a <dialog> around some content and returns a promise of its returnValue. The form
 // with method="dialog" is what makes a submit button close it, and Escape fires cancel — both of
-// which the browser handles, so there is no keydown handler here to get wrong.
-function modal({ title, body, actions, autofocus, focus = 'primary' }) {
+// which the browser handles, so there is no keydown handler here to get wrong. Exported because a
+// three-way question (which scope to export) is the same machine with more buttons, not a new one.
+export function modal({ title, body, actions, autofocus, focus = 'primary' }) {
   const dlg = el('dialog', 'modal');
   const form = el('form');
   form.method = 'dialog';

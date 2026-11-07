@@ -3,10 +3,10 @@
 // anything. Refresh requests go out on the bus so this module does not import the session module.
 import md from './md.js';
 import { makeRenderGate, resolveStreamMode } from './scheduler.js';
-import { $, el, collapseDataUrls, fmtN, logEl, pretty, whoName, tps, MIN_UNCACHED } from './util.js';
+import { $, el, collapseDataUrls, fmtN, logEl, newSessionId, pretty, whoName, tps, MIN_UNCACHED } from './util.js';
 import { fmtDay, fmtFull, fmtTime } from './clock.js';
 import { state } from './state.js';
-import { call } from './api.js';
+import { api, call } from './api.js';
 import { confirmBox, note } from './ui.js';
 import { markPinned, scrollDown } from './scroll.js';
 import { emit, EV_JUMP, EV_REFRESH } from './bus.js';
@@ -262,6 +262,37 @@ function actions(e, node) {
   }, !!e.content);
 
   act('raw', 'view the raw text of this message', (b) => toggleRaw(e, node, b), true);
+
+  // Forking from here is not the branch button in disguise: a branch moves this session's path (and is
+  // off until a tree view makes the way back visible), a fork leaves this session exactly where it is
+  // and opens a new one whose history ends at this entry. Nothing is given up either way, which is why
+  // this one needs no confirmation and no tree — and the reader lands in the copy, so there is never a
+  // path they cannot find again.
+  act(
+    'fork',
+    'fork from here — a new session whose history ends at this entry; this session keeps its own path',
+    async () => {
+      // api and not call: a taken id is a retry this handler owns, and call's habit of putting
+      // every failure on screen would announce the accident before the second try fixed it.
+      const once = (theId) =>
+        api(`/api/session/${encodeURIComponent(state.id)}/fork`, { body: { id: theId, at: e.id } });
+      let id = newSessionId();
+      let d = await once(id).catch((err) => ({ err: String((err && err.message) || err) }));
+      // A taken id is a coin-toss accident on a suggested name: pick another and try once, the same
+      // rule the new-session dialog follows. Anything else the reader hears about, once.
+      if (d.err && /exists|taken/i.test(d.err)) {
+        id = newSessionId();
+        d = await once(id).catch((err2) => ({ err: String((err2 && err2.message) || err2) }));
+      }
+      if (d.err) {
+        note(d.err, 'error');
+        return;
+      }
+      note(`forked to ${d.id} — ${d.entries} entries`);
+      location.hash = `#/s/${encodeURIComponent(d.id)}`; // hashchange does the rest (js/app.js)
+    },
+    !!e.id,
+  );
 
   act(
     'branch',

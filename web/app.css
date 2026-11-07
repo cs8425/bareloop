@@ -109,7 +109,7 @@ body {
 /* The heading of a group that does not fold carries the same chevron as the one that does, so that the four
    labels start their words in one column; it is decoration and it is hidden, not left out. */
 #session-list li.grp .glabel .ico { visibility: hidden; }
-#session-list .none { padding: 8px; color: var(--muted); font-size: var(--t-1); cursor: default; }
+#session-list .none { padding: 8px; color: var(--muted); font-size: var(--t-1); cursor: pointer; }
 /* The row's actions, over the tail of the text and not beside it: a control that takes its own width moves
    the name it sits next to, and a name that moves sideways under the cursor is how a click lands on the
    session two rows down. The backdrop is what keeps them readable over the text they cover. */

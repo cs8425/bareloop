@@ -4,8 +4,9 @@
 import { $, el, fmtN, fmtBytes, fmtAgo, logEl, clamp, pathOf, sortByNum } from './util.js';
 import { isParked, state } from './state.js';
 import { api, get } from './api.js';
+import { u } from './base.js';
 import { EV_SESSION, emit } from './bus.js';
-import { confirmBox, note, toast } from './ui.js';
+import { confirmBox, modal, note, toast } from './ui.js';
 import { atTheBottom, distanceFromBottom, isPinned, markPinned, resetScroll, scrollDown } from './scroll.js';
 import { closeNav, navIsOpen } from './nav.js';
 import { icon } from './icons.js';
@@ -742,6 +743,15 @@ function actions(s) {
     }
     loadSessions();
   };
+  // Export asks which of the three scopes travels — the question r88's three ?path= answers
+  // made real — and the download itself stays what it was: one GET, the daemon's Content-Disposition
+  // naming the file, an empty `download` attribute keeping the click a download rather than a
+  // navigation.
+  const exp = btn('exp', 'download', 'export this session — context window, path, or whole tree');
+  exp.onclick = (e) => {
+    e.stopPropagation();
+    exportDialog(s);
+  };
   // Every open row can answer for itself: what this releases is the daemon's copy of that session, which is
   // worth having back most for the conversations you are not looking at. A closed row gets no button — the list
   // snapshot already knows that (unlike which row this window is showing), and there is nothing there to do.
@@ -755,8 +765,41 @@ function actions(s) {
   }
   box.append(pin, arc);
   if (down) box.append(down);
-  box.append(del);
+  box.append(exp, del);
   return box;
+}
+
+// exportDialog is the one question the export button asks, in the daemon's own three words.
+// "context" is the primary because it is the answer that lets a thousand-entry session resume
+// elsewhere without carrying the thousand — and it is never the destructive choice, so a stray
+// Enter downloading a small file is a cheap mistake to make.
+async function exportDialog(s) {
+  const body = el('div');
+  body.appendChild(el('p', '', 'What should the file carry?'));
+  // p.hint, the same element confirmBox's detail uses — not a menu: app.css lays every menu in a
+  // row (it is the button strip's shape), and three description lines lined up in a row is the
+  // wrong sentence drawn with the right words.
+  body.appendChild(el('p', 'hint', 'context — what the next request would send: the summary plus what survived around it'));
+  body.appendChild(el('p', 'hint', 'path — one straight line, first message to the tip'));
+  body.appendChild(el('p', 'hint', 'whole tree — every branch, abandoned ones included'));
+  const answer = await modal({
+    title: `export ${s.name || s.id}`,
+    body,
+    actions: [
+      { value: 'cancel', label: 'cancel' },
+      { value: 'full', label: 'whole tree' },
+      { value: 'path', label: 'path' },
+      { value: 'ctx', label: 'context', primary: true },
+    ],
+  });
+  if (answer === 'cancel') return;
+  const q = answer === 'ctx' ? '?path=ctx' : answer === 'path' ? '?path=tip' : '';
+  const a = el('a');
+  a.href = u(`/api/session/${encodeURIComponent(s.id)}/export${q}`);
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // setFlag is the POST, the note when it fails, and the reload that shows what just moved. The answer is
@@ -882,7 +925,24 @@ function syncActive(list, want) {
 // versions of the same thing.
 function nodeOf(w) {
   if (w.kind === 'row') return rowNode(w.s);
-  if (w.kind === 'none') return el('li', 'none', w.title);
+  if (w.kind === 'none') {
+    // The sentence names three doors; the row walks through the first one. It clicks the top bar's own
+    // button rather than copying its flow — one door, two handles. The keyboard gets the same path
+    // through tabindex: the row is a lie about emptiness with an action behind it, so it belongs in
+    // the tab order (Enter on a focused li activates nothing native — the keydown is the activation).
+    const li = el('li', 'none', w.title);
+    li.title = 'start a session — the same door as the + above';
+    li.tabIndex = 0;
+    const open = () => $('#new-session')?.click();
+    li.onclick = open;
+    li.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        open();
+      }
+    };
+    return li;
+  }
   const li = el('li', 'grp');
   // data-open is a CSS hook and aria-expanded is the accessible answer to the same question, and they are
   // two attributes because `aria-open` is not a thing a screen reader knows and a heading is not a thing a
