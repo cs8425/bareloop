@@ -193,8 +193,8 @@ func (m *Manager) List() []Summary {
 			if seen[de.Name()] {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(m.root, de.Name(), "log.jsonl")); err != nil {
-				continue
+			if _, err := os.Stat(filepath.Join(m.root, de.Name(), store.DBFileName)); err != nil {
+				continue // a directory with no store is not a session this build lists
 			}
 			out = append(out, m.diskSummary(de.Name()))
 		}
@@ -207,8 +207,9 @@ func (m *Manager) List() []Summary {
 }
 
 // Summary is one row of the session list, and every number in it comes from two files rather than from a
-// conversation: config.json for what the session is called, log.idx for what it adds up to. Neither is a
-// reason to read a transcript, which is what lets a session nothing has opened still have a row.
+// conversation: config.json for what the session is called, its store for what it adds up to — the store
+// answers aggregates without anyone replaying a transcript, which is what lets a session nothing has
+// opened still have a row (r83: that store is SQLite; the cold numbers cost a millisecond open, not a scan).
 type Summary struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
@@ -271,9 +272,8 @@ func (m *Manager) diskSummary(id string) Summary {
 	return out
 }
 
-// summary is this session's row. Its numbers come from its log handle - the rows in memory once the log
-// has been read, its index file before that - and only the phase has to be asked of the session, being the
-// one number on the row no file can tell.
+// summary is this session's row. Its numbers come from its store — one open, one query — and only the
+// phase has to be asked of the session, being the one number on the row no file can tell.
 func (s *Session) summary() Summary {
 	cfg := s.Config()
 	out := Summary{ID: s.ID, Name: cfg.Name, Model: cfg.LLM.Model, Phase: phaseToString(s.phaseNow())}
@@ -283,8 +283,8 @@ func (s *Session) summary() Summary {
 	out.Pinned, out.Archived = cfg.Pinned, cfg.Archived
 	info, err := s.log.Read()
 	if err != nil {
-		// why the row is still worth a line: its name and its phase are true, and a session with no
-		// log.idx - one never read, or one whose index was given up on - has no numbers to be wrong about.
+		// why the row is still worth a line: its name and its phase are true, and a session whose
+		// store cannot answer has no numbers to be wrong about.
 		return out
 	}
 	out.fill(info)
