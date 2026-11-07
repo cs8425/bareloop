@@ -8,3 +8,6 @@ cmd/bareloopd/bareloopd
 cmd/llmmock/llmmock
 cmd/mcpstub/mcpstub
 cmd/blimport/blimport
+
+# llama.cpp web ui export
+/testdata/*_conv_*.jsonl

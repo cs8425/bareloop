@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/session/{id}", s.handleDelete)
 	// The lighter sibling of DELETE: it gives back the RAM a conversation costs and touches nothing on disk.
 	mux.HandleFunc("POST /api/session/{id}/unload", s.handleUnload)
+	mux.HandleFunc("POST /api/session/{id}/fork", s.handleFork)
 	mux.HandleFunc("GET /api/session/{id}/inspect", s.handleInspect)
 	mux.HandleFunc("GET /api/session/{id}/payload", s.handlePayload)
 	mux.HandleFunc("GET /api/session/{id}/tools", s.handleTools)
@@ -146,6 +147,44 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"id": sess.ID, "status": sess.Status()})
+}
+
+// handleFork copies a session — the path it stands on (default), the path cut at an entry
+// (?at in the body), or the whole tree ("full": true) — into a new session whose id the
+// caller picks: the daemon invents no directory names here either. Everything else about
+// the copy is the daemon's business; no client downloads the world to hand it back.
+func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ID   string `json:"id"`
+		At   string `json:"at,omitempty"`
+		Full bool   `json:"full,omitempty"`
+		Name string `json:"name,omitempty"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	id, entries, err := s.mgr.Fork(r.Context(), sess.ID, agent.ForkOptions{
+		ID:   strings.TrimSpace(body.ID),
+		At:   strings.TrimSpace(body.At),
+		Full: body.Full,
+		Name: body.Name,
+	})
+	if err != nil {
+		// A taken id is the create conflict wearing the fork's clothes; everything else
+		// (an unknown at, an empty source) is this request's own mistake.
+		if strings.Contains(err.Error(), "already exists") {
+			writeErr(w, http.StatusConflict, err)
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]any{"id": id, "entries": entries})
 }
 
 // session resolves {id} to an open session.

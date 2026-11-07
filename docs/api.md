@@ -47,6 +47,7 @@ Anything else arriving on the socket is answered with an error that says where t
 | PATCH | `/api/session/{id}` | update the config (refused while a run is active) |
 | DELETE | `/api/session/{id}` | close and delete the session and its directory |
 | POST | `/api/session/{id}/unload` | close the session, touch nothing on disk |
+| POST | `/api/session/{id}/fork` | copy the session — one path or the whole tree — into a new session |
 | POST | `/api/session/{id}/flags` | pin / archive a session without opening it |
 | GET | `/api/session/{id}/inspect` | what the next request would cost, per row |
 | GET | `/api/session/{id}/payload` | the exact body of the next request |
@@ -246,6 +247,7 @@ message). A message that arrives while the path is not free is **held in memory*
 | `POST .../tip` | `{id}` | `{ok, status}` | move the tip — time travel; the log keeps everything, the path changes |
 | `POST .../reload` | — | `{ok, status}` | re-read the log from disk (another writer edited the session) |
 | `POST .../unload` | — | `{ok, unloaded, session}` | gives back the RAM without touching the directory. A run or summary in flight is refused with a 400 naming the phase — `/stop` first. `unloaded: false` is the honest answer for a session this process was not holding: it is shut, which is what was asked for. What only memory had goes — a held message, the in-memory half of a parked wait — the same bill a restart pays |
+| `POST .../fork` | `{id, at?, full?, name?}` | `{id, entries}` | copy the session into a new one whose id the caller picks (required; the daemon invents no directory names, as in create). Default copies the path from the root to `at` — the tip when `at` is empty, any entry on the tree otherwise — as a straight line, leaving abandoned siblings and rewound branches behind; `full:true` copies every branch and the tip, a snapshot at this moment that later turns in the source do not follow. Either way every entry id is reissued and the parent edges, compaction boundaries included, follow the map — the two histories never quote each other's ids. Config copies with the transcript (`name` defaults to "«source» (fork)"); the response never carries an apiKey. `409` for a taken id, `400` for an `at` that is not in the session |
 | `POST .../flags` | `{pinned, archived}`, either pointer | `{ok, session}` | pin/archive **without opening** the session (pinning is four bytes of config.json, opening is reading a transcript). Both-true is a change of mind, and the flag just asked for wins. The answer carries the row this produced, `closed: true` included |
 | `PATCH /api/session/{id}` | a config (partial) | `{ok, status}` | a field the body does not carry is kept, not cleared; refused while a run is active. The name is a config field, so this is also how a session is renamed |
 | `DELETE /api/session/{id}` | — | `{ok}` | close and delete the directory |
