@@ -123,6 +123,11 @@ type Log struct {
 	db  *sql.DB // nil after Close
 	seq int64   // the last seq handed out; NextID/AppendEntry raise it
 
+	// agg is the cached answer of queryInfo, trusted only while the store's file stamps
+	// agree with aggKey; every write that commits drops it, and so does the next open.
+	agg    *Info
+	aggKey stamps
+
 	logf func(format string, args ...any) // how something odd gets said; nil means silent
 }
 
@@ -131,18 +136,20 @@ func Open(dir string, fsync bool) (*Log, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	// why these four pragmas and nothing else: WAL is the crash story (a torn commit is
+	// why these five pragmas and nothing else: WAL is the crash story (a torn commit is
 	// a rollback, no torn-tail rule to implement); synchronous(NORMAL) is what fsync=false
 	// always meant (the bench's 0.8ms write; FULL for fsync=true); busy_timeout is insurance
 	// for a second reader; mmap_size(0) because the WAL shm mapping is the only mapping we
-	// want the page cache deciding about (r83: 300MB lessons).
+	// want the page cache deciding about (r83: 300MB lessons); cache_size(-512) because the
+	// default 2MB per handle is generous at the scale this store plans for — the r83 A/B
+	// measured the default costing +20MB of RSS at 17 open sessions, and hundreds are planned.
 	syncMode := "NORMAL"
 	if fsync {
 		syncMode = "FULL"
 	}
 	dsn := "file:" + filepath.ToSlash(filepath.Join(dir, DBFileName)) +
 		"?_pragma=journal_mode(WAL)&_pragma=synchronous(" + syncMode +
-		")&_pragma=busy_timeout(5000)&_pragma=mmap_size(0)"
+		")&_pragma=busy_timeout(5000)&_pragma=mmap_size(0)&_pragma=cache_size(-512)"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
@@ -340,7 +347,11 @@ func (l *Log) AppendEntry(e *ir.Entry, setTip bool) error {
 		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	l.agg = nil // the row's numbers just moved; the next Read asks the store
+	return nil
 }
 
 // SetTip moves the path tip. An empty id says "no tip", and Replay then stands the
@@ -356,7 +367,64 @@ func (l *Log) SetTip(id string) error {
 		tx.Rollback()
 		return err
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	l.agg = nil // a tip move is a path move is a depth move
+	return nil
+}
+
+// SetMeta writes one caller's key into meta (empty value removes it). tip is the store's
+// own key; this is the caller's namespace — "the daemon had this session open", "a wait
+// is due at" — the kind of control state that has to survive exactly as long as the
+// store, which is nothing else on this machine. Judgment stays where it was: these keys
+// are doorbells a caller rings itself on the way in, and a doorbell that lied costs one
+// unnecessary look, never one mistaken action.
+func (l *Log) SetMeta(key, value string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if key == metaTip || key == metaSeqNext {
+		return errors.New("store: " + key + " is the store's own meta key")
+	}
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	var opErr error
+	if value == "" {
+		_, opErr = tx.Exec("DELETE FROM meta WHERE key = ?", key)
+	} else {
+		opErr = upsertMeta(tx, key, value)
+	}
+	if opErr != nil {
+		tx.Rollback()
+		return opErr
+	}
 	return tx.Commit()
+}
+
+// Meta reads one caller's key from an open store.
+func (l *Log) Meta(key string) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var v string
+	err := l.db.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&v)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// MetaOf reads one meta key of a store nobody has opened — the doorbell read: open, one
+// row, close, with the same stamp cache Inspect runs on. A false answer here is a store
+// without that key, which is the same answer an open store gives.
+func MetaOf(dir, key string) (string, bool) {
+	l, err := Open(dir, false)
+	if err != nil {
+		return "", false
+	}
+	defer l.Close()
+	return l.Meta(key)
 }
 
 // Patch rewrites one entry in place (edit summary text, move boundary — and today, the
@@ -409,7 +477,11 @@ func (l *Log) Patch(e *ir.Entry) error {
 		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	l.agg = nil // Rows moved, and LastTs may have
+	return nil
 }
 
 // Delete removes an entry and re-attaches its children to its parent. The children's
@@ -479,7 +551,11 @@ func (l *Log) Delete(id string) error {
 		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	l.agg = nil // entries, depth and the store's bytes all just moved
+	return nil
 }
 
 // rewriteParent swaps the parentId an entry's payload carries.
@@ -579,77 +655,140 @@ func (l *Log) effectiveTip() string {
 }
 
 // Read is the summary row's numbers, taken from a store this process has open.
+//
+// The numbers are cached: re-asking them is a statement of SQL, and at the number of
+// open stores a busy daemon carries, refreshing a list should not have to ask them.
+// The cache is trusted only while the store's files agree with the stamps it was taken
+// at — which costs two stats and no query, because a write always dirties one of them.
 func (l *Log) Read() (Info, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return queryInfo(l.db, l.dir)
+	st := statStamps(l.dir)
+	if l.agg != nil && st.equal(l.aggKey) {
+		in := *l.agg
+		in.LogBytes = st.bytes()
+		return in, nil
+	}
+	in, err := queryInfo(l.db)
+	if err != nil {
+		return Info{}, err
+	}
+	cp := in
+	l.agg, l.aggKey = &cp, st
+	in.LogBytes = st.bytes()
+	return in, nil
 }
 
 // Inspect is the summary row's numbers of a session nobody has opened: one open, one
-// query, one close — the cold open this store costs is a millisecond, not a replay.
+// query, one close — the cold open this store costs is a millisecond, not a replay —
+// and after that first one, a package cache keyed by the same stamps Read uses. The
+// hundred sessions nobody clicked cost a stat each per listing, not a query.
 func Inspect(dir string) (Info, error) {
 	if _, err := os.Stat(filepath.Join(dir, DBFileName)); err != nil {
+		inspectCacheMu.Lock()
+		delete(inspectCache, dir) // a session deleted out from under us loses its cached row
+		inspectCacheMu.Unlock()
 		return Info{}, err
+	}
+	st := statStamps(dir)
+	inspectCacheMu.Lock()
+	e, ok := inspectCache[dir]
+	inspectCacheMu.Unlock()
+	if ok && st.equal(e.st) {
+		in := e.in
+		in.LogBytes = st.bytes()
+		return in, nil
 	}
 	l, err := Open(dir, false)
 	if err != nil {
 		return Info{}, err
 	}
 	defer l.Close()
-	return queryInfo(l.db, dir)
+	in, err := queryInfo(l.db)
+	if err != nil {
+		return Info{}, err
+	}
+	in.LogBytes = st.bytes()
+	inspectCacheMu.Lock()
+	inspectCache[dir] = inspectEntry{st: st, in: in}
+	inspectCacheMu.Unlock()
+	return in, nil
 }
 
-// queryInfo folds the handful of aggregates a session list row is made of.
-func queryInfo(db *sql.DB, dir string) (Info, error) {
-	in := Info{}
-	if err := db.QueryRow("SELECT COUNT(*) FROM entry").Scan(&in.Entries); err != nil {
-		return Info{}, err
-	}
-	// Rows counts the write events reached by seq; tip moves and deletes are single
-	// updates now, which is the number's new sentence (see Info.Rows).
-	var rows int64
-	if err := db.QueryRow("SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?", metaSeqNext).Scan(&rows); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Info{}, err
-	}
-	in.Rows = rows
-	// The depth of the tip's path: walk the edges up from the tip. A cycle is impossible
-	// by construction (an edge only ever points at an entry of a lower seq), so the
-	// recursive step always terminates.
-	tip := ""
-	if err := db.QueryRow(`SELECT value FROM meta WHERE key = ? AND EXISTS(SELECT 1 FROM entry WHERE id = meta.value)`, metaTip).Scan(&tip); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Info{}, err
-	}
-	if tip == "" {
-		if err := db.QueryRow("SELECT id FROM entry ORDER BY seq DESC LIMIT 1").Scan(&tip); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return Info{}, err
-		}
-	}
-	in.Tip = tip
-	if tip != "" {
-		var d int
-		if err := db.QueryRow(`WITH RECURSIVE up(id, parent, d) AS (
-				SELECT id, parent, 1 FROM entry WHERE id = ?
-				UNION ALL
-				SELECT e.id, e.parent, up.d + 1 FROM up JOIN entry e ON e.id = up.parent
-			) SELECT MAX(d) FROM up`, tip).Scan(&d); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return Info{}, err
-		}
-		in.Depth = d
-	}
-	var ts sql.NullFloat64
-	if err := db.QueryRow("SELECT MAX(ts) FROM entry").Scan(&ts); err != nil {
-		return Info{}, err
-	}
-	if ts.Valid {
-		in.LastTs = time.Unix(int64(ts.Float64), 0).UTC()
-	}
-	// Bytes is the disk the session's directory actually spends on the store, WAL
-	// included — the sidebar's number is what the disk says, not what a resting file says.
+// stamps is the (mtime, size) pair of a store's two files. Any write that moves a
+// summary number either dirties the WAL or is the checkpoint that folds it back —
+// either way at least one of the four figures moves — so a matching stamp means the
+// numbers are as current as the files the list is made of. The package cache below is
+// bounded by the number of session directories, which is the order a listing already is.
+type stamps struct {
+	dbMod, walMod time.Time
+	dbSize        int64
+	walSize       int64
+}
+
+func statStamps(dir string) stamps {
+	var s stamps
 	if fi, err := os.Stat(filepath.Join(dir, DBFileName)); err == nil {
-		in.LogBytes += fi.Size()
+		s.dbMod, s.dbSize = fi.ModTime(), fi.Size()
 	}
 	if fi, err := os.Stat(filepath.Join(dir, DBFileName+"-wal")); err == nil {
-		in.LogBytes += fi.Size()
+		s.walMod, s.walSize = fi.ModTime(), fi.Size()
+	}
+	return s
+}
+
+func (s stamps) bytes() int64 { return s.dbSize + s.walSize }
+
+func (s stamps) equal(o stamps) bool {
+	return s.dbSize == o.dbSize && s.walSize == o.walSize &&
+		s.dbMod.Equal(o.dbMod) && s.walMod.Equal(o.walMod)
+}
+
+var (
+	inspectCacheMu sync.Mutex
+	inspectCache   = map[string]inspectEntry{}
+)
+
+type inspectEntry struct {
+	st stamps
+	in Info
+}
+
+// queryInfo is the summary row in one statement: the tip (stated, else the newest entry),
+// the depth of the path it stands on walked up the edges, the counts, and the newest
+// timestamp. A cycle in the walk is impossible by construction (an edge only ever points
+// at an entry of a lower seq), so the recursive step always terminates. The previous code
+// asked six separate questions; at the number of stores one listing walks, that
+// difference is the listing. Bytes is the caller's to stamp — what lives here is the
+// store's side of the row, and Rows keeps the number's new sentence (see Info.Rows).
+func queryInfo(db *sql.DB) (Info, error) {
+	var (
+		in    Info
+		rows  sql.NullInt64
+		tip   sql.NullString
+		depth sql.NullInt64
+		ts    sql.NullFloat64
+	)
+	err := db.QueryRow(`WITH
+			t(v) AS (SELECT COALESCE(
+					(SELECT value FROM meta WHERE key = ? AND EXISTS (SELECT 1 FROM entry WHERE id = meta.value)),
+					(SELECT id FROM entry ORDER BY seq DESC LIMIT 1))),
+			up(id, parent, d) AS (
+					SELECT e.id, e.parent, 1 FROM entry e JOIN t ON e.id = t.v
+					UNION ALL
+					SELECT e.id, e.parent, up.d + 1 FROM up JOIN entry e ON e.id = up.parent)
+		SELECT (SELECT COUNT(*) FROM entry),
+			(SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?),
+			(SELECT v FROM t),
+			(SELECT MAX(d) FROM up),
+			(SELECT MAX(ts) FROM entry)`, metaTip, metaSeqNext).
+		Scan(&in.Entries, &rows, &tip, &depth, &ts)
+	if err != nil {
+		return Info{}, err
+	}
+	in.Rows, in.Tip, in.Depth = rows.Int64, tip.String, int(depth.Int64)
+	if ts.Valid {
+		in.LastTs = time.Unix(int64(ts.Float64), 0).UTC()
 	}
 	return in, nil
 }

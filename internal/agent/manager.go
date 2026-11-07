@@ -492,6 +492,14 @@ func (m *Manager) open(ctx context.Context, id string, cfg Config) (*Session, er
 	if err != nil {
 		return nil, err
 	}
+	// The open doorbell: a session this daemon has opened is a session the next daemon
+	// should open unprompted — the user was looking at it, and any wait it holds is found
+	// again by recoverPark exactly as it was at every other open. A failed write costs the
+	// continuity and nothing else, so it is said and not fatal; an uncleared bell is no
+	// danger either: opening is what looking does anyway.
+	if err := s.log.SetMeta(metaOpen, "1"); err != nil {
+		m.logf("session %s: open doorbell: %v", id, err)
+	}
 	m.mu.Lock()
 	m.sessions[id] = s
 	m.mu.Unlock()
@@ -499,7 +507,28 @@ func (m *Manager) open(ctx context.Context, id string, cfg Config) (*Session, er
 	return s, nil
 }
 
-// LoadAll opens every session directory that has a config.
+// metaOpen is the doorbell key an opened session leaves in its store's meta and an
+// unloaded one takes back out of it: "the daemon was asked to have this one open". What
+// a wait is due is deliberately not a key of its own — a parked session cannot be
+// unloaded, so its bell is already set, and the wake's judgment was never this key's
+// (recoverPark reads the path; the bell only says whose path is worth reading).
+const metaOpen = "open"
+
+// LoadAll reads every session directory's config — so a directory with an unreadable one
+// says so while there is still a startup log to say it in — and opens the ones still
+// ringing from before: a session someone had open when this process stopped is a session
+// they are looking at again, and every wait it holds re-arms (or wakes late) inside the
+// open it now gets.
+//
+// Why only the ringing ones (r83, at scale talk): sessions grow as numerous as the user
+// is patient, only a handful are ever open, and every number a list row asks is one
+// statement from a store with nothing open (see store.Inspect and its cache). Startup and
+// resting memory are therefore O(opened) and not O(stored): a daemon with five hundred
+// conversations reads five hundred configs and one doorbell each, opens the few that ring,
+// and the look opens the rest — open emits state, so a watching UI loses nothing but the
+// moment. A session parked in another daemon's copy of this one has no bell to ring, and
+// that is the accepted cost: two daemons on one data directory was never a thing a wait
+// could survive intact anyway.
 func (m *Manager) LoadAll(ctx context.Context) error {
 	entries, err := os.ReadDir(m.root)
 	if err != nil {
@@ -515,6 +544,9 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 		cfg, err := m.loadConfig(de.Name())
 		if err != nil {
 			m.logf("skip session %s: %v", de.Name(), err)
+			continue
+		}
+		if _, rung := store.MetaOf(m.dir(de.Name()), metaOpen); !rung {
 			continue
 		}
 		if _, err := m.open(ctx, de.Name(), cfg); err != nil {
@@ -592,6 +624,13 @@ func (m *Manager) Unload(id string) (bool, error) {
 	if s == nil {
 		return false, nil
 	}
+	// The bell comes out of the door before the door closes: while it rings, every restart
+	// would open this session back up, and putting a conversation down is exactly the
+	// user's answer to "open?". Best-effort like the write at open; after Close the handle
+	// is gone, so this is the last moment it can be done quietly.
+	if err := s.log.SetMeta(metaOpen, ""); err != nil {
+		m.logf("unload session %s: open doorbell: %v", id, err)
+	}
 	// A failure here is logged rather than returned: the session is already out of the map, which is the
 	// half the caller asked for, and a refusal now would leave a session that is neither open nor findable.
 	if err := s.Close(); err != nil {
@@ -601,7 +640,8 @@ func (m *Manager) Unload(id string) (bool, error) {
 	return true, nil
 }
 
-// Close closes every session.
+// Close closes every session, doorbells left ringing: shutdown is not an answer to
+// "open?", and LoadAll reads them back on the way up.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	all := make([]*Session, 0, len(m.sessions))

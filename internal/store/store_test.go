@@ -348,3 +348,37 @@ func TestSchemaVersionGuard(t *testing.T) {
 		t.Errorf("Open of a foreign schema: %v, want a schema version error", err)
 	}
 }
+
+func TestMetaDoorbells(t *testing.T) {
+	dir := t.TempDir()
+	l := openAt(t, dir)
+	if err := l.SetMeta("open", "1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if v, ok := l.Meta("open"); !ok || v != "1" {
+		t.Errorf("Meta = %q,%v, want \"1\",true", v, ok)
+	}
+	// A doorbell rings across handles: another process — the daemon walking its data
+	// directory at startup — reads it without any handle of its own in play.
+	if v, ok := MetaOf(dir, "open"); !ok || v != "1" {
+		t.Errorf("MetaOf = %q,%v, want \"1\",true", v, ok)
+	}
+	// It survives the process, which is the whole reason it is a row and not a field.
+	l.Close()
+	if v, ok := MetaOf(dir, "open"); !ok || v != "1" {
+		t.Fatalf("MetaOf after reopen = %q,%v, want \"1\",true", v, ok)
+	}
+	// Taking the bell off is deleting the row, and an absent key answers like an absent key.
+	l = openAt(t, dir)
+	if err := l.SetMeta("open", ""); err != nil {
+		t.Fatalf("SetMeta clear: %v", err)
+	}
+	if _, ok := l.Meta("open"); ok {
+		t.Error("cleared bell still reads as rung")
+	}
+	// The store's own keys are not the caller's namespace.
+	if err := l.SetMeta(metaTip, "0000001"); err == nil {
+		t.Error("SetMeta of the store's tip key succeeded, want an error")
+	}
+	l.Close()
+}
