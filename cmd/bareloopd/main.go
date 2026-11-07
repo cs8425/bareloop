@@ -33,6 +33,7 @@ import (
 	"bareloop"
 	"bareloop/internal/agent"
 	"bareloop/internal/server"
+	"bareloop/internal/store"
 )
 
 // fileConfig is the on-disk configuration.
@@ -68,8 +69,14 @@ func main() {
 		fsync     = flag.Bool("fsync", false, "fsync every log append")
 		verbose   = flag.Bool("v", false, "log every HTTP request under /api")
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
+		nocomp    = flag.Bool("nocompress", false, "store entry payloads uncompressed (default: gzip when it pays; old stores read either way)")
 	)
 	flag.Parse()
+	// The compression knob says so before any store opens — it speaks to new writes only,
+	// and every store still reads every store whichever way each was written.
+	if *nocomp {
+		store.Compress = false
+	}
 
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.Lmsgprefix)
 	logf := logger.Printf

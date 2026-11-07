@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -177,7 +178,9 @@ func TestPatchKeepsRevisions(t *testing.T) {
 		}
 		lastSeq = seq
 		var got ir.Entry
-		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		// PayloadText because a big revision is stored deflated like any other payload —
+		// the archive is a byte stream, not a promise of readable text.
+		if err := json.Unmarshal([]byte(PayloadText(payload)), &got); err != nil {
 			t.Fatalf("rev payload: %v", err)
 		}
 		versions = append(versions, got.Content)
@@ -381,4 +384,183 @@ func TestMetaDoorbells(t *testing.T) {
 		t.Error("SetMeta of the store's tip key succeeded, want an error")
 	}
 	l.Close()
+}
+
+// TestPayloadGzipRoundTrip is the compression contract in one sitting: a big payload
+// is stored deflated and reads back byte-identically; the floor and the knob keep
+// short and refused rows plain; a store holding all three shapes at once replays and
+// searches as one; and a patch under compression still archives a readable revision.
+func TestPayloadGzipRoundTrip(t *testing.T) {
+	old := Compress
+	defer func() { Compress = old }()
+
+	long := strings.Repeat("deflate 測試 payload 內容 ", 120) // comfortably past the floor
+	l := openTest(t)
+
+	deflated := user(long)
+	if err := l.AppendEntry(deflated, true); err != nil {
+		t.Fatalf("AppendEntry deflated: %v", err)
+	}
+	var raw []byte
+	if err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", deflated.ID).Scan(&raw); err != nil {
+		t.Fatalf("raw scan: %v", err)
+	}
+	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
+		t.Fatalf("payload stored as %d bytes without gzip's magic, want a deflate stream", len(raw))
+	}
+	if len(raw) >= len(long) {
+		t.Errorf("stored %d bytes for %d of text, want the smaller", len(raw), len(long))
+	}
+
+	// The floor: short stays plain text the shell can read.
+	below := user("short")
+	if err := l.AppendEntry(below, true); err != nil {
+		t.Fatalf("AppendEntry below floor: %v", err)
+	}
+	var typ string
+	if err := l.db.QueryRow("SELECT typeof(payload) FROM entry WHERE id = ?", below.ID).Scan(&typ); err != nil {
+		t.Fatalf("typeof: %v", err)
+	}
+	if typ != "text" {
+		t.Errorf("short payload stored as %s, want text", typ)
+	}
+
+	// The knob: promised plain, long rows arrive plain too.
+	Compress = false
+	plain := user(long + " (knob-excluded)")
+	if err := l.AppendEntry(plain, true); err != nil {
+		t.Fatalf("AppendEntry knob: %v", err)
+	}
+	if err := l.db.QueryRow("SELECT typeof(payload) FROM entry WHERE id = ?", plain.ID).Scan(&typ); err != nil {
+		t.Fatalf("typeof knob row: %v", err)
+	}
+	if typ != "text" {
+		t.Errorf("Compress=false payload stored as %s, want text", typ)
+	}
+
+	// Mixed store: inflated, floor-excluded, knob-excluded — Replay speaks all three.
+	st := replayAll(t, l)
+	if st.Entries[deflated.ID].Content != long {
+		t.Error("inflated content is not the text that went in")
+	}
+	if st.Entries[plain.ID].Content != long+" (knob-excluded)" {
+		t.Error("plain row came back altered")
+	}
+
+	// Search crosses the shapes without being told which is which.
+	hits, err := l.Search("測試 payload 內容", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits %d, want 2 (the deflated row and the plain one)", len(hits))
+	}
+	for _, h := range hits {
+		if !strings.Contains(h.Snippet, "測試 payload 內容") {
+			t.Errorf("hit %s snippet does not hold the needle: %q", h.ID, h.Snippet)
+		}
+	}
+
+	// A patch under compression: the archive is bytes, and PayloadText reads them back.
+	Compress = true
+	revised := *deflated
+	revised.Content = strings.Repeat("修訂版 content ", 120)
+	if err := l.Patch(&revised); err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+	var revp string
+	if err := l.db.QueryRow("SELECT payload FROM entry_rev WHERE entry_id = ? ORDER BY seq DESC LIMIT 1", deflated.ID).Scan(&revp); err != nil {
+		t.Fatalf("rev scan: %v", err)
+	}
+	var got ir.Entry
+	if err := json.Unmarshal([]byte(PayloadText(revp)), &got); err != nil {
+		t.Fatalf("rev payload through PayloadText: %v", err)
+	}
+	if got.Content != long {
+		t.Error("the archived version is not the one it replaced")
+	}
+	if got := replayAll(t, l).Entries[deflated.ID].Content; got != revised.Content {
+		t.Error("the live row did not take the revision")
+	}
+}
+
+// TestFts5TrigramAvailable is a hand raised by the build's SQLite: fts5 with the
+// trigram tokenizer is the only in-tree answer for CJK substring search, and plan B
+// (an index over many sessions) is only on the table if this passes. Skipped, not
+// failed, when the amalgam says no — the answer belongs in the test log.
+func TestFts5TrigramAvailable(t *testing.T) {
+	l := openTest(t)
+	if _, err := l.db.Exec(`CREATE VIRTUAL TABLE f USING fts5(body, tokenize='trigram')`); err != nil {
+		t.Skipf("this build's SQLite has no fts5/trigram: %v", err)
+	}
+	if _, err := l.db.Exec(`INSERT INTO f(body) VALUES ('繁中搜尋測試段落')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	var hits int
+	if err := l.db.QueryRow(`SELECT COUNT(*) FROM f WHERE f MATCH '"中搜尋"'`).Scan(&hits); err != nil {
+		t.Fatalf("trigram match: %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("trigram hits %d, want 1 — the tokenizer does not speak CJK as this build hoped", hits)
+	}
+}
+
+// TestCorpusScan prices plan A on real data: stored bytes, inflated bytes, and the
+// wall time of one search scan per store. Set BLSTORE to a data directory (and
+// optionally BLQUERY to a needle) to run it; the numbers answer "can we live on
+// on-the-fly inflation" with the corpus's own voice rather than this file's guesses.
+func TestCorpusScan(t *testing.T) {
+	root := os.Getenv("BLSTORE")
+	if root == "" {
+		t.Skip("set BLSTORE to a data directory to price the on-the-fly scan")
+	}
+	needle := os.Getenv("BLQUERY")
+	if needle == "" {
+		needle = "content"
+	}
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	var totalStored, totalText, totalEntries int64
+	t0 := time.Now()
+	for _, de := range dirs {
+		dir := filepath.Join(root, de.Name())
+		if _, err := os.Stat(filepath.Join(dir, DBFileName)); err != nil {
+			continue
+		}
+		l, err := Open(dir, false)
+		if err != nil {
+			t.Errorf("open %s: %v", dir, err)
+			continue
+		}
+		var stored int64
+		if err := l.db.QueryRow("SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM entry").Scan(&stored); err != nil {
+			t.Errorf("stored bytes of %s: %v", de.Name(), err)
+		}
+		var texts int64
+		rows, err := l.db.Query("SELECT payload FROM entry")
+		if err == nil {
+			for rows.Next() {
+				var p string
+				if err := rows.Scan(&p); err == nil {
+					texts += int64(len(payloadText(p)))
+				}
+			}
+			rows.Close()
+		}
+		scanStart := time.Now()
+		hits, err := l.Search(needle, 200)
+		scan := time.Since(scanStart)
+		if err != nil {
+			t.Errorf("search %s: %v", de.Name(), err)
+		}
+		var entries int64
+		l.db.QueryRow("SELECT COUNT(*) FROM entry").Scan(&entries)
+		t.Logf("%s: entries=%d stored=%d text=%d hits=%d scan=%v", de.Name(), entries, stored, texts, len(hits), scan.Round(time.Millisecond))
+		totalStored, totalText, totalEntries = totalStored+stored, totalText+texts, totalEntries+entries
+		l.Close()
+	}
+	t.Logf("BLSTORE %s: %d entries, stored %d bytes over %d of text, one scan of everything in %v",
+		root, totalEntries, totalStored, totalText, time.Since(t0).Round(time.Millisecond))
 }

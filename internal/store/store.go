@@ -27,6 +27,8 @@
 package store
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -34,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -291,6 +294,73 @@ func payloadShas(payload string) []string {
 	return out
 }
 
+// Payload compression: TOAST's stance, taken at this store's one choke point. A payload
+// column holds whichever shape is smaller — plain JSON text, or the same bytes deflated
+// and marked by gzip's magic — so a reader never asks a flag what it is: two bytes say.
+// The knob below is the operator's answer about new writes only; every store reads every
+// store, whichever way each was written.
+var Compress = true
+
+// gzipFloor is the TOAST threshold shrunk to this store's page: under half a kilobyte
+// of JSON, a deflate stream's header alone has eaten the difference.
+const gzipFloor = 512
+
+var gzWriters = sync.Pool{New: func() any {
+	w, err := gzip.NewWriterLevel(nil, gzip.DefaultCompression)
+	if err != nil {
+		panic(err) // gzip only fails on a bad level, and this one is a constant
+	}
+	return w
+}}
+
+var gzReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
+
+// maybeGzip returns the value to store: deflated bytes when that is smaller and allowed,
+// the original text otherwise. Losing costs nothing and happens constantly — a short or
+// already-entropic payload compresses to more than it started as — and losing means
+// plaintext, not a marker.
+func maybeGzip(s string) any {
+	if !Compress || len(s) < gzipFloor {
+		return s
+	}
+	zw := gzWriters.Get().(*gzip.Writer)
+	defer gzWriters.Put(zw)
+	var buf bytes.Buffer
+	zw.Reset(&buf)
+	if _, err := zw.Write([]byte(s)); err != nil {
+		return s
+	}
+	if err := zw.Close(); err != nil || buf.Len() >= len(s) {
+		return s
+	}
+	return buf.Bytes()
+}
+
+// payloadText is the read side of maybeGzip: gzip's magic answered in the negative and
+// the bytes are the text already. Plain rows — the floor's, the flag's, and every old
+// store's — travel this same line.
+func payloadText(raw string) string {
+	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
+		return raw
+	}
+	zr := gzReaders.Get().(*gzip.Reader)
+	defer gzReaders.Put(zr)
+	if err := zr.Reset(bytes.NewReader([]byte(raw))); err != nil {
+		return raw // bytes that claim gzip and are not are somebody else's diagnosis
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(zr)
+	if err != nil {
+		return raw
+	}
+	return string(out)
+}
+
+// PayloadText is the exported answer for anyone reading a payload column outside these
+// functions — blimport's digest, which must weigh the same whether or not a store
+// deflated, and the audit tool the corpus deserves.
+func PayloadText(raw string) string { return payloadText(raw) }
+
 // blobUpsert pins one reference: a new blob arrives with its first reference, an existing
 // one gains a reference (its bytes are never rewritten — the sha is the identity).
 func blobUpsert(tx *sql.Tx, r blobRef) error {
@@ -333,7 +403,7 @@ func (l *Log) AppendEntry(e *ir.Entry, setTip bool) error {
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO entry(id, parent, kind, seq, ts, payload) VALUES(?, ?, ?, ?, ?, ?)`,
-		e.ID, nullString(e.ParentID), kind, l.seq, float64(e.Ts.Unix()), payload); err != nil {
+		e.ID, nullString(e.ParentID), kind, l.seq, float64(e.Ts.Unix()), maybeGzip(payload)); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -457,6 +527,8 @@ func (l *Log) Patch(e *ir.Entry) error {
 	if err != nil {
 		return err
 	}
+	// why the revision keeps the bytes exactly as they were stored (plain or deflated):
+	// they are archived, not read twice, and payloadText speaks one language to both.
 	if _, err := tx.Exec("INSERT INTO entry_rev(entry_id, seq, payload) VALUES(?, ?, ?)", e.ID, l.seq, old); err != nil {
 		tx.Rollback()
 		return err
@@ -469,7 +541,7 @@ func (l *Log) Patch(e *ir.Entry) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec("UPDATE entry SET payload = ? WHERE id = ?", payload, e.ID); err != nil {
+	if _, err := tx.Exec("UPDATE entry SET payload = ? WHERE id = ?", maybeGzip(payload), e.ID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -530,12 +602,12 @@ func (l *Log) Delete(id string) error {
 			tx.Rollback()
 			return err
 		}
-		if _, err := tx.Exec("UPDATE entry SET parent = ?, payload = ? WHERE id = ?", nullString(parent.String), newPayload, k.id); err != nil {
+		if _, err := tx.Exec("UPDATE entry SET parent = ?, payload = ? WHERE id = ?", nullString(parent.String), maybeGzip(newPayload), k.id); err != nil {
 			tx.Rollback()
 			return err
 		}
 	}
-	for _, sha := range payloadShas(payload.String) {
+	for _, sha := range payloadShas(payloadText(payload.String)) {
 		if _, err := tx.Exec("UPDATE blob SET refcount = refcount - 1 WHERE sha256 = ?", sha); err != nil {
 			tx.Rollback()
 			return err
@@ -561,7 +633,7 @@ func (l *Log) Delete(id string) error {
 // rewriteParent swaps the parentId an entry's payload carries.
 func rewriteParent(payload, parent string) (string, error) {
 	var e ir.Entry
-	if err := json.Unmarshal([]byte(payload), &e); err != nil {
+	if err := json.Unmarshal([]byte(payloadText(payload)), &e); err != nil {
 		return "", err
 	}
 	e.ParentID = parent
@@ -613,7 +685,7 @@ func (l *Log) Replay() (*State, error) {
 // back the byte-identical ir.Entry AppendEntry was handed.
 func (l *Log) decodeEntry(payload string) (*ir.Entry, error) {
 	var e ir.Entry
-	if err := json.Unmarshal([]byte(payload), &e); err != nil {
+	if err := json.Unmarshal([]byte(payloadText(payload)), &e); err != nil {
 		return nil, err
 	}
 	for i := range e.Parts {
@@ -652,6 +724,82 @@ func (l *Log) effectiveTip() string {
 		return ""
 	}
 	return tip
+}
+
+// SearchHit is one entry whose payload holds what the caller was looking for, with a
+// snippet cut from around the first match.
+type SearchHit struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Seq     int64  `json:"seq"`
+	Ts      int64  `json:"ts"`
+	Snippet string `json:"snippet"`
+}
+
+// Search walks the live entries, inflating payloads in flight — plan A, the one that
+// keeps no index to go stale and asks no tokenizer to understand Chinese: a substring
+// is a substring in every language. The bill is CPU (an inflation per row per scan),
+// priced honestly by the corpus test; an index is a later answer to a bigger corpus.
+// The match is against the stored JSON, so a needle can hit a field name as well as a
+// word — v0 accepts that, and says so here rather than pretending otherwise.
+func (l *Log) Search(query string, limit int) ([]SearchHit, error) {
+	if query == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	needle := strings.ToLower(query)
+	rows, err := l.db.Query("SELECT id, kind, seq, ts, payload FROM entry ORDER BY seq")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SearchHit
+	for rows.Next() {
+		var (
+			h   SearchHit
+			tsf float64
+			raw string
+		)
+		if err := rows.Scan(&h.ID, &h.Kind, &h.Seq, &tsf, &raw); err != nil {
+			return nil, err
+		}
+		text := payloadText(raw)
+		at := strings.Index(strings.ToLower(text), needle)
+		if at < 0 {
+			continue
+		}
+		h.Ts = int64(tsf)
+		h.Snippet = searchSnippet(text, at, len(needle))
+		out = append(out, h)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, rows.Err()
+}
+
+// searchSnippet clips the bytes around a match down to something a list row can show,
+// then makes the edges valid characters rather than halves of one — the clip lands by
+// byte, the reader reads by character.
+func searchSnippet(text string, at, n int) string {
+	const pad = 60
+	lo, hi := at-pad, at+n+pad
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(text) {
+		hi = len(text)
+	}
+	s := strings.ToValidUTF8(text[lo:hi], "")
+	if lo > 0 {
+		s = "…" + s
+	}
+	if hi < len(text) {
+		s += "…"
+	}
+	return s
 }
 
 // Read is the summary row's numbers, taken from a store this process has open.
