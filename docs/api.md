@@ -210,8 +210,16 @@ endpoint answers it: the export adds no format of its own, so a file can be `jq`
 whatever one already knows about entries. Ids are kept, not reissued: the file is the
 session's log, and re-importing what one exported answers the same tree, byte for byte.
 
-- `?path=` exports only the path to an entry — `tip` (or any entry id) instead of the
-  whole tree; the header records `scope` either way, and a path export's tip is the cut.
+- `?path=` picks what travels, and the header records the choice as `scope`:
+  - unset — the whole tree, abandoned branches included: a clone.
+  - `tip`, `head`, `active`, `path`, or any entry id — the single line to that entry; a path export's tip is the cut.
+  - `ctx` — only what the next request would carry: the active summary plus everything
+    from its boundary on (the entries it did not replace, which sit on both sides of it
+    on the path), with the window's head entry rooted. The window is computed by the
+    same function the assembler reads, so importing a `ctx` file answers `GET payload`
+    byte for byte like the source — a thousand replaced entries stay home. Without an
+    active summary (or with a broken one, which fails open) the model reads the whole
+    path, and the window is the path.
 - `?codec=zstd|gzip|none` picks the encoding, zstd by default. The compressed bytes ride
   as the response body with **no `Content-Encoding`** — the file named `.zst` is the file
   the browser stores, whatever proxy sits in between. There is no size ceiling: this is

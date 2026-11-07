@@ -41,6 +41,10 @@ const (
 
 	ScopeFull = "full"
 	ScopePath = "path"
+	// ScopeCtx marks the window export: only the entries the next request would carry
+	// (the active summary plus everything from its boundary on), so a session that
+	// compacted a thousand entries away can be resumed elsewhere without them.
+	ScopeCtx = "ctx"
 )
 
 // The import gates. Exports are unbounded by design — one's own transcript streamed out is
