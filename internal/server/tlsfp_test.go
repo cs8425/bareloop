@@ -29,12 +29,12 @@ func TestFingerprintStableAndSensitive(t *testing.T) {
 	}
 	// Every one of the five lists moves the fingerprint on its own.
 	mutate := map[string]func(h *tls.ClientHelloInfo){
-		"cipher":   func(h *tls.ClientHelloInfo) { h.CipherSuites = append(h.CipherSuites, ciphersuiteTLS10) },
-		"version":  func(h *tls.ClientHelloInfo) { h.SupportedVersions = []uint16{tls.VersionTLS12} },
-		"curve":    func(h *tls.ClientHelloInfo) { h.SupportedCurves = h.SupportedCurves[:2] },
-		"point":    func(h *tls.ClientHelloInfo) { h.SupportedPoints = nil },
-		"extAdd":   func(h *tls.ClientHelloInfo) { h.Extensions = append(h.Extensions, extensionRenegotiation) },
-		"extOrder": func(h *tls.ClientHelloInfo) { h.Extensions[0], h.Extensions[1] = h.Extensions[1], h.Extensions[0] },
+		"cipher":  func(h *tls.ClientHelloInfo) { h.CipherSuites = append(h.CipherSuites, ciphersuiteTLS10) },
+		"version": func(h *tls.ClientHelloInfo) { h.SupportedVersions = []uint16{tls.VersionTLS12} },
+		"curve":   func(h *tls.ClientHelloInfo) { h.SupportedCurves = h.SupportedCurves[:2] },
+		"point":   func(h *tls.ClientHelloInfo) { h.SupportedPoints = nil },
+		"extAdd":  func(h *tls.ClientHelloInfo) { h.Extensions = append(h.Extensions, extensionRenegotiation) },
+		"extDrop": func(h *tls.ClientHelloInfo) { h.Extensions = h.Extensions[1:] },
 	}
 	for name, f := range mutate {
 		h := hello()
@@ -60,6 +60,63 @@ func TestFingerprintLegacyDefaultsTo12(t *testing.T) {
 	h2.SupportedVersions = []uint16{tls.VersionTLS12}
 	if got := fingerprintOf(h2); got != legacy {
 		t.Errorf("an empty version list is legacy 1.2 semantics: %s != %s", got, legacy)
+	}
+}
+
+// The GREASE experiment Chrome runs on every connection: random 0xdAdA values woven
+// into several lists at random positions. Unfiltered that noise made every Chrome
+// handshake fingerprint apart — this test is the regression the live log showed.
+func TestFingerprintSurvivesGrease(t *testing.T) {
+	base := fingerprintOf(hello())
+	spiked := func(noise ...uint16) string {
+		h := hello()
+		h.CipherSuites = append([]uint16{0x0a0a}, append(h.CipherSuites, noise...)...)
+		h.Extensions = append(append([]uint16{0xfafa}, h.Extensions...), 0x1a1a)
+		h.SupportedCurves = append([]tls.CurveID{tls.CurveID(0x5a5a)}, append(h.SupportedCurves, tls.CurveID(0x9a9a))...)
+		return fingerprintOf(h)
+	}
+	for _, v := range []uint16{0x2a2a, 0x7a7a, 0xaaaa} {
+		if got := spiked(v); got != base {
+			t.Fatalf("GREASE noise changed the fingerprint: %s vs %s", got, base)
+		}
+	}
+	// The filter may drop the reserved pattern and nothing near it: real IDs are kept.
+	h := hello()
+	h.CipherSuites = append(h.CipherSuites, 0x0a0b) // close to the pattern, not patterned
+	if fingerprintOf(h) == base {
+		t.Fatal("a cipher suite only resembling the GREASE pattern was dropped too")
+	}
+	if isGrease(0x002f) || isGrease(0xff01) || isGrease(0x1301) {
+		t.Fatal("isGrease bit into real IDs")
+	}
+}
+
+// The rest of what live Chrome logs showed per connection: GREASE riding in
+// supported_versions (logged as versions "26.26" and "58.58"), extensions
+// reshuffled every handshake, and early_data appearing only on connections
+// feeling 0-RTT. None of it is software identity; all of it must not move the
+// fingerprint — an identity that changes per connection is a rate-limit bypass.
+func TestFingerprintSurvivesChromePerConnectionNoise(t *testing.T) {
+	base := fingerprintOf(hello())
+
+	h := hello()
+	h.SupportedVersions = []uint16{tls.VersionTLS13, 0x3a3a, tls.VersionTLS12, 0x1a1a}
+	if got := fingerprintOf(h); got != base {
+		t.Fatalf("GREASE in supported_versions moved the fingerprint: %s vs %s", got, base)
+	}
+
+	h = hello()
+	for i, j := 0, len(h.Extensions)-1; i < j; i, j = i+1, j-1 {
+		h.Extensions[i], h.Extensions[j] = h.Extensions[j], h.Extensions[i]
+	}
+	if got := fingerprintOf(h); got != base {
+		t.Fatalf("shuffled extension order moved the fingerprint (extensions are a set): %s vs %s", got, base)
+	}
+
+	h = hello()
+	h.Extensions = append(h.Extensions, extensionEarlyData, extensionSessionTicket, extensionPSKKeyExchangeModes)
+	if got := fingerprintOf(h); got != base {
+		t.Fatalf("0-RTT, a session-ticket request, or a PSK-mode offer moved the fingerprint: %s vs %s", got, base)
 	}
 }
 
@@ -107,6 +164,14 @@ func TestFPRecorderHookThenKey(t *testing.T) {
 	// Plain HTTP asks the recorder nothing; the caller's IP fallback takes over.
 	if got := r.key(&http.Request{RemoteAddr: "9.9.9.9:1"}); got != "" {
 		t.Fatalf("plaintext request should have no fingerprint, got %q", got)
+	}
+	// A hello-retry second Hello is the same handshake finishing, not a new
+	// client: it must not overwrite what the first Hello recorded.
+	if _, err := r.hook(&tls.ClientHelloInfo{Conn: stubConn{ra: "9.9.9.9:44446"}, CipherSuites: []uint16{3}, HelloRetryRequest: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.key(tlsRequest("9.9.9.9:1")); got == fingerprintOf(&tls.ClientHelloInfo{CipherSuites: []uint16{3}}) {
+		t.Fatal("a hello-retry overwrote the recorded fingerprint")
 	}
 }
 
