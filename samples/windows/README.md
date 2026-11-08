@@ -6,6 +6,7 @@ Two ready-made configurations, no Docker:
 |---|---|---|---|---|---|
 | **shared folder** | `config.shared.json` | `C:/bareloop-workspace` | same folder | `C:/bareloop-workspace/Downloads` | `--filesystemRoot` = that folder |
 | **IIS site** | `config.iis.json` | `fs_*` → `C:/bareloop-iis-site`<br>`art_*` → `C:/bareloop-browser` | `C:/bareloop-browser` only | `C:/bareloop-browser/Downloads` | `--filesystemRoot` = an artifacts folder **outside** the site |
+| **shared, headed** | `config.headed.json` | same as shared | same folder | same folder | same — only the window is new |
 
 The shared folder is the simplest story: one directory, both tool families see
 everything, downloads included. The IIS config splits the world the way the
@@ -71,6 +72,40 @@ this browser lives in your own user profile.
 cd samples/windows
 .\bin\bareloopd.exe -web -config config.shared.json   # or config.iis.json
 ```
+
+To watch the agent drive a visible Chrome window instead of a headless one:
+
+```powershell
+.\bin\bareloopd.exe -web -config config.headed.json
+```
+
+`config.headed.json` is the shared config minus `--headless` (and its fixed
+viewport — a window sizes itself, `--chromeArg=--window-size=1280,900` sets it),
+with **its own `--userDataDir`** (`C:/bareloop-workspace/.browser-headed`):
+Chromium locks a user-data-dir to one browser at a time, so the headed and the
+headless sample can run side by side precisely because they do not share one.
+Copy the profile seed there too (`Copy-Item -Recurse profile-seed C:\bareloop-workspace\.browser-headed\profile`)
+if you want downloads from the windowed browser inside the shared folder as
+well; leave it unseeded if you want it to download like a normal browser.
+A headed IIS run is the same one-line edit in `config.iis.json` — drop
+`--headless`, give it a second `--userDataDir`.
+
+### GPU (the easy part on Windows)
+
+The headed config carries `--ignoreDefaultChromeArg=--disable-gpu`: puppeteer
+adds `--disable-gpu` to every launch, and that single flag is the only thing
+standing between this Chrome and your real card. Remove it and Windows Chrome
+rasterizes on the GPU through ANGLE/D3D11 — the same path ordinary Chrome uses.
+
+Unlike the Docker samples, there is nothing else to do here. Linux containers
+need `/dev/dri` passed through, a `render` group, and a Vulkan ANGLE driver
+because the GPU lives outside the container; on Windows the browser *is* on
+Windows — the display adapter is simply there, no device to map, no driver to
+install. Check it at <chrome://gpu> in the launched browser ("Software only"
+estimated where you want "Hardware accelerated"); if a machine ever falls back
+anyway, `--chromeArg=--use-angle=d3d11` forces the native backend (leave
+`--enable-unsafe-swiftshader` — the software WebGL the *headless* configs
+enable — off in headed mode; it and the GPU are opposite directions).
 
 Open <http://127.0.0.1:8090> and ask for something visible: *"build a page that
 … — test it in the browser and screenshot the result."* For `config.iis.json`,

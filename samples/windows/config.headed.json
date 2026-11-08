@@ -1,0 +1,42 @@
+{
+  "addr": "127.0.0.1:8090",
+  "data": "data",
+
+  "defaults": {
+    "name": "windows-headed",
+    "systemPrompt": "You are a careful assistant on Windows with a real browser behind the chrome_* tools — the window is visible on the operator's screen, so move deliberately: they are watching. The fs_* file tools and the browser share one folder: C:/bareloop-workspace. Write files with the fs_* tools, test them in the browser at file:///C:/bareloop-workspace/index.html (three slashes), fix what you see — do not declare a fix you have not looked at. Screenshots: always pass filePath, an absolute path under C:/bareloop-workspace — without it the image lands in the system temp folder where your file tools cannot see it. Browser downloads land in C:/bareloop-workspace/Downloads. Reply in the same language and the same script the user writes in.",
+
+    "llm": {
+      "kind": "openai",
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "apiKey": "none",
+      "model": "qwen3.6-27b"
+    },
+
+    "mcp": [
+      {
+        "name": "chrome",
+        "type": "stdio",
+        "toolPrefix": "chrome_",
+        "command": "node",
+        "args": [
+          "node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
+          "--executablePath", "C:/Program Files/Google/Chrome/Application/chrome.exe",
+          "--userDataDir", "C:/bareloop-workspace/.browser-headed/profile",
+          "--filesystemRoot", "C:/bareloop-workspace",
+          "--no-usage-statistics",
+          "--no-performance-crux",
+          "--ignoreDefaultChromeArg=--disable-gpu",
+          "--chromeArg=--window-size=1280,900",
+          "--chromeArg=--window-position=40,40"
+        ]
+      },
+      {
+        "name": "fs",
+        "type": "stdio",
+        "command": "bin/mcp-vroot.exe",
+        "args": ["-c", "vroot.shared.json", "-stdio"]
+      }
+    ]
+  }
+}
