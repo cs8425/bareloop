@@ -186,6 +186,7 @@ its own copy in `data/<id>/config.json`.
 | `defaults.asm` | payload options: `sendReasoning` (**on** by default), `sendImages` (**on**), `omitToolResultName` (off) |
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
 | `sessions[]` | optional sessions to create at startup |
+| `mcpLock` | freezes every session's MCP server set over the API: sessions may enable, disable and re-policy the servers of `defaults.mcp` and nothing else about them ([locking the server set](#locking-the-server-set)) |
 
 Keys are lowerCamelCase, and they are matched case-insensitively (`"SendReasoning"` is understood).
 Two things bite harder than a typo:
@@ -365,6 +366,27 @@ Before this policy `env` *added to* a full inheritance of the daemon's environme
 inherited all of it. A server that relied on a shell variable needs an explicit line now — its name in
 `envPassthrough`, or a `${VAR}` line in `env` — and an operator who wants the child to inherit less than even the
 base set says so with `envBase`.
+
+### Locking the server set
+
+An MCP server is arbitrary code on your own machine — stdio spawns it, http reaches it — so *which servers exist*
+is a machine decision, while *which of them a session uses* is a session decision. `"mcpLock": true` in
+`config.json` is the line between them, and it is drawn where the writing happens:
+
+| | under the lock |
+|---|---|
+| enabling and disabling a pre-registered server (`disabled`), its tool switches, its prefix, its structuredContent | **still the session's** — none of it is part of the server's identity, and none of it started a process or opened a socket it was not already connected to |
+| `PATCH`, create and import carrying a *different* server list | **403**, naming what is still yours to do. An empty list is a list, and it is refused the same way |
+| a body that says nothing about `mcp` | not a change, exactly as it was before the lock — the settings page keeps re-saving the whole config it read |
+| sessions already on disk when the lock went up | **left exactly as they are**. The lock guards writes; it does not audit history |
+| `config.json` itself — including its `sessions[]` lines | **open**: it is the trust root the lock is defined in, and a lock that refused the operator's own file would be locking its own house |
+
+The comparison is itemwise identity — everything about an entry that would mean reconnecting it — with only the
+enabled bit ignored, which keeps the lock and the reconnect logic agreeing forever about what a server *is*:
+a re-saved list passes, a moved `url`, a changed `command`, a renamed or reordered entry is a new server set and
+gets refused. The way back to a session's server set is the one for every other hand edit: stop the daemon, edit
+`data/<id>/config.json`, start again. What the lock promises is narrow and total: nothing arriving over the API
+can change which MCP servers this machine runs.
 
 ### Tools: switches, prefixes and the cache
 

@@ -144,6 +144,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.mgr.Create(r.Context(), cfg)
 	if err != nil {
+		// A locked MCP list outranks the conflict guess below: the body asked for servers this
+		// daemon will not host, and "409 the id exists" would send the caller off editing ids.
+		if errors.Is(err, agent.ErrMCPLocked) {
+			writeErr(w, http.StatusForbidden, err)
+			return
+		}
 		// The usual case is that the directory already exists: the directory is the identity.
 		writeErr(w, http.StatusConflict, err)
 		return
@@ -408,6 +414,13 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	patch.ID = sess.ID
 	if err := sess.UpdateConfig(r.Context(), patch); err != nil {
+		// The lock is a policy refusal, not a malformed body: 403 says "this daemon decided so"
+		// where 400 would say "your request is wrong", and the difference is what a client
+		// retries — never the lock, possibly the JSON.
+		if errors.Is(err, agent.ErrMCPLocked) {
+			writeErr(w, http.StatusForbidden, err)
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}

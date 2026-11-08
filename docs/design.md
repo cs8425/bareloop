@@ -372,6 +372,26 @@ verbatim; a name keeps the value in the child's environment only. `envBase: fals
 since what a process runs with is part of what it is, all three fields belong to the server's **Identity** —
 changing one restarts the child, like a changed url.
 
+### Who is allowed to decide the server set
+
+The same logic that freezes a server's environment wants the server *list* frozen one level up: a session — or
+anything that can reach the API — naming a new stdio entry is a new program spawned on this machine, which is a
+machine decision no conversation should get to make. `mcpLock` in `config.json` says so where the writes happen
+(`Manager.create` and `Session.UpdateConfig`), and the design question was what one comparison to reuse. The
+answer is the server's `Identity()` with the enabled bit pressed flat: Identity already means *everything about
+this entry that would mean reconnecting it*, so the lock and the reconnect logic can be shown by construction
+never to disagree about what a server is — and the tool-policy fields, deliberately outside Identity, fall free
+of the lock for the same reason they fall free of a reconnect. A settings save that re-sends the list it read
+therefore passes on the same equality that keeps it from reconnecting anything, and the list is compared itemwise
+in order, because the order is what the tool registry walks.
+
+The rest follows from aiming the lock at writes and nothing else: sessions already on disk are never audited
+(changing one is stop-and-edit, like every other hand edit), a fork carries its source's servers because the copy
+introduces nothing the daemon did not already host — the one internal `Create` exempted, by asking *where the list
+came from* rather than what it says — and `config.json` itself, the trust root the lock is defined in, answers to
+nothing it defines. A refusal leaves the everyday untouched: toggle, tool switches and prefix keep working, which
+is what keeps the lock something an operator leaves on.
+
 ### What a tool result is stored as
 
 A result's `content` blocks become the entry's `content` and its image `parts`; `structuredContent` goes

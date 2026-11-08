@@ -4,6 +4,7 @@
   "web": "",
   "fsync": false,
   "debug": false,
+  "mcpLock": false,
 
   "defaults": {
     "name": "main",

@@ -268,6 +268,13 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 
 	dst, err := s.mgr.Create(r.Context(), cfg)
 	if err != nil {
+		// A bundle that carries MCP servers this daemon will not host is the lock speaking, not
+		// a bad file: import is how a session — or anything that can POST — could otherwise
+		// walk a server set past mcpLock.
+		if errors.Is(err, agent.ErrMCPLocked) {
+			writeErr(w, http.StatusForbidden, err)
+			return
+		}
 		if strings.Contains(err.Error(), "already exists") {
 			writeErr(w, http.StatusConflict, err)
 			return

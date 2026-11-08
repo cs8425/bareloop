@@ -911,6 +911,16 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		s.mu.Unlock()
 		return err
 	}
+	// The lock, when the daemon set one (mcpLock): a body may carry the stored list — the
+	// settings page re-saves the whole config it read, and that has to keep working — and may
+	// carry its enabled bit and tool policy in any spelling, because those never entered the
+	// comparison. Anything else about the servers is the daemon's decision, and the answer
+	// says so in the response instead of quietly keeping the old list. An absent list merged
+	// to old.MCP above and compares equal here, exactly as it should.
+	if s.mgr.mcpLock && !sameMCPLocked(old.MCP, patch.MCP) {
+		s.mu.Unlock()
+		return ErrMCPLocked
+	}
 	// Both questions are asked of the resolved endpoints rather than the stored ones, and the difference is
 	// the whole point: PATCHing only the session's proxy changes where every endpoint that names none is
 	// dialled, and an identity comparison on the stored fields would report "nothing changed" for the one

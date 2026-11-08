@@ -59,6 +59,12 @@ type fileConfig struct {
 	// "same" to serve them on the API port at /debug/pprof/. Empty means off. They are unauthenticated
 	// either way, which is why 127.0.0.1 is the point of asking for it.
 	Pprof string `json:"pprof,omitempty"`
+	// MCPLock freezes every session's MCP server set over the API: sessions may enable or
+	// disable and re-policy the servers of defaults.mcp, and nothing else about them; PATCH,
+	// create and import carry the daemon's list or nothing. Sessions already on disk keep
+	// whatever they have — the lock guards writes, not history — and this file's own
+	// "sessions" entries are config, so they are not what the lock speaks to.
+	MCPLock bool `json:"mcpLock,omitempty"`
 }
 
 func main() {
@@ -160,6 +166,7 @@ func main() {
 
 	hub := server.NewHub(logf)
 	mgr := agent.NewManager(cfg.Data, cfg.Fsync, cfg.Defaults, hub.Broadcast, logf)
+	mgr.SetMCPLock(cfg.MCPLock)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -173,7 +180,10 @@ func main() {
 		logf("session %q: using %s/%s/config.json (this file's defaults applied when it was created)", s.ID, cfg.Data, s.ID)
 	}
 	for _, sc := range cfg.Sessions {
-		if _, err := mgr.Create(ctx, sc); err != nil {
+		// CreateFromConfig, not Create: this file is the trust root the lock itself lives in,
+		// and refusing the operator's own startup lines would be the lock holding a door shut
+		// on its own house.
+		if _, err := mgr.CreateFromConfig(ctx, sc); err != nil {
 			logf("session %q from this file: %v (an existing session keeps its own config; edit %s/%s/config.json)", sc.ID, err, cfg.Data, sc.ID)
 		}
 	}

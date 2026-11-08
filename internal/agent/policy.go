@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"bareloop/internal/mcp"
 	"bareloop/internal/tlsconf"
 )
 
@@ -114,4 +116,40 @@ func (s *Session) logPolicy(cfg Config) {
 			s.logf("%s: caFile is set for %s, which is not https — it is not used", p.what, p.url)
 		}
 	}
+}
+
+// ErrMCPLocked is the daemon saying that the MCP servers are its decision and not a session's
+// (the config.json field mcpLock). Every route that could write a session's server list —
+// PATCH, create, import — can answer it, and none of the everyday things trip it: toggling a
+// pre-registered server, its tool switches, its prefix. The message is written to be read by
+// whoever got the 403, telling them both what is still theirs to do and where the door that
+// opens this one is.
+var ErrMCPLocked = errors.New("agent: the MCP servers are locked by the daemon config (mcpLock): enabling, disabling and tool policy stay yours, the server list is not — to change the servers themselves, stop the daemon and edit its config.json")
+
+// sameMCPLocked compares two MCP lists the way the lock cares about them: itemwise equality
+// of everything that decides the server, ignoring only the enabled bit — the one field the
+// lock exists to leave free. Position matters as much as content, because the list is what
+// the tool registry walks; a reordering is a rewrite of it, and a rewrite is what is locked.
+// The tool-policy fields (disabledTools, toolPrefix, structuredContent) never entered
+// Identity in the first place, so a body re-saving them unchanged — or changed, which the
+// lock does not forbid — reads as the same list here and passes.
+func sameMCPLocked(old, next []mcp.Config) bool {
+	if len(old) != len(next) {
+		return false
+	}
+	for i := range old {
+		if mcpLockedKey(old[i]) != mcpLockedKey(next[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// mcpLockedKey is a server's Identity with the enabled bit pressed flat: Identity is already
+// "everything about this entry that would mean reconnecting", which is exactly the surface
+// the lock freezes, and borrowing it keeps the two from ever disagreeing about what the entry
+// is. The value receiver makes clearing Disabled free.
+func mcpLockedKey(c mcp.Config) string {
+	c.Disabled = false
+	return c.Identity()
 }

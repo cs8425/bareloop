@@ -30,6 +30,14 @@ type Manager struct {
 	seq      atomic.Int64
 	// defaults are used when a request omits them (per-session config still wins).
 	defaults Config
+	// mcpLock is the daemon's answer to "may a session ever disagree with defaults.mcp about
+	// which servers exist": when set, the servers themselves are frozen over the API (PATCH,
+	// create and import only pass a list that equals the stored one or the defaults, apart
+	// from the enabled bit), while toggling a pre-registered server and its tool policy stay
+	// available. A stored config the lock predates is left exactly as it is — the lock guards
+	// writes, it does not audit what is already on disk, and changing an old session is an act
+	// of stopping the daemon and editing data/config.json instead.
+	mcpLock bool
 }
 
 // NewManager creates a manager rooted at dir.
@@ -66,6 +74,15 @@ func (m *Manager) Root() string { return m.root }
 
 // Defaults returns the base configuration new sessions start from.
 func (m *Manager) Defaults() Config { return m.defaults }
+
+// SetMCPLock freezes the MCP server set over the API, from the daemon's config.json (mcpLock).
+// It is called once at startup, before any session opens, so it races nothing.
+func (m *Manager) SetMCPLock(on bool) {
+	m.mcpLock = on
+	if on {
+		m.logf("mcp lock on: sessions may enable or disable and re-policy the %d server(s) of defaults.mcp, and nothing else about them; changing the set itself means stopping the daemon and editing config.json", len(m.defaults.MCP))
+	}
+}
 
 // MergeDefaults fills empty fields of cfg from the manager defaults.
 func (m *Manager) MergeDefaults(cfg Config) Config {
@@ -322,6 +339,26 @@ func (m *Manager) Peek(id string) (*Session, bool) {
 
 // Create writes a new session's config and opens it.
 func (m *Manager) Create(ctx context.Context, cfg Config) (*Session, error) {
+	return m.create(ctx, cfg, true)
+}
+
+// CreateFromConfig is Create for sessions named in the daemon's own config.json: that file is
+// the trust root mcpLock lives in, so its startup lines never answer to the lock. Anyone
+// reaching this from a request body has misunderstood the lock.
+func (m *Manager) CreateFromConfig(ctx context.Context, cfg Config) (*Session, error) {
+	return m.create(ctx, cfg, false)
+}
+
+// create is Create with one extra fact known only inside the daemon: whether cfg's MCP list
+// arrived from a client (true — the lock speaks to it) or was copied by the daemon itself
+// (false — a fork carries its source's servers, which the lock deliberately allows: the copy
+// introduces no server the daemon did not already host). The check runs before MergeDefaults
+// so that a list the body never mentioned passes through to the defaults untouched, while a
+// list somebody did write must already be the defaults apart from the enabled bit.
+func (m *Manager) create(ctx context.Context, cfg Config, mcpFromClient bool) (*Session, error) {
+	if m.mcpLock && mcpFromClient && cfg.MCP != nil && !sameMCPLocked(m.defaults.MCP, cfg.MCP) {
+		return nil, ErrMCPLocked
+	}
 	if strings.TrimSpace(cfg.ID) == "" {
 		return nil, errors.New("agent: session id required")
 	}

@@ -94,8 +94,10 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 		cfg.Name += " (fork)"
 	}
 	// Create owns the id and the validation (pricing, structured modes, policy) and refuses
-	// an existing directory — the fork inherits all of that rather than re-deriving it.
-	dst, err := m.Create(ctx, cfg)
+	// an existing directory — the fork inherits all of that rather than re-deriving it. The
+	// MCP list travels as the daemon's own copy, which is what keeps a fork legal under
+	// mcpLock: the copy introduces no server the source did not already run.
+	dst, err := m.create(ctx, cfg, false)
 	if err != nil {
 		return "", 0, err
 	}
