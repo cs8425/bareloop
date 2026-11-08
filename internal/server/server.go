@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,14 @@ type Server struct {
 	testdata fs.FS
 	// pprof is the operator's "serve Go's runtime profiles on the API port too" switch (EnablePprof).
 	pprof bool
+	// auth is the login gate around every route when one was configured
+	// (EnableAuth); nil means this daemon answers anonymously, which is the
+	// shape of every config written before the gate existed.
+	auth *Auth
+	// fps remembers the TLS fingerprint of each connecting address. It exists
+	// whether or not TLS is on — without TLS nothing ever fills it, and the
+	// rate-limit keys fall back to addresses on their own.
+	fps *fpRecorder
 }
 
 // New creates the HTTP handler set.
@@ -57,7 +66,7 @@ func New(mgr *agent.Manager, hub *Hub, embedded fs.FS, webDir string, logf func(
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	s := &Server{mgr: mgr, hub: hub, web: embedded, dir: webDir, logf: logf}
+	s := &Server{mgr: mgr, hub: hub, web: embedded, dir: webDir, logf: logf, fps: newFPRecorder(logf)}
 	if webDir != "" {
 		s.web = os.DirFS(webDir)
 	}
@@ -116,7 +125,39 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	mux.HandleFunc("/", s.handleStatic)
-	return logWrap(s.logf, mux)
+	h := logWrap(s.logf, mux)
+	if s.auth != nil {
+		// Outside the log wrapper on purpose: the gate's own refusals are the
+		// requests an operator most wants to see reasoned about, and they are
+		// already logged inside the gate with their bucket counts.
+		h = s.auth.Middleware(h)
+	}
+	return h
+}
+
+// EnableAuth installs the login gate. Like EnablePprof it has to happen before
+// Handler() is called — the wrapper is chosen while the handler is built.
+func (s *Server) EnableAuth(a *Auth) {
+	s.auth = a
+	a.fps = s.fps // failed logins charge TLS fingerprints when the daemon can see them
+	a.startCleaner()
+}
+
+// Wrap puts the gate in front of a handler that does not come from Handler()
+// — today that is one handler: the profiler on its own port, which shares the
+// daemon's credentials rather than its anonymity.
+func (s *Server) Wrap(h http.Handler) http.Handler {
+	if s.auth == nil {
+		return h
+	}
+	return s.auth.Middleware(h)
+}
+
+// FPHook is the tls.Config.GetConfigForClient that records client fingerprints
+// (tlsfp.go). Wiring passes it to the server's TLS config when one exists; an
+// operator later adding their own GetConfigForClient calls this one first.
+func (s *Server) FPHook(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+	return s.fps.hook(chi)
 }
 
 // ---------------------------------------------------------------- sessions

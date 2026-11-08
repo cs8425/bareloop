@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -65,6 +66,69 @@ type fileConfig struct {
 	// whatever they have — the lock guards writes, not history — and this file's own
 	// "sessions" entries are config, so they are not what the lock speaks to.
 	MCPLock bool `json:"mcpLock,omitempty"`
+	// Bind is the listening surface around the API itself: whom to believe when something
+	// in front speaks for a client, and the key pair served on the port. It lives apart
+	// from "auth" because both facts outlive the login gate — TLS is useful with no gate,
+	// and trustedProxies names networks whether or not anything behind them must log in.
+	Bind bindConfig `json:"bind,omitempty"`
+	// Auth is the login gate. Absent — the default — every route answers anonymously
+	// exactly as it always did; present, and sessions, websocket, SSE, the profiler and
+	// the API all require the credential first, with GET /api/health the one exemption
+	// a container healthcheck can knock on. Setting the gate off when a forward-auth
+	// proxy takes over is deleting this object, not editing it.
+	Auth *authConfig `json:"auth,omitempty"`
+}
+
+// bindConfig is the listening surface: see fileConfig.Bind.
+type bindConfig struct {
+	// TrustedProxies names the networks whose X-Forwarded-For may be believed, as
+	// CIDRs ("10.0.0.0/8") or bare addresses ("127.0.0.1", read as /32). Empty — the
+	// default — means the TCP peer address is the client and the header is never
+	// consulted: believing it without a declared boundary would hand every request the
+	// pen that writes the rate limiter's buckets.
+	TrustedProxies []string `json:"trustedProxies,omitempty"`
+	// TLS is the certificate pair this port serves HTTPS with. Its presence is the
+	// switch: with it set the port speaks TLS only (no plaintext, no redirect — an
+	// http-to-https redirect needs an external hostname this daemon does not know),
+	// and login cookies get the Secure flag from the same fact.
+	TLS *tlsBind `json:"tls,omitempty"`
+}
+
+type tlsBind struct {
+	Cert string `json:"cert,omitempty"`
+	Key  string `json:"key,omitempty"`
+}
+
+// authConfig is the gate: one operator, one password. Pass arrives through the
+// same ${ENV} expansion every other secret in this file uses, and it is stored
+// in plain text because the login popup and HTTP Basic both hand the password
+// over on every attempt — a hash could serve the popup (one verify per login)
+// but would have to be recomputed per request to serve Basic, and nothing
+// deserves 0.4 seconds per request. Treat this file as a keystore (0600) and
+// give the daemon a password of its own.
+type authConfig struct {
+	User string `json:"user,omitempty"`
+	Pass string `json:"pass,omitempty"`
+	// Session bounds a login by inactivity: a cookie untouched for this long
+	// (default "168h") stops answering, while use keeps it alive — the deliberate
+	// trade being that a stolen cookie in constant use never ages out, and every
+	// honest session outlives its deadline without noticing. The cookie itself
+	// carries no expiry: closing the browser is a logout with no button.
+	Session sessionConfig `json:"session,omitempty"`
+	// RateLimit is the failed-login window: MaxAttempts wrong credentials per key
+	// per Window, after which the key hears 429 until the window rolls. The key is
+	// the TLS fingerprint when one was seen and the client address otherwise. The
+	// window always ends by itself; there is nothing to unlock by hand.
+	RateLimit rateLimitConfig `json:"rateLimit,omitempty"`
+}
+
+type sessionConfig struct {
+	IdleTimeout string `json:"idleTimeout,omitempty"` // duration string, default "168h"
+}
+
+type rateLimitConfig struct {
+	MaxAttempts int    `json:"maxAttempts,omitempty"` // default 5
+	Window      string `json:"window,omitempty"`      // duration string, default "15m"
 }
 
 func main() {
@@ -207,6 +271,53 @@ func main() {
 		logf("testdata: %s is served at http://%s/testdata/ — unauthenticated, like everything else on this port", *testdata, cfg.Addr)
 	}
 
+	scheme := "http"
+	if cfg.Bind.TLS != nil {
+		scheme = "https"
+	}
+
+	// The boundary for X-Forwarded-For parses even with no gate in front of it: it is a
+	// fact about the listening surface, and a typo'd CIDR deserves to be fatal at
+	// startup either way.
+	trusted, err := server.ParseNets(cfg.Bind.TrustedProxies)
+	if err != nil {
+		logger.Fatalf("bind.trustedProxies: %v", err)
+	}
+
+	// The login gate is off until this file names one, and off is the shape of every
+	// config written before it existed. When it is on, everything it wraps stops
+	// answering strangers — the UI pops a login dialog, curl -u and go tool pprof speak
+	// Basic, and the browser's cookie is accepted everywhere a password was asked for.
+	if cfg.Auth != nil {
+		ac := cfg.Auth
+		if ac.User == "" || ac.Pass == "" {
+			logger.Fatalf(`auth: user and pass are both required (write the password as "${SOME_ENV}" to keep it out of this file)`)
+		}
+		idle := 7 * 24 * time.Hour
+		if ac.Session.IdleTimeout != "" {
+			if idle, err = time.ParseDuration(ac.Session.IdleTimeout); err != nil {
+				logger.Fatalf("auth.session.idleTimeout: %v", err)
+			}
+		}
+		window := 15 * time.Minute
+		if ac.RateLimit.Window != "" {
+			if window, err = time.ParseDuration(ac.RateLimit.Window); err != nil {
+				logger.Fatalf("auth.rateLimit.window: %v", err)
+			}
+		}
+		attempts := ac.RateLimit.MaxAttempts
+		if attempts == 0 {
+			attempts = 5
+		}
+		srv.EnableAuth(server.NewAuth(ac.User, ac.Pass, idle, window, attempts, cfg.Bind.TLS != nil, trusted, logf))
+		logf("auth: this port requires a login (user %q, session idle %v, %d failed logins per %v) — /api/health stays free", ac.User, idle, attempts, window)
+		if cfg.Bind.TLS == nil {
+			if h, _, e := net.SplitHostPort(cfg.Addr); e == nil && h != "127.0.0.1" && h != "::1" && h != "localhost" {
+				logf(`auth on, bound to %s over plain HTTP — the password crosses that wire on every login: set bind.tls, or terminate TLS at a proxy named in bind.trustedProxies`, cfg.Addr)
+			}
+		}
+	}
+
 	// pprof is off unless asked for, and asking has two shapes: an address (a listener of its own) or
 	// "same" (the API port, under /debug/pprof/). The difference matters because /debug/pprof/profile is
 	// a 30-second CPU profile with nothing in front of it, so the startup line names which one you got.
@@ -216,10 +327,14 @@ func main() {
 	case "":
 	case "same":
 		srv.EnablePprof()
-		if h, _, err := net.SplitHostPort(cfg.Addr); err == nil && h != "127.0.0.1" && h != "::1" && h != "localhost" {
+		guarded := "unauthenticated"
+		if cfg.Auth != nil {
+			guarded = "behind the login gate"
+		}
+		if h, _, err := net.SplitHostPort(cfg.Addr); err == nil && h != "127.0.0.1" && h != "::1" && h != "localhost" && cfg.Auth == nil {
 			logf(`pprof on the API port at %s, which is not loopback — these endpoints are unauthenticated: bind 127.0.0.1, or use -pprof 127.0.0.1:6060 instead`, cfg.Addr)
 		} else {
-			logf("pprof on http://%s/debug/pprof/ (the API port, unauthenticated)", cfg.Addr)
+			logf("pprof on %s://%s/debug/pprof/ (the API port, %s)", scheme, cfg.Addr, guarded)
 		}
 	default:
 		if _, _, err := net.SplitHostPort(cfg.Pprof); err != nil {
@@ -227,19 +342,43 @@ func main() {
 		}
 		// Its own listener, because the API port is what the browser talks to and its catch-all route is
 		// the UI. A bind failure is fatal on purpose: a daemon quietly running without the profiler you
-		// asked for is the confusing outcome.
-		pprofSrv = &http.Server{Addr: cfg.Pprof, Handler: server.PprofHandler(), ReadHeaderTimeout: 10 * time.Second}
+		// asked for is the confusing outcome. Wrapped like every other handler: with a gate configured,
+		// this port shares its credentials rather than its anonymity — the point of asking for pprof
+		// from a machine that also runs the daemon is not to expose it to the network uninvited.
+		pprofSrv = &http.Server{Addr: cfg.Pprof, Handler: srv.Wrap(server.PprofHandler()), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Fatalf("pprof listener: %v", err)
 			}
 		}()
-		logf("pprof on http://%s/debug/pprof/ (its own port, unauthenticated)", cfg.Pprof)
+		guarded := "its own port, unauthenticated"
+		if cfg.Auth != nil {
+			guarded = "its own port, login required (the UI cookie or -u)"
+		}
+		logf("pprof on http://%s/debug/pprof/ (%s)", cfg.Pprof, guarded)
+	}
+
+	// TLS is the listener's own fact: with bind.tls set, this port speaks TLS only,
+	// and its config carries the fingerprint hook (tlsfp.go) that gives failed logins
+	// a key that survives the guesser rotating source addresses. GetConfigForClient
+	// returning nil from that hook means "handshake with this same config"; an operator
+	// later adding SNI handling calls srv.FPHook from their own hook first.
+	var tlsConf *tls.Config
+	if cfg.Bind.TLS != nil {
+		cert, err := tls.LoadX509KeyPair(cfg.Bind.TLS.Cert, cfg.Bind.TLS.Key)
+		if err != nil {
+			logger.Fatalf("bind.tls: %v", err)
+		}
+		tlsConf = &tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			GetConfigForClient: srv.FPHook,
+		}
 	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Handler(),
+		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: 10 * time.Second,
 		// No read/write timeout: websockets and SSE live for a long time.
 		IdleTimeout: 120 * time.Second,
@@ -256,14 +395,21 @@ func main() {
 	if webWhat == "" {
 		webWhat = "embedded"
 	}
-	fmt.Fprintf(os.Stderr, "bareloopd listening on http://%s (data=%s web=%s)\n", cfg.Addr, cfg.Data, webWhat)
+	fmt.Fprintf(os.Stderr, "bareloopd listening on %s://%s (data=%s web=%s)\n", scheme, cfg.Addr, cfg.Data, webWhat)
 	if cfg.Debug {
 		fmt.Fprintln(os.Stderr, "debug logging on")
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if tlsConf != nil {
+			// The certificate is already in TLSConfig, so the two file-name arguments stay empty.
+			err = httpSrv.ListenAndServeTLS("", "")
+		} else {
+			err = httpSrv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
