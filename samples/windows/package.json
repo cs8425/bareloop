@@ -1,0 +1,9 @@
+{
+  "name": "bareloop-windows-sample",
+  "private": true,
+  "version": "0.0.0",
+  "description": "browser MCP for the bareloop Windows samples — a project-local install, nothing global: npm i, then the configs here point at node_modules already",
+  "dependencies": {
+    "chrome-devtools-mcp": "1.12.0"
+  }
+}

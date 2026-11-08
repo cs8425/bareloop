@@ -1,0 +1,5 @@
+# The daemon's SQLite DB and session logs are runtime data; the folder itself is
+# tracked through this file.
+
+*
+!.gitignore

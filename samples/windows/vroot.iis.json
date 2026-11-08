@@ -1,0 +1,8 @@
+{
+  "server-name": "site",
+  "tool-prefix": "fs_",
+  "fs": {
+    "path": "C:/bareloop-iis-site",
+    "mode": "rw"
+  }
+}

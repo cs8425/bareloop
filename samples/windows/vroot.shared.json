@@ -1,0 +1,8 @@
+{
+  "server-name": "files",
+  "tool-prefix": "fs_",
+  "fs": {
+    "path": "C:/bareloop-workspace",
+    "mode": "rw"
+  }
+}

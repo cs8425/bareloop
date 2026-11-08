@@ -1,0 +1,8 @@
+{
+  "server-name": "artifacts",
+  "tool-prefix": "art_",
+  "fs": {
+    "path": "C:/bareloop-browser",
+    "mode": "rw"
+  }
+}

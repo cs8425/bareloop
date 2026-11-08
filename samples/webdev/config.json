@@ -17,6 +17,7 @@
       {
         "name": "chrome",
         "type": "stdio",
+        "toolPrefix": "chrome_",
         "command": "chrome-devtools-mcp",
         "args": [
           "--headless",

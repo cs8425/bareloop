@@ -10,6 +10,11 @@ and the environment falls back to sensible defaults, so first run needs zero fla
 | [`browser/`](browser/README.md) | chrome-devtools-mcp + Chromium | drive and inspect a real browser |
 | [`webdev/`](webdev/README.md) | chrome-devtools-mcp + Chromium + filesystem MCP | write a site under `/workspace`, open it, fix it |
 
+No Docker? [`windows/`](windows/README.md) is the same idea for Windows boxes: two static
+binaries plus a config — one layout where the file tools and the browser share a folder,
+one where the file tools sit in an IIS site folder while the browser is sandboxed (and
+enforced to stay) outside it.
+
 The plain image (the root `Dockerfile`, no sample) carries no tools on purpose: give it
 tools through the mounted config instead — an `"http"` MCP URL, or a
 `"stdio"` command naming a binary you `-v` in (the webdev sample documents that pattern

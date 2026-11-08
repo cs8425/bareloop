@@ -1,0 +1,48 @@
+{
+  "addr": "127.0.0.1:8090",
+  "data": "data",
+
+  "defaults": {
+    "name": "windows-iis",
+    "systemPrompt": "You are a web development assistant on Windows. The fs_* file tools are rooted at the IIS site folder C:/bareloop-iis-site; edit what lives there. The art_* file tools are rooted at C:/bareloop-browser — the browser's world: screenshots, downloads, everything the browser emits, and nothing else. Test pages ONLY through the web server at http://127.0.0.1:8081/ (http, served by IIS) — never file:// URLs; that is the response a real client gets. Screenshots: always pass filePath, an absolute path under C:/bareloop-browser (the browser refuses anything outside it); downloads land in C:/bareloop-browser/Downloads. Keep the site folder clean: nothing the browser emits belongs there. Reply in the same language and the same script the user writes in.",
+
+    "llm": {
+      "kind": "openai",
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "apiKey": "none",
+      "model": "qwen3.6-27b"
+    },
+
+    "mcp": [
+      {
+        "name": "chrome",
+        "type": "stdio",
+        "toolPrefix": "chrome_",
+        "command": "node",
+        "args": [
+          "node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js",
+          "--headless",
+          "--viewport", "1920x1080",
+          "--executablePath", "C:/Program Files/Google/Chrome/Application/chrome.exe",
+          "--userDataDir", "C:/bareloop-browser/profile",
+          "--filesystemRoot", "C:/bareloop-browser",
+          "--no-usage-statistics",
+          "--no-performance-crux",
+          "--chromeArg=--enable-unsafe-swiftshader"
+        ]
+      },
+      {
+        "name": "fs",
+        "type": "stdio",
+        "command": "bin/mcp-vroot.exe",
+        "args": ["-c", "vroot.iis.json", "-stdio"]
+      },
+      {
+        "name": "art",
+        "type": "stdio",
+        "command": "bin/mcp-vroot.exe",
+        "args": ["-c", "vroot.iis.art.json", "-stdio"]
+      }
+    ]
+  }
+}

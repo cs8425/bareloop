@@ -1,0 +1,8 @@
+{
+  "download": {
+    "default_directory": "C:/bareloop-workspace/Downloads"
+  },
+  "savefile": {
+    "default_directory": "C:/bareloop-workspace/Downloads"
+  }
+}
