@@ -1,0 +1,4 @@
+# The Chromium profile lives here (compose mounts ./profile:/profile) — cookies, logins,
+# cache. Ship the directory, never its contents; wipe them for a guaranteed-fresh browser.
+*
+!.gitignore

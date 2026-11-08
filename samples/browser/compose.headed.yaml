@@ -1,0 +1,21 @@
+# Watch the browser move: same agent, but Chromium opens real windows on your X11 desktop.
+# From this directory:
+#
+#   docker compose -f compose.yaml -f compose.headed.yaml up --build
+#
+# Needs an X11 session on the Linux host (the classic /tmp/.X11-unix socket plus your
+# XAUTHORITY — the same recipe as plain `docker run -e DISPLAY ...` for GUI apps). A
+# Wayland desktop works too: X apps run through XWayland, so the socket mount still lands.
+# The window is for the HUMAN — the agent drives through CDP either way, it never clicks
+# pixels. Headless remains the default for exactly that reason; this file is for watching,
+# teaching, and debugging the interesting pages.
+
+services:
+  browser:
+    environment:
+      DISPLAY: ${DISPLAY:?run this from an X11 session}
+      XAUTHORITY: /tmp/.Xauthority # HOME is /tmp in the image; Chromium looks here
+    volumes:
+      - ./config.headed.json:/app/config.json:ro # shadows the baked headless config
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/tmp/.Xauthority:ro

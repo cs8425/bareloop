@@ -1,0 +1,8 @@
+{
+  "server-name": "mcp-vroot",
+  "tool-prefix": "fs_",
+  "fs": {
+    "path": "/workspace",
+    "mode": "rw"
+  }
+}

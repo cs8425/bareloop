@@ -1,0 +1,47 @@
+# The browser agent, ready on first up — from this directory:
+#
+#   docker build -t bareloop ../..              # once, the base image (context = repo root)
+#   docker compose up --build
+#   open http://localhost:8090
+#
+# The config (chrome-devtools-mcp + Chromium) is baked in; the session data rides in ./data
+# right here (a directory-local .gitignore ships the folder but keeps sessions out of git),
+# so this file works on a fresh clone.
+
+name: bareloop-browser
+
+services:
+  browser:
+    build: . # the Dockerfile here; its context is this directory (only config.json enters it)
+    image: bareloop-browser:latest
+    ports:
+      - "8090:8090" # "127.0.0.1:8090:8090" if something else can see your interface
+    # network_mode: "host" # share with host
+    volumes:
+      - ./data:/app/data
+      # The browser profile: cookies, local storage, cache — everything the browser
+      # remembers. It rides on the host, so *you* decide what the next browser launch
+      # starts with: leave it and the agent stays signed in; wipe it (container stopped)
+      # for a guaranteed-fresh browser; move it aside to hand a different session over.
+      - ./profile:/profile
+      # Everything the browser *emits*: screenshots the agent saves (the config's
+      # --filesystemRoot) and downloads (Chromium's $HOME/Downloads) land under ./artifacts
+      # on your host — machine droppings, kept out of ./data and out of git.
+      - ./artifacts:/artifacts
+    environment:
+      BARELOOP_BASE_URL: ${BARELOOP_BASE_URL:-http://host.docker.internal:9931/v1}
+      BARELOOP_API_KEY: ${BARELOOP_API_KEY:-none}
+      BARELOOP_MODEL: ${BARELOOP_MODEL:-qwen3.6-27b}
+      # HOME redirects Chromium's default download directory to /artifacts/Downloads;
+      # TMPDIR moves Node's temp root (where default screenshots go) into /artifacts too.
+      # bareloopd passes these to the chrome-devtools-mcp child.
+      HOME: /artifacts
+      TMPDIR: /artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # ./data is a host directory, so the container writes as you. uid 1000 is the first
+    # regular account on most Linux boxes and matches a fresh clone's owner; if yours
+    # differs, drop BARELOOP_UID=... / BARELOOP_GID=... into a .env next to this file.
+    user: "${BARELOOP_UID:-1000}:${BARELOOP_GID:-1000}"
+    # Chromium asks for shared memory; without this the browser dies mid-photograph.
+    shm_size: "1g"

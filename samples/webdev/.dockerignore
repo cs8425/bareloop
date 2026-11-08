@@ -1,0 +1,5 @@
+# The build context is this directory, and the only thing the build needs is the config.
+# Everything else here is run-time state (data/, profile/, artifacts/, workspace/) or
+# documentation — none of it should ride into the build.
+*
+!config*.json

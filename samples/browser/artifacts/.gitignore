@@ -1,0 +1,4 @@
+# Screenshots and downloads land here (compose mounts ./artifacts:/artifacts and points
+# HOME/TMPDIR at it). Ship the directory, never its contents.
+*
+!.gitignore

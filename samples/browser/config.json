@@ -1,0 +1,36 @@
+{
+  "addr": "0.0.0.0:8090",
+  "data": "data",
+
+  "defaults": {
+    "name": "browser",
+    "systemPrompt": "You are a careful assistant with a real browser behind the chrome_* tools. Use the browser whenever looking at a page beats guessing about it. When you save a screenshot, pass an absolute path under /artifacts (relative paths resolve elsewhere and get refused). Reply in the same language and the same script the user writes in; never add translations of your own.",
+
+    "llm": {
+      "kind": "openai",
+      "baseUrl": "${BARELOOP_BASE_URL}",
+      "apiKey": "${BARELOOP_API_KEY}",
+      "model": "${BARELOOP_MODEL}"
+    },
+
+    "mcp": [
+      {
+        "name": "chrome",
+        "type": "stdio",
+        "command": "chrome-devtools-mcp",
+        "args": [
+          "--headless",
+          "--viewport", "1920x1080",
+          "--userDataDir", "/profile",
+          "--executablePath", "/usr/bin/chromium",
+          "--filesystemRoot", "/artifacts",
+          "--no-usage-statistics",
+          "--no-performance-crux",
+          "--chromeArg=--no-sandbox",
+          "--chromeArg=--disable-dev-shm-usage",
+          "--chromeArg=--enable-unsafe-swiftshader"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+# The build needs go.mod/go.sum, the Go sources, and web/ (go:embed). Everything else in the
+# repo is either development state or secrets, and none of it should ride into the build cache.
+
+.git
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+
+# local state, test fixtures, and scratch space
+_data*/
+data/
+_tmp/
+_notes/
+_state/
+bin/
+testdata/
+*.log
+
+# a real config holds API keys — never part of an image, mount it at run time instead
+config.json
+
+# binaries committed while iterating
+cmd/bareloopd/bareloopd-*

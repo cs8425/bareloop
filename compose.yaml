@@ -1,0 +1,32 @@
+# The plain daemon, one service, zero required setup — from the repo root:
+#
+#   docker compose up --build
+#   open http://localhost:8090
+#
+# No config file is mounted, so the daemon starts a single "main" session from the defaults
+# below; mount your own (see the commented volume) when you want sessions, tools, pricing.
+# Data lives in a named volume: the image's /app/data is world-writable, and a fresh volume
+# inherits that, so the unprivileged daemon can write on the very first up.
+
+name: bareloop
+
+services:
+  bareloop:
+    build: .
+    image: bareloop:latest
+    ports:
+      - "8090:8090" # "127.0.0.1:8090:8090" if something else can see your interface
+    volumes:
+      - ./bareloop_data:/app/data
+      # - ./config.json:/app/config.json:ro
+    environment:
+      # Interpolated from the shell or a .env file next to this compose file; the defaults
+      # match the samples — a llama.cpp OpenAI endpoint on the host, no key, your model.
+      BARELOOP_BASE_URL: ${BARELOOP_BASE_URL:-http://host.docker.internal:9931/v1}
+      BARELOOP_API_KEY: ${BARELOOP_API_KEY:-none}
+      BARELOOP_MODEL: ${BARELOOP_MODEL:-qwen3.6-27b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # no-op on Docker Desktop, needed on Linux
+    # The image's own uid (65534) suffices for a named volume. If you switch the data
+    # volume to a host directory, run as the directory's owner instead:
+    # user: "${BARELOOP_UID:-1000}:${BARELOOP_GID:-1000}"

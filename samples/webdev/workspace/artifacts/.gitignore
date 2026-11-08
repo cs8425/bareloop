@@ -1,0 +1,4 @@
+# Browser artifacts land here (TMPDIR points there, so default screenshots do too).
+# It lives inside the mounted workspace but apart from your project files.
+*
+!.gitignore

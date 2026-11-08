@@ -1,0 +1,43 @@
+# The webdev agent, ready on first up — from this directory:
+#
+#   docker build -t bareloop ../..              # once, the base image (context = repo root)
+#   docker compose up --build
+#   open http://localhost:8090
+#
+# Baked config: chrome-devtools-mcp + the filesystem MCP server. The project lives in
+# ./workspace (both the container and you see the same files; a placeholder page ships in
+# git); session data lives in ./data.
+
+name: bareloop-webdev
+
+services:
+  webdev:
+    build: . # the Dockerfile here; its context is this directory (only config.json enters it)
+    image: bareloop-webdev:latest
+    ports:
+     - "8090:8090" # "127.0.0.1:8090:8090" if something else can see your interface
+    # network_mode: "host" # share with host
+    volumes:
+      - ./data:/app/data
+      - ./workspace:/workspace
+      # Browser profile — see the browser sample: keep it to stay signed in across runs,
+      # wipe it for a fresh browser.
+      - ./profile:/profile
+    environment:
+      BARELOOP_BASE_URL: ${BARELOOP_BASE_URL:-http://host.docker.internal:9931/v1}
+      BARELOOP_API_KEY: ${BARELOOP_API_KEY:-none}
+      BARELOOP_MODEL: ${BARELOOP_MODEL:-qwen3.6-27b}
+      # Pull every browser output into the mounted workspace so you (and the file tools)
+      # can see it. HOME decides where Chromium's "Save" button puts downloads → Downloads
+      # appears at ./workspace/Downloads; TMPDIR is Node's temp root, so the default
+      # screenshot location moves from /tmp into ./workspace/artifacts. The config also
+      # sets --filesystemRoot /workspace, and bareloopd passes this env block to every MCP
+      # child process.
+      HOME: /workspace
+      TMPDIR: /workspace/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The agent writes ./workspace and ./data as you — host directories, hence a real uid
+    # (see the browser sample's note on BARELOOP_UID for machines past uid 1000).
+    user: "${BARELOOP_UID:-1000}:${BARELOOP_GID:-1000}"
+    shm_size: "1g"

@@ -1,0 +1,3 @@
+# Local overrides for the samples (BARELOOP_UID, BARELOOP_BASE_URL, keys…) — patterns
+# without a slash match at any depth, so this covers samples/*/ and deeper.
+.env

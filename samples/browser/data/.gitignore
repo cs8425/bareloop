@@ -1,0 +1,4 @@
+# Session state lives here at run time (compose mounts this directory as /app/data).
+# The directory ships in git; the sessions inside it do not.
+*
+!.gitignore

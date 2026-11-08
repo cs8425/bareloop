@@ -1,0 +1,42 @@
+{
+  "addr": "0.0.0.0:8090",
+  "data": "data",
+
+  "defaults": {
+    "name": "webdev-vroot",
+    "systemPrompt": "You are a web development assistant. You write files with the fs_* tools under /workspace and test what you wrote in the browser behind the chrome_* tools (file:///workspace/...). Write the file, load the page, look at it, fix it — do not declare a fix you have not looked at. The browser shares the same filesystem: save screenshots with absolute paths under /workspace, and browser downloads land in /workspace/Downloads. Reply in the same language and the same script the user writes in.",
+
+    "llm": {
+      "kind": "openai",
+      "baseUrl": "${BARELOOP_BASE_URL}",
+      "apiKey": "${BARELOOP_API_KEY}",
+      "model": "${BARELOOP_MODEL}"
+    },
+
+    "mcp": [
+      {
+        "name": "chrome",
+        "type": "stdio",
+        "command": "chrome-devtools-mcp",
+        "args": [
+          "--headless",
+          "--viewport", "1920x1080",
+          "--userDataDir", "/profile",
+          "--executablePath", "/usr/bin/chromium",
+          "--filesystemRoot", "/workspace",
+          "--no-usage-statistics",
+          "--no-performance-crux",
+          "--chromeArg=--no-sandbox",
+          "--chromeArg=--disable-dev-shm-usage",
+          "--chromeArg=--enable-unsafe-swiftshader"
+        ]
+      },
+      {
+        "name": "vroot",
+        "type": "stdio",
+        "command": "/opt/mcp/mcp-vroot",
+        "args": ["-c", "/opt/mcp/vroot.json", "-stdio"]
+      }
+    ]
+  }
+}
