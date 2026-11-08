@@ -873,13 +873,24 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	// Replay what this client missed while it was away.
+	// Replay what this client missed while it was away, in order and one at a time: the ring's own
+	// sequence is what keeps replay and live delivery from racing, and a catch-up should not sit on
+	// a buffer while the live stream waits behind it.
 	for _, e := range s.hub.Snapshot(id) {
 		if !s.writeSSE(w, e) {
 			return
 		}
+		flusher.Flush()
 	}
-	flusher.Flush()
+
+	// Live: one SSE record per event, written as it arrives. The per-subscriber channel may drop
+	// frames under backpressure — counted and logged at the hub; the seq stamp lets a client
+	// notice (and a page re-reads the session, which is the source of truth anyway).
+	//
+	// One write per event stays right here for a reason the websocket needed a pacer for: an LLM
+	// streaming an answer is one record per token. What keeps that affordable is upstream — the
+	// agent coalesces its deltas before emitting them (see internal/agent/delta.go), so this loop
+	// sees a steady stream and not a token firehose.
 	for {
 		select {
 		case <-r.Context().Done():
@@ -908,7 +919,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 // used to do that in silence, which made it a second place (after the websocket pump) where a page can
 // stop being told something about a session and nobody, including the page, can tell. `Data any` is what
 // makes encoding failure possible at all; if this line never prints, nothing is being dropped.
-func (s *Server) writeSSE(w http.ResponseWriter, e agent.Event) bool {
+func (s *Server) writeSSE(w io.Writer, e agent.Event) bool {
 	b, err := json.Marshal(e)
 	if err != nil {
 		s.logf("sse: dropping event %s/%s seq %d, it cannot be encoded: %v", e.Session, e.Type, e.Seq, err)

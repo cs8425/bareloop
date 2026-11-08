@@ -343,6 +343,15 @@ know "nothing happened" from "something happened that I never received".
 Not events, but on the same socket: `heartbeat` frames (below) and command answers —
 `{type: "reply", req, data}` / `{type: "reply_error", req, error}`.
 
+**Fragments.** What an LLM streams back is one small fragment at a time, and the daemon does not
+forward them as they land: the first fragment of a burst goes out at once, and fragments arriving
+inside the next 50 ms are merged into one delta event of the same shape and longer content, so a
+live reply costs at most ~20 delta frames a second and the first token never waits. A merged delta
+is an ordinary event — its own `seq`, the same channels everything else uses — and a page appends
+exactly the characters it would have appended one at a time. Nothing else is ever held: statuses,
+tool cards, entries and requests go out the moment they happen, because they are news, not
+fragments.
+
 **Stream lifecycle.** A reply is drawn from `delta` frames keyed by `streamId`; the `entry`
 frame for that reply arrives **before** the closing `delta` and carries the same `streamId`, so
 the client finishes *that* node in place — id chips and token counts arriving, the streaming

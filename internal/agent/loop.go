@@ -751,53 +751,74 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 		byIndex   = map[int]*ir.ToolCall{}
 		order     []int
 	)
+	// Fragments go out through the batcher (delta.go), not one frame per token: the first one
+	// after an idle moment goes at once, the rest are merged and sent at no more than twenty
+	// frames a second. Each merged event is emitted as an ordinary delta by the ordinary s.emit —
+	// stamped, one frame per subscriber, invisible to everything downstream.
+	b := newDeltaBatcher(deltaWindow, s.emit)
 	emitDelta := func(d Delta) {
 		d.StreamID = streamID
-		s.emit(Event{Type: EvtDelta, Delta: &d})
+		b.frag(d)
 	}
 
-	for ev := range ch {
-		if ev.Content != "" {
-			content.WriteString(ev.Content)
-			emitDelta(Delta{Content: ev.Content})
-		}
-		if ev.Reasoning != "" {
-			reasoning.WriteString(ev.Reasoning)
-			emitDelta(Delta{Reasoning: ev.Reasoning})
-		}
-		for _, tc := range ev.ToolCalls {
-			cur, ok := byIndex[tc.Index]
+	// The select replaces a for-range because the batcher's timer has to be able to fire while the
+	// stream is open: a model pausing mid-reply (thinking, or cooking a long tool call) must not
+	// strand what it already said inside the window until the next fragment happens to arrive.
+stream:
+	for {
+		select {
+		case ev, ok := <-ch:
 			if !ok {
-				cur = &ir.ToolCall{}
-				byIndex[tc.Index] = cur
-				order = append(order, tc.Index)
+				break stream
 			}
-			if tc.ID != "" {
-				cur.ID = tc.ID
+			if ev.Content != "" {
+				content.WriteString(ev.Content)
+				emitDelta(Delta{Content: ev.Content})
 			}
-			if tc.Name != "" {
-				cur.Name = tc.Name
+			if ev.Reasoning != "" {
+				reasoning.WriteString(ev.Reasoning)
+				emitDelta(Delta{Reasoning: ev.Reasoning})
 			}
-			// Args arrive as string fragments of one JSON object; ir.ToolCall.Args is raw JSON.
-			cur.Args = append(cur.Args, tc.Args...)
-			emitDelta(Delta{ToolCall: &ToolCallProgress{ID: cur.ID, Name: cur.Name, Args: tc.Args, Index: tc.Index}})
-		}
-		if ev.FinishReason != "" {
-			finish = ev.FinishReason
-		}
-		if ev.Usage != nil {
-			usage = ev.Usage
-		}
-		if ev.Err != nil {
-			streamErr = ev.Err.Error()
-		}
-		if ctx.Err() != nil {
-			// Keep draining the (already closing) channel but stop emitting: the provider saw
-			// the cancelled context and closed the HTTP request, which aborts generation at
-			// the LLM server too.
-			aborted = true
+			for _, tc := range ev.ToolCalls {
+				cur, ok := byIndex[tc.Index]
+				if !ok {
+					cur = &ir.ToolCall{}
+					byIndex[tc.Index] = cur
+					order = append(order, tc.Index)
+				}
+				if tc.ID != "" {
+					cur.ID = tc.ID
+				}
+				if tc.Name != "" {
+					cur.Name = tc.Name
+				}
+				// Args arrive as string fragments of one JSON object; ir.ToolCall.Args is raw JSON.
+				cur.Args = append(cur.Args, tc.Args...)
+				emitDelta(Delta{ToolCall: &ToolCallProgress{ID: cur.ID, Name: cur.Name, Args: tc.Args, Index: tc.Index}})
+			}
+			if ev.FinishReason != "" {
+				finish = ev.FinishReason
+			}
+			if ev.Usage != nil {
+				usage = ev.Usage
+			}
+			if ev.Err != nil {
+				streamErr = ev.Err.Error()
+			}
+			if ctx.Err() != nil {
+				// Keep draining the (already closing) channel but stop emitting: the provider saw
+				// the cancelled context and closed the HTTP request, which aborts generation at
+				// the LLM server too.
+				aborted = true
+			}
+		case <-b.timerC():
+			b.flush()
 		}
 	}
+	// Everything the reply said is on the wire before this function returns — so before the entry
+	// it commits and before the Done that closes the stream. A page that re-reads the session on
+	// the Done finds the text it was watching already there.
+	b.flush()
 	if ctx.Err() != nil {
 		aborted = true
 	}
