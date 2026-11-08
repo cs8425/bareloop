@@ -18,8 +18,17 @@ import (
 type StdioConfig struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
-	Env     []string `json:"env,omitempty"`
-	Dir     string   `json:"dir,omitempty"`
+	// Env is literal KEY=value lines, appended last — it overrides a name the base set or
+	// EnvPassthrough brought. Env is no longer the gate on inheritance: an empty Env does not
+	// mean "inherit everything" either, the child gets exactly what buildEnv says (see env.go).
+	Env []string `json:"env,omitempty"`
+	// EnvPassthrough names variables to source from the daemon's own environment at spawn.
+	// Only names are configured — the values stay out of config.json and out of GET /config.
+	EnvPassthrough []string `json:"envPassthrough,omitempty"`
+	// EnvBase unset or true includes the platform base set (see env.go); false drops it —
+	// the child gets only what Env and EnvPassthrough name.
+	EnvBase *bool  `json:"envBase,omitempty"`
+	Dir     string `json:"dir,omitempty"`
 	// PrefixFraming sends legacy `M <<json>>` framing. Receive-side prefix framing is
 	// always tolerated. The 2026-07-28 revision dropped prefix framing entirely.
 	PrefixFraming bool `json:"prefixFraming,omitempty"`
@@ -79,9 +88,11 @@ func newStdio(ctx context.Context, cfg StdioConfig) (*stdio, error) {
 	if cfg.Dir != "" {
 		cmd.Dir = cfg.Dir
 	}
-	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
-	}
+	// The child gets buildEnv's environment and nothing else: the base set, the named
+	// passthroughs, the literal env lines. Not os.Environ() — bareloopd's environment holds
+	// every provider key the config expanded, and a stdio server is third-party code (env.go
+	// is the why; the MCP SDKs' v2 clients converged on the same policy).
+	cmd.Env = buildEnv(os.Environ(), cfg)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

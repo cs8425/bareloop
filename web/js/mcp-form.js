@@ -30,7 +30,9 @@ const FIELDS = [
   { key: 'type', label: 'transport', kind: 'select', options: [['', 'stdio — start a command'], ['http', 'http — connect to a URL']], hint: 'empty means stdio, which is what the daemon writes back' },
   { key: 'command', label: 'command', show: 'stdio', ph: 'mcp-server' },
   { key: 'args', label: 'args', kind: 'lines', show: 'stdio', hint: 'one argument per line, exactly as the shell would have received them', list: true },
-  { key: 'env', label: 'env', kind: 'lines', show: 'stdio', hint: 'one KEY=value per line — a list in the daemon’s own keys, not a map: ["PATH=/usr/bin"]' },
+  { key: 'env', label: 'env', kind: 'lines', show: 'stdio', hint: 'one KEY=value per line — on top of the base environment (PATH, HOME, …), overriding a name it brings; the daemon’s own environment is never inherited beyond the base, envPassthrough, and what is written here' },
+  { key: 'envPassthrough', label: 'env passthrough', kind: 'lines', show: 'stdio', ph: 'MY_MCP_TOKEN', hint: 'one variable name per line — its value is read from the daemon’s own environment when the process starts, so the secret itself never enters config.json and never comes back from the API; the alternative to writing it into env with ${ENV}' },
+  { key: 'envBase', label: 'inherit a base env (PATH, HOME, …)', kind: 'check', defaultTrue: true, show: 'stdio', hint: 'off starts the process with nothing but the env boxes: no PATH, no HOME — for a server whose environment should hold only what you named' },
   { key: 'dir', label: 'working dir', show: 'stdio' },
   { key: 'url', label: 'url', show: 'http', ph: 'http://127.0.0.1:8200/mcp' },
   { key: 'headers', label: 'headers', kind: 'lines', show: 'http', kv: true, ph: 'Authorization: Bearer …', hint: 'one “Key: value” per line — a map in the daemon’s own keys, so it is sent as {"Authorization":"Bearer …"}' },
@@ -76,7 +78,12 @@ function pairsOf(value) {
 }
 
 function readField(f, node) {
-  if (f.kind === 'check') return node.checked || undefined;
+  if (f.kind === 'check')
+    // A `defaultTrue` switch carries the opposite polarity of an ordinary one: its absence from the entry is
+    // "yes", so a checked box writes nothing and only an unchecked one writes an explicit false. (`envBase`
+    // is the field that needs this; *bool fields whose absence already means false, like insecureTLS, keep
+    // the plain rule.)
+    return f.defaultTrue ? (node.checked ? undefined : false) : node.checked || undefined;
   const raw = node.value;
   // `kv` is asked before `lines` and that order is the whole point: a map arrives in the box as lines too, and
   // reading those lines as a list writes ["K=V"] where the daemon wants {"K":"V"} — which it answers with
@@ -96,7 +103,7 @@ function readField(f, node) {
 
 function writeField(f, node, value) {
   if (f.kind === 'check') {
-    node.checked = !!value;
+    node.checked = f.defaultTrue ? value !== false : !!value;
     return;
   }
   if (f.kind === 'select') {

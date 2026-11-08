@@ -358,6 +358,20 @@ The other half is how many times it is started: MCP registries are **per session
 directory is opened at startup. The same stdio entry written into three session configs is three child
 processes, each with its own tools/list cache.
 
+### What a stdio server inherits
+
+The child's environment is built from three named layers — the platform base set, `envPassthrough` (names resolved
+against the daemon's own environment at spawn, only the names ever reaching disk) and `env` (literal lines) — and
+nothing is inherited wholesale
+([the user-facing shape](../README.md#the-environment-a-stdio-server-starts-with), `internal/mcp/env.go` the code).
+The reason is a property of how this daemon stores secrets: `${VAR}` in `config.json` expands at load time, so the
+provider keys live in the process environment and nowhere else, while every stdio server is third-party code with a
+stdout and a network. Passthrough exists as its own layer rather than as the same variable written into `env` with
+`${VAR}` because an expanded value lands in `data/<id>/config.json` and comes back from `GET /api/session/{id}`
+verbatim; a name keeps the value in the child's environment only. `envBase: false` drops the base set as well, and
+since what a process runs with is part of what it is, all three fields belong to the server's **Identity** —
+changing one restarts the child, like a changed url.
+
 ### What a tool result is stored as
 
 A result's `content` blocks become the entry's `content` and its image `parts`; `structuredContent` goes

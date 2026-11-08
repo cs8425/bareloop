@@ -177,7 +177,7 @@ its own copy in `data/<id>/config.json`.
 | `addr`, `data`, `web`, `fsync`, `debug` | listen address, log directory, UI directory (empty — the default — is the copy compiled into the binary), synchronous appends, request logging |
 | `defaults.llm` | `kind` (`openai`), `baseUrl`, `apiKey`, `model`, `nCtx`, `headers`, `pricing` (`input` for the prompt tokens the server had to compute, `cachedInput` for the ones it served from cache, `output` for what it generated — **all three per 1 000 000 tokens**, and no currency field, because bareloop cannot know which one you are billed in. Leave it out and nothing is priced; an explicit `0` is an answer meaning free. A session inherits it and may override; a price changes no request, so saving one never reconnects anything) |
 | `defaults.systemPrompt` | the system prompt: the one place that decides language and script |
-| `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`dir`, `url`/`headers` |
+| `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`envPassthrough`/`envBase`/`dir`, `url`/`headers` |
 | `insecureTLS`, `caFile` | on `defaults.llm` and on any `mcp[]` entry with a `url`: how an https endpoint is trusted ([reaching an endpoint no trust store knows](#reaching-an-endpoint-no-trust-store-knows)) |
 | `proxy` | at three levels — `defaults.proxy` (every session's), `llm.proxy`, `mcp[].proxy`: the nearer answer wins, and empty leaves the environment in charge ([reaching an endpoint through a proxy](#reaching-an-endpoint-through-a-proxy)) |
 | `defaults.builtinTools` | the tools the daemon answers itself, named one at a time: `wait`, `get_datetime`. It is an **on-list**, so all of them are off until a session says otherwise ([the daemon's own two tools](#the-daemons-own-two-tools)) |
@@ -343,6 +343,28 @@ mcp server "vr": http://127.0.0.1:8200/mcp is connected directly — HTTP_PROXY 
 
 The MCP form has a field for it; `llm` and the session-level answer are set in `data/<id>/config.json` or by
 `PATCH`, as with the certificate fields.
+
+### The environment a stdio server starts with
+
+A stdio server is third-party code, and the daemon's own environment holds the keys that `config.json` expanded with
+`${VAR}` — that being the whole point of writing it that way: keys live in the environment, never on disk. So the
+child gets no wholesale inheritance; its environment is built from three layers:
+
+| layer | field | what the child sees |
+|---|---|---|
+| base set | — | `PATH`, `HOME`, `LOGNAME`, `SHELL`, `TERM`, `USER` on unix; eighteen launch-critical names on Windows. The same list the MCP TypeScript and Python SDK clients inherit: what a process needs to start, nothing that can carry a secret. |
+| passthrough | `envPassthrough` | named variables whose **value** is read from the daemon's environment as the process starts. Only the names enter `config.json` and only the names come back from the API; the secret itself never lands on disk. |
+| literal | `env` | `KEY=value` lines, last of all: they override a name the base set or a passthrough brought, and carry any value that exists nowhere else. |
+
+`envBase: false` drops the base set too — that server starts with an empty environment plus the other two layers,
+no `PATH`, no `HOME`. A name the daemon does not have is skipped: passing a value through requires one to be behind
+the name. All three fields are part of the server's identity — the child's environment is part of what the process
+is — so changing any of them restarts it.
+
+Before this policy `env` *added to* a full inheritance of the daemon's environment, and writing no `env` still
+inherited all of it. A server that relied on a shell variable needs an explicit line now — its name in
+`envPassthrough`, or a `${VAR}` line in `env` — and an operator who wants the child to inherit less than even the
+base set says so with `envBase`.
 
 ### Tools: switches, prefixes and the cache
 

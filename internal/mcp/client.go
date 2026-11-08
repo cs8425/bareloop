@@ -64,9 +64,23 @@ type Config struct {
 	// Type is "stdio" (default) or "http".
 	Type string `json:"type,omitempty"`
 
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     []string          `json:"env,omitempty"`
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	// Env is literal KEY=value lines for a stdio entry, appended over the platform base set —
+	// an override, not an inheritance: the child never sees the daemon's environment beyond the
+	// base set and what is named here or in EnvPassthrough (internal/mcp/env.go is the why).
+	Env []string `json:"env,omitempty"`
+	// EnvPassthrough names variables a stdio entry may read from the daemon's own environment
+	// at spawn. It is the difference between a secret living in the config (a ${ENV} expansion
+	// whose resolved value lands in config.json and comes back from GET /config) and one that
+	// only ever exists in the child's environment: here just the name is configured. Part of
+	// Identity — the process's environment is the process's configuration.
+	EnvPassthrough []string `json:"envPassthrough,omitempty"`
+	// EnvBase asks for the platform base set (PATH, HOME, …) to be part of a stdio entry's
+	// environment; unset means yes, false means this server starts from an empty environment
+	// plus only what Env and EnvPassthrough name. Like everything that decides the process's
+	// surroundings, it is part of Identity.
+	EnvBase *bool             `json:"envBase,omitempty"`
 	Dir     string            `json:"dir,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
@@ -174,8 +188,12 @@ func (c Config) httpClient() (*http.Client, error) {
 // when the operator says "verify against this file instead", and one that could not reach its proxy has to
 // be retried through the next one — while neither may be reconnected for a policy nothing reached.
 func (c Config) Identity() string {
-	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q dir=%s url=%s headers=%v roots=%v insecure=%t caFile=%s proxy=%s",
-		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.Dir, c.URL, c.Headers, c.Roots, c.Insecure(), c.CAFile, c.Proxy)
+	// envBase prints as a value, never as the pointer: unset and explicit false must hash
+	// alike, because the child cannot tell them apart and a mere re-serialization of the
+	// config must not reconnect the world.
+	envBase := c.EnvBase != nil && *c.EnvBase
+	return fmt.Sprintf("disabled=%t name=%s type=%s command=%s args=%q env=%q envPassthrough=%q envBase=%v dir=%s url=%s headers=%v roots=%v insecure=%t caFile=%s proxy=%s",
+		c.Disabled, c.Name, c.Type, c.Command, c.Args, c.Env, c.EnvPassthrough, envBase, c.Dir, c.URL, c.Headers, c.Roots, c.Insecure(), c.CAFile, c.Proxy)
 }
 
 // Event is a notification received from the server.
@@ -265,7 +283,8 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	switch kind := strings.ToLower(strings.TrimSpace(cfg.Type)); {
 	case kind == "" || kind == "stdio":
 		st, err := newStdio(ctx, StdioConfig{
-			Command: cfg.Command, Args: cfg.Args, Env: cfg.Env, Dir: cfg.Dir, Logf: cfg.Logf,
+			Command: cfg.Command, Args: cfg.Args, Env: cfg.Env, EnvPassthrough: cfg.EnvPassthrough,
+			EnvBase: cfg.EnvBase, Dir: cfg.Dir, Logf: cfg.Logf,
 		})
 		if err != nil {
 			return nil, err
