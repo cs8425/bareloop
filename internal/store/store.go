@@ -64,8 +64,10 @@ const (
 	metaSeqNext = "seq_next"
 )
 
-// blobPrefix marks a payload's image data as a reference into the blob table.
-const blobPrefix = "blob:"
+// BlobPrefix marks a payload's image data as a reference into the blob table. Exported
+// because a copier that moves entries between stores reads references without
+// inflating them (agent.Fork) and must recognise the shape it is moving.
+const BlobPrefix = "blob:"
 
 // ddl runs one statement per Exec: the ncruces driver takes a single statement per call.
 var ddl = []string{
@@ -259,6 +261,14 @@ func (l *Log) encodeEntry(e *ir.Entry) (string, []blobRef, error) {
 			if p.Type != ir.PartImage || p.Data == "" {
 				continue
 			}
+			if sha, isRef := strings.CutPrefix(p.Data, BlobPrefix); isRef && sha != "" {
+				// A reference arrives as a reference: the bytes belong to whoever
+				// copied them in (the fork pipeline puts them one step ahead of the
+				// payload that names them), and a sha256 of bytes already named by
+				// their own hash is rent paid twice. Pin, do not deliver.
+				refs = append(refs, blobRef{sha: sha})
+				continue
+			}
 			raw, err := decodeB64(p.Data)
 			if err != nil {
 				// why inline rather than fail: an image part this store was handed that is
@@ -270,7 +280,7 @@ func (l *Log) encodeEntry(e *ir.Entry) (string, []blobRef, error) {
 				continue
 			}
 			sum := sha256.Sum256(raw)
-			p.Data = blobPrefix + hex.EncodeToString(sum[:])
+			p.Data = BlobPrefix + hex.EncodeToString(sum[:])
 			refs = append(refs, blobRef{sha: hex.EncodeToString(sum[:]), mime: p.MimeType, size: len(raw), data: raw})
 		}
 	}
@@ -295,8 +305,8 @@ func payloadShas(payload string) []string {
 	}
 	var out []string
 	for _, p := range e.Parts {
-		if p.Type == ir.PartImage && strings.HasPrefix(p.Data, blobPrefix) {
-			out = append(out, strings.TrimPrefix(p.Data, blobPrefix))
+		if p.Type == ir.PartImage && strings.HasPrefix(p.Data, BlobPrefix) {
+			out = append(out, strings.TrimPrefix(p.Data, BlobPrefix))
 		}
 	}
 	return out
@@ -495,10 +505,62 @@ func payloadText(raw string) string {
 func PayloadText(raw string) string { return payloadText(raw) }
 
 // blobUpsert pins one reference: a new blob arrives with its first reference, an existing
-// one gains a reference (its bytes are never rewritten — the sha is the identity).
+// one gains a reference (its bytes are never rewritten — the sha is the identity). A
+// pin-only reference (no bytes: the payload arrived naming a sha, fork's shape) must find
+// its bytes already here — inventing an empty-bytes row for a sha this store has never
+// seen would be a blob that lies.
 func blobUpsert(tx *sql.Tx, r blobRef) error {
+	if r.data == nil {
+		res, err := tx.Exec(`UPDATE blob SET refcount = refcount + 1 WHERE sha256 = ?`, r.sha)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("store: entry references blob %s, whose bytes were never put here", r.sha)
+		}
+		return nil
+	}
 	_, err := tx.Exec(`INSERT INTO blob(sha256, mime, size, refcount, bytes) VALUES(?, ?, ?, 1, ?)
 		ON CONFLICT(sha256) DO UPDATE SET refcount = refcount + 1`, r.sha, r.mime, r.size, r.data)
+	return err
+}
+
+// BlobBytes hands over one blob's bytes and mime — the read half of moving bytes
+// between stores (the fork pipeline). The statement is self-contained by the store's
+// one-connection rule: callers may interleave these reads with any other statement.
+func (l *Log) BlobBytes(sha string) (b []byte, mime string, found bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, "", false, ErrClosed
+	}
+	err = l.db.QueryRow("SELECT bytes, mime FROM blob WHERE sha256 = ?", sha).Scan(&b, &mime)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", false, nil
+	}
+	if err != nil {
+		return nil, "", false, err
+	}
+	return b, mime, true, nil
+}
+
+// PutBlob lands one blob's bytes without touching any refcount: references are owned
+// by the payloads that name them, and AppendEntry raises the count when such a payload
+// arrives. A sha already here — holding, as it must, the very same bytes, the sha
+// being the identity — is ignored, which is what lets a batch copy hand the same sha
+// twice and charge nothing.
+func (l *Log) PutBlob(sha, mime string, b []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return ErrClosed
+	}
+	_, err := l.db.Exec(`INSERT INTO blob(sha256, mime, size, refcount, bytes) VALUES(?, ?, ?, 0, ?)
+		ON CONFLICT(sha256) DO NOTHING`, sha, mime, len(b), b)
 	return err
 }
 
@@ -835,9 +897,11 @@ func rewriteParent(payload, parent string) (string, error) {
 	return string(b), err
 }
 
-// Replay reads the store and returns the tree as it stands. The name is kept for the
-// agent: it asks for "the session as it came off disk", and this answers that — only
-// now the fold is a SELECT, because the tree was stored as edges, never as a story.
+// Replay reads the store and returns the tree as it stands — every payload inflated,
+// the whole tree in RAM at once. No production path calls it any more: the resident
+// spine answers shape questions and Contents answers content questions, and the
+// three copies (fork, export, window) all stream. It stays as the plainest reading
+// of a store there is — which is exactly what a test wants to assert against.
 func (l *Log) Replay() (*State, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -905,10 +969,10 @@ func (l *Log) inflateWith(payload string, expandBlobs bool, cache map[string]str
 	}
 	for i := range e.Parts {
 		p := &e.Parts[i]
-		if p.Type != ir.PartImage || !strings.HasPrefix(p.Data, blobPrefix) {
+		if p.Type != ir.PartImage || !strings.HasPrefix(p.Data, BlobPrefix) {
 			continue
 		}
-		sha := strings.TrimPrefix(p.Data, blobPrefix)
+		sha := strings.TrimPrefix(p.Data, BlobPrefix)
 		if cached, ok := cache[sha]; ok {
 			p.Data = cached
 			continue

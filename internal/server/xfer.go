@@ -11,6 +11,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"bareloop/internal/agent"
 	"bareloop/internal/ir"
+	"bareloop/internal/store"
 	"bareloop/internal/xfer"
 )
 
@@ -31,39 +33,46 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	st, err := sess.Log().Replay()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
 	hdr := xfer.Header{Session: xfer.Session{ID: sess.ID, Name: sess.Config().Name}}
-	var entries []*ir.Entry
-	if p := strings.TrimSpace(q.Get("path")); p != "" {
-		switch strings.ToLower(p) {
-		case "ctx":
-			entries = ctxWindow(st.Entries, st.Tip)
-			hdr.Tip = st.Tip
-			hdr.Scope = xfer.ScopeCtx
-		default:
-			at := p
-			switch strings.ToLower(at) {
-			case "tip", "head", "active", "path":
-				at = st.Tip
-			}
-			entries = ir.Path(st.Entries, at)
-			if len(entries) == 0 {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("entry %q is not on this session's tree", at))
-				return
-			}
-			hdr.Tip = entries[len(entries)-1].ID
-			hdr.Scope = xfer.ScopePath
-		}
-	} else {
-		entries = ir.TreeOrder(st.Entries)
-		hdr.Tip = st.Tip
-		hdr.Scope = xfer.ScopeFull
+	// The three shapes differ only in which ids they stream and in what the header
+	// says about them. A resident session answers "which ids, in what order" from
+	// its spine — the tree is asked its shape without a single payload read for it
+	// — and every row then travels through one page-sized cursor: an export of a
+	// fifty-megabyte session costs the same RAM as one of fifty rows.
+	var ids []string
+	var rw func(int, *ir.Entry) *ir.Entry
+	tip := ""
+	if info, err := sess.Log().Read(); err == nil {
+		tip = info.Tip
 	}
-	if len(entries) == 0 {
+	switch p := strings.TrimSpace(q.Get("path")); strings.ToLower(p) {
+	case "ctx":
+		// The window the next request carries, by the one rule the ctx fork will
+		// later pay from the same code (ir.WindowRewriter).
+		var brokenCmp string
+		ids, brokenCmp = sess.WindowIDs()
+		rw = ir.WindowRewriter(ids, brokenCmp)
+		hdr.Tip = tip
+		hdr.Scope = xfer.ScopeCtx
+	case "":
+		ids = sess.TreeIDs()
+		hdr.Tip = tip
+		hdr.Scope = xfer.ScopeFull
+	default:
+		at := p
+		switch strings.ToLower(at) {
+		case "tip", "head", "active", "path":
+			at = tip
+		}
+		ids = sess.PathIDs(at)
+		if len(ids) == 0 {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("entry %q is not on this session's tree", at))
+			return
+		}
+		hdr.Tip = ids[len(ids)-1]
+		hdr.Scope = xfer.ScopePath
+	}
+	if len(ids) == 0 {
 		writeErr(w, http.StatusBadRequest, errors.New("this session has nothing to export"))
 		return
 	}
@@ -82,10 +91,52 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	hdr.Session.Config = xfer.ScrubbedConfig(sess.Config())
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+exportName(sess, codec)+`"`)
-	if err := xfer.Encode(payload, hdr, entries); err != nil {
+	if err := xfer.EncodeStream(payload, hdr, rowCursor(sess.Log(), ids, rw)); err != nil {
 		// Headers are long gone; a stream that dies mid-file is a stream the client
 		// sees die, which is the only honest report left at this point.
 		s.logf("export %s: stream broke: %v", sess.ID, err)
+	}
+}
+
+// rowCursor reads the named ids through the store a page at a time: each page is
+// read, written, and forgotten before the next is asked for, and the export itself
+// holds nothing larger than the id list. A row that is not there when its page
+// arrives (deleted mid-stream) stops the stream — a silently missing line would be
+// a file whose parent walks no importer will take, and a dead stream logs.
+func rowCursor(log *store.Log, ids []string, rw func(int, *ir.Entry) *ir.Entry) func() (*ir.Entry, error) {
+	const pageSize = 100
+	pos, at, out := 0, 0, 0
+	var order []string
+	var page map[string]*ir.Entry
+	return func() (*ir.Entry, error) {
+		for at >= len(order) {
+			if pos >= len(ids) {
+				return nil, io.EOF
+			}
+			end := pos + pageSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			order = ids[pos:end]
+			pos = end
+			at = 0
+			var err error
+			page, err = log.Contents(order, true)
+			if err != nil {
+				return nil, err
+			}
+		}
+		id := order[at]
+		at++
+		e, ok := page[id]
+		if !ok {
+			return nil, fmt.Errorf("entry %s is not in the store while the export read it", id)
+		}
+		if rw != nil {
+			e = rw(out, e)
+		}
+		out++
+		return e, nil
 	}
 }
 
@@ -128,63 +179,6 @@ func slug(s string) string {
 		s = "session"
 	}
 	return s
-}
-
-// ctxWindow assembles the window export: the entries the next request would carry, from
-// the one function the assembler itself reads (ir.Effective — planning input is assembler
-// input, spec §3.2), never from a re-derived window rule sitting here.
-//
-// With an active, unbroken summary the window is the kept suffix — everything from the
-// boundary on, the entries the summary did NOT replace, which straddle the summary entry
-// on the path — plus the summary itself where the path carries it. Only two rewrites make
-// it stand alone on another machine: the head entry roots the new session (its parent is
-// one of the replaced entries by construction), and a boundary naming an older summary —
-// which the window drops, its text living inside the active one (spec §3.6) — is re-aimed
-// at the window's first kept entry, naming the same slice with an id the file carries.
-// Without an active summary, or with a broken one (fail-open sends the path without the
-// summary, spec §2.5), the model reads the whole path and the window says so.
-func ctxWindow(entries map[string]*ir.Entry, tip string) []*ir.Entry {
-	path := ir.Path(entries, tip)
-	kept, cmp := ir.Effective(entries, path)
-	if cmp == nil {
-		return path
-	}
-	if cmp.Compaction != nil && cmp.Compaction.Broken {
-		// Fail-open sends the whole path, summary included as data (spec §2.5) — and its
-		// parent chain reaches into entries no window could drop without breaking the file.
-		// Export the path; the unverifiable boundary fails open on the receiving machine
-		// exactly as it does here.
-		return path
-	}
-	in := make(map[string]bool, len(kept)+1)
-	for _, e := range kept {
-		in[e.ID] = true
-	}
-	in[cmp.ID] = true
-	window := make([]*ir.Entry, 0, len(kept)+1)
-	for _, e := range path {
-		if in[e.ID] {
-			window = append(window, e)
-		}
-	}
-	head := *window[0]
-	head.ParentID = ""
-	window[0] = &head
-	if cmp.Compaction != nil && cmp.Compaction.BoundaryID != nil && !in[*cmp.Compaction.BoundaryID] {
-		c := *cmp
-		m := *c.Compaction
-		bid := window[0].ID
-		m.BoundaryID = &bid
-		m.Broken = false
-		c.Compaction = &m
-		for i, e := range window {
-			if e == cmp {
-				window[i] = &c
-				break
-			}
-		}
-	}
-	return window
 }
 
 // handleImport is POST /api/sessions/import?id=…[&name=…]: the body is a transcript file,

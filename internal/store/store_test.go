@@ -50,6 +50,8 @@ func imgEntry(text string, img []byte) *ir.Entry {
 	}
 }
 
+func shaOfBytes(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+
 // replayAll reads the tree back the way a session opening would.
 func replayAll(t *testing.T, l *Log) *State {
 	t.Helper()
@@ -301,8 +303,8 @@ func TestContentsWithImagesIsNotDeadlockedByOneConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Contents(false): %v", err)
 	}
-	if d := refs[withImg.ID].Parts[0].Data; !strings.HasPrefix(d, blobPrefix) {
-		t.Errorf("Contents(false) data %q, want a %s reference", d, blobPrefix)
+	if d := refs[withImg.ID].Parts[0].Data; !strings.HasPrefix(d, BlobPrefix) {
+		t.Errorf("Contents(false) data %q, want a %s reference", d, BlobPrefix)
 	}
 	// A window that repeats a screenshot pays for it once: two references, one
 	// point query, one encoding — the bill is distinct images, not references
@@ -321,6 +323,81 @@ func TestContentsWithImagesIsNotDeadlockedByOneConn(t *testing.T) {
 	}
 	if both[withImg.ID].Parts[0].Data != b64 || both[repeat.ID].Parts[0].Data != b64 {
 		t.Error("the cached encoding is not the bytes that went in")
+	}
+}
+
+// TestBlobBytesMoveBetweenStores is the fork pipeline's byte movement without the
+// fork: bytes leave one store by sha, land in another untouched, and the payload
+// that names them arrives as a reference — never re-encoded, never re-hashed. The
+// ordering it enforces is the pipeline's: bytes first, name second; a payload
+// naming an unseen sha is refused rather than answered with an invented empty row.
+func TestBlobBytesMoveBetweenStores(t *testing.T) {
+	src := openTest(t)
+	img := []byte("png-bytes")
+	b64 := base64.StdEncoding.EncodeToString(img)
+	e := imgEntry("shot", img)
+	if err := src.AppendEntry(e, true); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	sha := shaOfBytes(img)
+
+	raw, mime, found, err := src.BlobBytes(sha)
+	if err != nil || !found || mime != "image/png" || !bytes.Equal(raw, img) {
+		t.Fatalf("BlobBytes = %v,%v,%q,%v", raw, found, mime, err)
+	}
+	if _, _, found, err := src.BlobBytes("deadbeef"); err != nil || found {
+		t.Errorf("BlobBytes of an unknown sha = %v,%v, want not-found without error", found, err)
+	}
+
+	dst := openTest(t)
+	refEntry := func() *ir.Entry {
+		return &ir.Entry{Kind: ir.KindUser, Role: "user", Ts: time.Now().UTC(),
+			Parts: []ir.Part{{Type: ir.PartImage, MimeType: mime, Data: BlobPrefix + sha}}}
+	}
+	if err := dst.AppendEntry(refEntry(), false); err == nil {
+		t.Error("a reference to bytes never put here was accepted, want a refusal")
+	}
+	if err := dst.PutBlob(sha, mime, raw); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	first := refEntry()
+	if err := dst.AppendEntry(first, false); err != nil {
+		t.Fatalf("AppendEntry reference: %v", err)
+	}
+	if err := dst.AppendEntry(refEntry(), false); err != nil {
+		t.Fatalf("AppendEntry second reference: %v", err)
+	}
+	var rc int
+	dst.db.QueryRow("SELECT refcount FROM blob WHERE sha256 = ?", sha).Scan(&rc)
+	if rc != 2 {
+		t.Errorf("refcount after two reference payloads = %d, want 2 (references are owned by payloads, PutBlob pins none)", rc)
+	}
+	// The same bytes handed again land on the existing row and charge nothing:
+	// the sha is the identity, and a batch copy that repeats a sha repeats no cost.
+	if err := dst.PutBlob(sha, mime, raw); err != nil {
+		t.Fatalf("PutBlob again: %v", err)
+	}
+	dst.db.QueryRow("SELECT refcount FROM blob WHERE sha256 = ?", sha).Scan(&rc)
+	if rc != 2 {
+		t.Errorf("refcount after PutBlob again = %d, want 2", rc)
+	}
+	// The reference reads back in both shapes: named in false, bytes in true.
+	refs, err := dst.Contents([]string{first.ID}, false)
+	if err != nil || refs[first.ID].Parts[0].Data != BlobPrefix+sha {
+		t.Errorf("Contents(false) = %v, %v, want the reference kept", refs[first.ID], err)
+	}
+	full, err := dst.Contents([]string{first.ID}, true)
+	if err != nil || full[first.ID].Parts[0].Data != b64 {
+		t.Errorf("Contents(true) = %v, %v, want the moved bytes back as base64", full[first.ID], err)
+	}
+	// And the ordinary path still works beside it: a base64 entry of the very same
+	// image joins the store, the sha is recomputed, and one more reference pins.
+	if err := dst.AppendEntry(imgEntry("ordinary", img), false); err != nil {
+		t.Fatalf("AppendEntry base64 beside the reference: %v", err)
+	}
+	dst.db.QueryRow("SELECT refcount FROM blob WHERE sha256 = ?", sha).Scan(&rc)
+	if rc != 3 {
+		t.Errorf("refcount after the base64 path = %d, want 3", rc)
 	}
 }
 

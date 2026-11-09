@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -276,6 +277,174 @@ func shape(entries map[string]*ir.Entry) []int {
 	}
 	sort.Ints(v)
 	return v
+}
+
+// rollingTree is the shape a second compaction leaves: the active summary's boundary
+// names the *older* summary, whose text lives inside the active one — so the window
+// drops the entry the boundary names, and a copy that kept that boundary would carry
+// an id nothing in the file resolves.
+//
+//	c1 u ─ a2 a ─ k3 cmp1(b→c1) ─ c4 u ─ k5 cmp2(b→k3) ─ c6 u
+func rollingTree() []*ir.Entry {
+	return []*ir.Entry{
+		user("c1", "", "first"),
+		assistant("a2", "c1", "answer"),
+		compaction("k3", "a2", "c1"),
+		user("c4", "k3", "next"),
+		compaction("k5", "c4", "k3"),
+		user("c6", "k5", "today"),
+	}
+}
+
+// TestForkCtxStandsTheWindowUp is the ctx shape end to end: the window is the three
+// rows the next request carries (the kept tail plus the active summary), the head is
+// re-rooted, and a boundary naming the dropped older summary is re-aimed at the head
+// and remapped like every other edge — the one window rule the ctx export pays,
+// paid here from the same code (ir.WindowRewriter).
+func TestForkCtxStandsTheWindowUp(t *testing.T) {
+	m := NewManager(t.TempDir(), false, Config{}, nil, nil)
+	forkSrc(t, m, "src", rollingTree(), "c6")
+
+	_, n, err := m.Fork(context.Background(), "src", ForkOptions{ID: "win", At: "ctx"})
+	if err != nil {
+		t.Fatalf("ctx fork: %v", err)
+	}
+	if n != 3 { // window c4 k5 c6 — c1 a2 k3 live inside the summary
+		t.Fatalf("ctx fork copied %d entries, want 3", n)
+	}
+	st := replay(t, m, "win")
+	path := ir.Path(st.Entries, st.Tip)
+	if len(path) != 3 {
+		t.Fatalf("copied path is %d entries, want 3: %v", len(path), idsOf(path))
+	}
+	if path[0].ParentID != "" {
+		t.Fatalf("the window's head %s kept its source parent", path[0].ID)
+	}
+	_, c := ir.Effective(st.Entries, path)
+	if c == nil || c.Compaction == nil || c.Compaction.Broken {
+		t.Fatalf("the copied summary reads Broken — the re-aim did not land inside the copy")
+	}
+	if *c.Compaction.BoundaryID != path[0].ID {
+		t.Fatalf("boundary %q is not the copy's head %q", *c.Compaction.BoundaryID, path[0].ID)
+	}
+	if st.Tip != path[len(path)-1].ID {
+		t.Fatalf("tip %q is not the window's tail %q", st.Tip, path[len(path)-1].ID)
+	}
+}
+
+// TestForkCtxBrokenTravelsBroken is the fail-open honesty rule: a summary whose
+// boundary died on the source's own path is exported as it stands — the copy stands
+// broken on the receiving machine exactly as it stands broken here, and nobody
+// invents a boundary to silence the alarm.
+func TestForkCtxBrokenTravelsBroken(t *testing.T) {
+	m := NewManager(t.TempDir(), false, Config{}, nil, nil)
+	broken := append(rollingTree()[:4],
+		compaction("k5", "c4", "deleted"),
+		user("c6", "k5", "today"),
+	)
+	forkSrc(t, m, "src", broken, "c6")
+
+	if _, _, err := m.Fork(context.Background(), "src", ForkOptions{ID: "win", At: "ctx"}); err != nil {
+		t.Fatalf("ctx fork: %v", err)
+	}
+	st := replay(t, m, "win")
+	// Fail-open widens the window to the whole path (the summary re-sends everything),
+	// and the boundary that names an id nobody ever had travels as it stands.
+	var c *ir.Entry
+	for _, e := range st.Entries {
+		if e.IsCompaction() {
+			c = e
+		}
+	}
+	if c == nil || c.Compaction == nil {
+		t.Fatalf("no compaction in the copy")
+	}
+	path := ir.Path(st.Entries, st.Tip)
+	_, active := ir.Effective(st.Entries, path)
+	if active == nil || !active.Compaction.Broken {
+		t.Fatalf("the copy's summary does not read broken — the alarm was silenced in transit")
+	}
+	if *c.Compaction.BoundaryID != "deleted" {
+		t.Fatalf("boundary %q was rewritten; a broken summary travels as it stands", *c.Compaction.BoundaryID)
+	}
+}
+
+// TestForkMovesImageBytesBySha is the copy's cheap shape: an image entry forks as
+// the very bytes under the very sha, both references naming one blob the copy
+// actually holds — the base64 layer neither side of the move ever sees.
+func TestForkMovesImageBytesBySha(t *testing.T) {
+	img := base64.StdEncoding.EncodeToString([]byte("screenshot-bytes"))
+	shot := func(id, parent, text string) *ir.Entry {
+		return &ir.Entry{ID: id, ParentID: parent, Kind: ir.KindUser, Role: "user", Content: text,
+			Parts: []ir.Part{
+				{Type: ir.PartText, Text: text},
+				{Type: ir.PartImage, MimeType: "image/png", Data: img},
+			}}
+	}
+	m := NewManager(t.TempDir(), false, Config{}, nil, nil)
+	forkSrc(t, m, "src", []*ir.Entry{
+		shot("p1", "", "look"),
+		assistant("p2", "p1", "seen"),
+		shot("p3", "p2", "again"),
+	}, "p3")
+
+	if _, _, err := m.Fork(context.Background(), "src", ForkOptions{ID: "dst"}); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	src, dst := replay(t, m, "src"), replay(t, m, "dst")
+	if len(dst.Entries) != 3 {
+		t.Fatalf("copy has %d entries, want 3", len(dst.Entries))
+	}
+	// The bytes arrive identical (base64 of the replayed copy equals the source's)...
+	var srcShas, dstShas []string
+	for _, id := range []string{"p1", "p3"} {
+		srcShas = append(srcShas, src.Entries[id].Parts[1].Data)
+		dstShas = append(dstShas, dst.Entries[mustMap(t, src, dst, id)].Parts[1].Data)
+	}
+	if srcShas[0] != img || srcShas[1] != img || dstShas[0] != img || dstShas[1] != img {
+		t.Fatalf("image bytes changed in transit: %v vs %v", srcShas, dstShas)
+	}
+	// ...and the copy holds them under one sha, named by both references: reading
+	// the copy with references kept shows one blob named twice.
+	l, err := store.Open(filepath.Join(m.Root(), "dst"), false)
+	if err != nil {
+		t.Fatalf("open dst: %v", err)
+	}
+	defer l.Close()
+	ids := make([]string, 0, 2)
+	for id := range dst.Entries {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	refs, err := l.Contents(ids, false)
+	if err != nil {
+		t.Fatalf("Contents: %v", err)
+	}
+	shas := map[string]bool{}
+	for _, id := range ids {
+		for _, p := range refs[id].Parts {
+			if p.Type == ir.PartImage {
+				shas[p.Data] = true
+			}
+		}
+	}
+	if len(shas) != 1 {
+		t.Fatalf("the two references name %d distinct blobs, want 1 (the sha is the identity): %v", len(shas), shas)
+	}
+}
+
+// mustMap finds the copy's id for a source id by content — the two stores share no
+// id space, and that is the point.
+func mustMap(t *testing.T, src, dst *store.State, srcID string) string {
+	t.Helper()
+	want := src.Entries[srcID]
+	for id, e := range dst.Entries {
+		if e.Content == want.Content && e.Role == want.Role {
+			return id
+		}
+	}
+	t.Fatalf("no copy of %s found", srcID)
+	return ""
 }
 
 func idsOf(path []*ir.Entry) []string {

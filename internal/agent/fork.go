@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"bareloop/internal/ir"
 	"bareloop/internal/store"
 )
 
-// Fork copies a session and returns the copy: two shapes, one primitive.
+// Fork copies a session and returns the copy: three shapes, one primitive.
 //
 // The primitive is a copied set: pick a subset of the source entries, hand every one of
 // them a fresh id in the new store, and rewrite each internal reference — the parent edge,
@@ -18,13 +19,19 @@ import (
 // and two trees that quote each other's entry ids are one tree with a split personality;
 // ids being session-local, the remap costs a map and buys the independence the copy is for.
 //
-// The two shapes differ only in the subset:
+// The three shapes differ only in the subset:
 //
 //   - path fork (the default): the path root..at, at defaulting to the source tip, copied
 //     as a straight line. Everything off that path — the abandoned siblings of a regenerate,
 //     the rewound branches — stays behind. This is the deliberate shrink: a compaction is
 //     the model guessing what it may summarize, this is a person deciding what they will not
 //     carry. The source keeps its full tree either way, so deciding wrong costs a re-fork.
+//
+//   - ctx fork (At "ctx", the same reserved word the export's ?path=ctx answers): the
+//     window the next request carries — the active summary and the entries its boundary
+//     keeps — stood on its own by the one window rule the ctx export pays from
+//     (ir.WindowRewriter). The daily job's move: hand today's working context to a new
+//     session and let the long history stay where it is.
 //
 //   - full fork (Full): the whole tree, every branch, tip following the source's. A clone to
 //     play in while the original stays untouched — a config experiment, a rewind that should
@@ -36,6 +43,14 @@ import (
 // boundary too. A boundary that still fails to resolve in the copy keeps its old id rather
 // than getting an invented one: it reads as Broken and fails open, the same honest answer
 // the resolver gives a hand-edited log.
+//
+// The copy streams, because the resident spine already knows which ids travel and in what
+// order (the tree is asked its shape without a payload being read for it): one entry is
+// read, remapped, and written before the next is named, and image bytes travel by sha —
+// copied from blob table to blob table without ever passing through the base64 layer a
+// decode-then-re-encode round trip would rebuild from those very bytes. Nothing here
+// needs the source's whole tree in RAM, and nothing here would be legal with the store's
+// one-connection rule if it tried: every read is a self-contained statement.
 //
 // The copy writes through the store handle, not through Session.appendEntry: appendEntry
 // is a conversation move — it advances the tip and publishes — and a fork is a transcript
@@ -49,7 +64,8 @@ type ForkOptions struct {
 	// ID is the new session's id. Required: the daemon never invents ids (same rule as
 	// Create — a directory named after the clock is not something anybody asked for).
 	ID string
-	// At cuts the path at that entry (default: the source tip). Ignored when Full.
+	// At cuts the path at that entry (default: the source tip); the reserved word
+	// "ctx" forks the window the next request carries instead. Ignored when Full.
 	At string
 	// Full copies every branch instead of one path.
 	Full bool
@@ -69,18 +85,38 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 	if err != nil {
 		return "", 0, err
 	}
-	// Replay is the source's truth as of now, taken off the store rather than the running
-	// session's snapshot: a fork of a busy session copies whatever whole state it opened
-	// with, and no half-appended turn can hide in a Replay.
-	st, err := src.Log().Replay()
-	if err != nil {
-		return "", 0, err
+	// The shape questions are answered by the resident spine — which ids travel, in
+	// what order, where the copy's tip stands. The orders are parent-before-child by
+	// construction, so the remap below always names an id it has already issued.
+	// (A path cut at a corrupt parent cycle walks to the cycle and stops, the same
+	// truncation every other path read applies; the spine itself ends there.)
+	var ids []string
+	var rw func(int, *ir.Entry) *ir.Entry
+	tipSrc := ""
+	switch at := strings.TrimSpace(o.At); {
+	case o.Full:
+		ids = src.TreeIDs()
+		if info, err := src.Log().Read(); err == nil {
+			tipSrc = info.Tip
+		}
+	case strings.EqualFold(at, "ctx"):
+		var brokenCmp string
+		ids, brokenCmp = src.WindowIDs()
+		rw = ir.WindowRewriter(ids, brokenCmp)
+		if len(ids) > 0 {
+			tipSrc = ids[len(ids)-1]
+		}
+	default:
+		ids = src.PathIDs(at)
+		if len(ids) == 0 {
+			if at == "" {
+				return "", 0, fmt.Errorf("agent: session %q has nothing to fork", srcID)
+			}
+			return "", 0, fmt.Errorf("agent: fork: entry %q is not in this session", at)
+		}
+		tipSrc = ids[len(ids)-1]
 	}
-	set, tipSrc, err := forkSet(st, o)
-	if err != nil {
-		return "", 0, err
-	}
-	if len(set) == 0 {
+	if len(ids) == 0 {
 		return "", 0, fmt.Errorf("agent: session %q has nothing to fork", srcID)
 	}
 
@@ -106,7 +142,7 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 	// half copy is not a fork anyone could defend, so the failed attempt is undone here,
 	// in the one place that knows how much it made.
 	defer func() {
-		if written == len(set) {
+		if written == len(ids) {
 			return
 		}
 		if err := m.Remove(o.ID); err != nil {
@@ -114,73 +150,77 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 		}
 	}()
 
-	log := dst.Log()
-	ids := make(map[string]string, len(set))
-	for _, e := range set {
+	srcLog, log := src.Log(), dst.Log()
+	mapped := make(map[string]string, len(ids))
+	copied := make(map[string]bool)
+	for _, id := range ids {
+		// One row at a time, references kept as references: the entry travels the
+		// store's own cheap shape and never its images.
+		found, err := srcLog.Contents([]string{id}, false)
+		if err != nil {
+			return "", 0, fmt.Errorf("agent: fork %q: reading %s: %w", o.ID, id, err)
+		}
+		e, ok := found[id]
+		if !ok {
+			// Deleted mid-copy: stopping is honest, a silently missing line is a
+			// parent walk no reader will take.
+			return "", 0, fmt.Errorf("agent: fork %q: entry %s left the source mid-copy", o.ID, id)
+		}
+		if rw != nil {
+			e = rw(written, e)
+		}
 		ne := *e
 		nid := log.NextID()
-		ids[e.ID] = nid
+		mapped[e.ID] = nid
 		ne.ID = nid
 		if ne.ParentID != "" {
-			ne.ParentID = ids[ne.ParentID] // set order is parent-before-child, so this is mapped
+			ne.ParentID = mapped[ne.ParentID] // stream order is parent-before-child, so this is mapped
 		}
 		if c := ne.Compaction; c != nil {
 			nc := *c
 			if c.BoundaryID != nil {
-				if mapped, ok := ids[*c.BoundaryID]; ok {
-					nb := mapped
+				if mappedID, ok := mapped[*c.BoundaryID]; ok {
+					nb := mappedID
 					nc.BoundaryID = &nb
 				}
 			}
 			ne.Compaction = &nc // a fresh meta: writing through the source's pointer would edit the source
+		}
+		// The image bytes move before the payload that names them — the store
+		// refuses a reference to a sha it has never seen — and they move as bytes,
+		// from blob table to blob table, never through the base64 layer that the
+		// write side would only undo to these very bytes.
+		for _, p := range ne.Parts {
+			sha, isRef := strings.CutPrefix(p.Data, store.BlobPrefix)
+			if p.Type != ir.PartImage || !isRef || sha == "" || copied[sha] {
+				continue
+			}
+			b, mime, found, err := srcLog.BlobBytes(sha)
+			if err != nil {
+				return "", 0, fmt.Errorf("agent: fork %q: blob %s: %w", o.ID, sha, err)
+			}
+			if !found {
+				return "", 0, fmt.Errorf("agent: fork %q: entry %s names blob %s, which is not in the source store", o.ID, id, sha)
+			}
+			if err := log.PutBlob(sha, mime, b); err != nil {
+				return "", 0, fmt.Errorf("agent: fork %q: putting blob %s: %w", o.ID, sha, err)
+			}
+			copied[sha] = true
 		}
 		if err := log.AppendEntry(&ne, false); err != nil {
 			return "", 0, fmt.Errorf("agent: fork %q: %w", o.ID, err)
 		}
 		written++
 	}
-	if err := log.SetTip(ids[tipSrc]); err != nil {
-		return "", 0, fmt.Errorf("agent: fork %q: setting the tip: %w", o.ID, err)
+	if tipSrc != "" {
+		if err := log.SetTip(mapped[tipSrc]); err != nil {
+			return "", 0, fmt.Errorf("agent: fork %q: setting the tip: %w", o.ID, err)
+		}
 	}
 	// The opened session still carries its empty snapshot; drop it so the next reader
 	// replays the copy from disk.
 	if _, err := m.Unload(o.ID); err != nil {
 		return "", 0, err
 	}
-	return o.ID, len(set), nil
-}
-
-// forkSet picks the subset in parent-before-child order and names the entry the copy's tip
-// should be. Path mode walks at's own ancestry (the error for an unknown id happens there);
-// full mode hands over the whole tree.
-func forkSet(st *store.State, o ForkOptions) ([]*ir.Entry, string, error) {
-	if o.Full {
-		return ir.TreeOrder(st.Entries), st.Tip, nil
-	}
-	at := o.At
-	if at == "" {
-		at = st.Tip
-	}
-	if at == "" {
-		return nil, "", nil
-	}
-	var rev []*ir.Entry
-	seen := make(map[string]bool, len(st.Entries))
-	for cur := at; cur != ""; {
-		if seen[cur] {
-			return nil, "", fmt.Errorf("agent: fork: entry %q: parent cycle", cur)
-		}
-		seen[cur] = true
-		e, ok := st.Entries[cur]
-		if !ok {
-			return nil, "", fmt.Errorf("agent: fork: entry %q is not in this session", cur)
-		}
-		rev = append(rev, e)
-		cur = e.ParentID
-	}
-	set := make([]*ir.Entry, 0, len(rev))
-	for i := len(rev) - 1; i >= 0; i-- {
-		set = append(set, rev[i])
-	}
-	return set, at, nil
+	return o.ID, len(ids), nil
 }

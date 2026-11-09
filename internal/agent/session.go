@@ -393,6 +393,70 @@ func (s *Session) window() (kept []*ir.Entry, cmp *ir.Entry, err error) {
 	return kept, cmp, nil
 }
 
+// TreeIDs, PathIDs and WindowIDs are the three id sets the fork and export shapes
+// stream by — answered from the resident spine, so the tree and the window are
+// asked their shape without a single payload being read for it. The orders are
+// the orders the writers write in: parent before child, and a copy that names
+// ids already knows it has every id it will name before the first row moves.
+
+// TreeIDs is the whole tree in parent-before-child order — the full shape's
+// stream order (a remapping copy resolves every parent edge from the ids it
+// has already issued).
+func (s *Session) TreeIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ir.TreeOrderMeta(s.tr.Entries)
+}
+
+// PathIDs is the chain root..at (at "" meaning the tip), empty when at names no
+// entry on the spine — callers treat empty as the unknown-id answer it is.
+func (s *Session) PathIDs(at string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at == "" {
+		at = s.tr.Tip
+	}
+	path := ir.PathMeta(s.tr.Entries, at)
+	if len(path) == 0 {
+		return nil
+	}
+	ids := make([]string, len(path))
+	for i, m := range path {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
+// WindowIDs names exactly the set window() would load — the active summary at
+// its own place on the path and every entry its boundary keeps — without loading
+// it. The ctx-shaped export and fork write precisely these ids in this order.
+// The second answer names the summary that was broken at resolution (empty if
+// the boundary resolved): a broken window travels as it stands, fail-open, the
+// copy standing broken on the receiving machine as it stands broken here.
+func (s *Session) WindowIDs() (ids []string, brokenCmp string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := ir.PathMeta(s.tr.Entries, s.tr.Tip)
+	keptM, cmpM := ir.EffectiveMeta(s.tr.Entries, path)
+	in := make(map[string]bool, len(keptM)+1)
+	for _, m := range keptM {
+		in[m.ID] = true
+	}
+	if cmpM != nil {
+		in[cmpM.ID] = true
+		if cmpM.Compaction != nil && cmpM.Compaction.Broken {
+			brokenCmp = cmpM.ID
+		}
+	}
+	ids = make([]string, 0, len(in))
+	for _, m := range path {
+		if in[m.ID] {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids, brokenCmp
+}
+
 // build runs the single assembler over the effective window (§5.4 choke point).
 func (s *Session) build() (*asm.Built, *asm.Sizes, []llm.Tool, error) {
 	kept, cmp, err := s.window()

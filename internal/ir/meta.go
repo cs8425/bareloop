@@ -1,6 +1,9 @@
 package ir
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // Meta is the resident shape of one entry: where it sits in the tree and what it
 // is, with none of what it says. Everything a session can answer without putting
@@ -102,4 +105,92 @@ func EffectiveMeta(entries map[string]*Meta, path []*Meta) ([]*Meta, *Meta) {
 		}
 	}
 	return all, cmp
+}
+
+// TreeOrderMeta is TreeOrder over the resident spine, rule for rule (a parentless
+// orphans-as-roots, ids sorted among siblings, a corrupt cycle entered once) —
+// answering for the whole tree what PathMeta answers for one chain. It returns
+// ids, which is what a full-shaped fork or export wants before any payload has
+// been read: the order first, the content one row at a time after, is the shape
+// the single-connection store insists on.
+func TreeOrderMeta(entries map[string]*Meta) []string {
+	kids := make(map[string][]string, len(entries))
+	var roots []string
+	for id, m := range entries {
+		if p := m.ParentID; p == "" || entries[p] == nil {
+			roots = append(roots, id)
+		} else {
+			kids[p] = append(kids[p], id)
+		}
+	}
+	sort.Strings(roots)
+	for _, v := range kids {
+		sort.Strings(v)
+	}
+	out := make([]string, 0, len(entries))
+	visited := make(map[string]bool, len(entries))
+	var walk func(string)
+	walk = func(id string) {
+		if visited[id] {
+			return // a cycle would have no end; the first visitor wins
+		}
+		visited[id] = true
+		out = append(out, id)
+		for _, k := range kids[id] {
+			walk(k)
+		}
+	}
+	for _, r := range roots {
+		walk(r)
+	}
+	return out
+}
+
+// WindowRewriter is the window's stand-alone rewrite in streaming shape — the
+// answer to "what does this window row need before it leaves?", handed one row at
+// a time with its position, for a window of exactly these ids:
+//
+//   - the head entry roots the new session (its parent is one of the entries the
+//     summary replaced, by construction);
+//   - the summary whose boundary names a row the window dropped re-aims at the
+//     window's head — naming the same slice with an id the copy carries — and a
+//     boundary that already lands inside the window is nobody's to move;
+//   - the summary that was broken at resolution (brokenCmp, empty unless the
+//     boundary failed on the source's own path) passes through untouched: fail
+//     open travels as it stands, the copy standing broken on the receiving
+//     machine exactly as it stands broken here.
+//
+// This is the export-side rewrite the ctx file has always owed, lifted to the ir
+// layer so the ctx fork pays the same rule from the same code — one window
+// semantics, two delivery vehicles.
+func WindowRewriter(ids []string, brokenCmp string) func(i int, e *Entry) *Entry {
+	on := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		on[id] = true
+	}
+	head := ""
+	if len(ids) > 0 {
+		head = ids[0]
+	}
+	return func(i int, e *Entry) *Entry {
+		if i == 0 && e.ParentID != "" {
+			rooted := *e
+			rooted.ParentID = ""
+			e = &rooted
+		}
+		if e.ID == brokenCmp || !e.IsCompaction() {
+			return e
+		}
+		c := e.Compaction
+		if c == nil || c.BoundaryID == nil || on[*c.BoundaryID] {
+			return e
+		}
+		m := *c
+		bid := head
+		m.BoundaryID = &bid
+		m.Broken = false
+		rewritten := *e
+		rewritten.Compaction = &m
+		return &rewritten
+	}
 }

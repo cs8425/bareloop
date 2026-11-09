@@ -233,3 +233,33 @@ func TestPathWalksToTheRootAndSurvivesACycle(t *testing.T) {
 		t.Fatalf("unknown tip must give an empty path, got %v", idsOf(got))
 	}
 }
+
+// TestTreeOrderMetaMirrorsTreeOrder is the full-shaped stream's trust: the spine is
+// asked for the tree's replay order and answers exactly what TreeOrder answers with
+// the full entries — branches, orphan roots, sibling order and cycles included —
+// with nothing but ids, and keeps every parent emitted before its child, which is
+// what lets a remapping copy resolve an edge the moment it is written.
+func TestTreeOrderMetaMirrorsTreeOrder(t *testing.T) {
+	m := chain(
+		entry("1", "", KindUser, "user", "a"),
+		entry("2", "1", KindAssistant, "assistant", "b"),
+		entry("3", "1", KindUser, "user", "branch"),
+		entry("4", "2", KindUser, "user", "c"),
+		entry("orphan", "gone", KindUser, "user", "d"),
+	)
+	want := idsOf(TreeOrder(m))
+	metas := map[string]*Meta{}
+	for id, e := range m {
+		metas[id] = &Meta{ID: id, ParentID: e.ParentID, Kind: e.Kind}
+	}
+	if got := TreeOrderMeta(metas); !equal(got, want) {
+		t.Fatalf("TreeOrderMeta = %v, want %v (the mirror is rule for rule)", got, want)
+	}
+	seen := map[string]bool{}
+	for _, id := range TreeOrderMeta(metas) {
+		if p := metas[id].ParentID; p != "" && metas[p] != nil && !seen[p] {
+			t.Fatalf("%s came before its parent %s", id, p)
+		}
+		seen[id] = true
+	}
+}

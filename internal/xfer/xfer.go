@@ -83,17 +83,40 @@ type Session struct {
 // parent-before-child order (ir.TreeOrder or one path); the writer trusts that order and
 // the importer re-verifies what matters.
 func Encode(w io.Writer, hdr Header, entries []*ir.Entry) error {
+	i := 0
+	return EncodeStream(w, hdr, func() (*ir.Entry, error) {
+		if i >= len(entries) {
+			return nil, io.EOF
+		}
+		e := entries[i]
+		i++
+		return e, nil
+	})
+}
+
+// EncodeStream is Encode with the entries arriving on demand: the header goes first,
+// then one entry is asked for, written, and forgotten before the next is named — the
+// rows travel from store to wire through one slot, and no export needs its whole
+// story in RAM to write it. next answers in file order (parent before child) and
+// io.EOF means the last row has been handed over.
+func EncodeStream(w io.Writer, hdr Header, next func() (*ir.Entry, error)) error {
 	enc := json.NewEncoder(w)
 	hdr.Harness, hdr.Format = Harness, FormatV1
 	if err := enc.Encode(hdr); err != nil {
 		return err
 	}
-	for _, e := range entries {
+	for {
+		e, err := next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		if err := enc.Encode(e); err != nil {
 			return err
 		}
 	}
-	return nil
 }
 
 // ScrubbedConfig is the config as it goes into a file: the API key is stripped because an

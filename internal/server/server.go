@@ -199,9 +199,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFork copies a session — the path it stands on (default), the path cut at an entry
-// (?at in the body), or the whole tree ("full": true) — into a new session whose id the
-// caller picks: the daemon invents no directory names here either. Everything else about
-// the copy is the daemon's business; no client downloads the world to hand it back.
+// (?at in the body; "ctx" forks the window the next request carries), or the whole tree
+// ("full": true) — into a new session whose id the caller picks: the daemon invents no
+// directory names here either. Everything else about the copy is the daemon's business;
+// no client downloads the world to hand it back.
 func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.session(w, r)
 	if !ok {
