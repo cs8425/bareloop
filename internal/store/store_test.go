@@ -268,6 +268,44 @@ func TestImagesDedupPinAndGc(t *testing.T) {
 	}
 }
 
+// TestContentsWithImagesIsNotDeadlockedByOneConn is a regression test in the literal
+// sense: the store owns a single connection (SetMaxOpenConns(1)), so an inflation that
+// chases a blob reference must not start while the payload scan still holds it — the
+// shape that did asked the connection for itself and waited forever. Only an entry
+// with an image part ever reaches the blob query, which is how the shape survived
+// every pictureless test until a session with screenshots hung the daemon on open.
+func TestContentsWithImagesIsNotDeadlockedByOneConn(t *testing.T) {
+	l := openTest(t)
+	img := []byte("png-bytes")
+	b64 := base64.StdEncoding.EncodeToString(img)
+	withImg := imgEntry("screenshot", img)
+	plain := user("plain")
+	for _, e := range []*ir.Entry{plain, withImg} {
+		if err := l.AppendEntry(e, true); err != nil {
+			t.Fatalf("AppendEntry: %v", err)
+		}
+	}
+	got, err := l.Contents([]string{withImg.ID, plain.ID, "9999999"}, true)
+	if err != nil {
+		t.Fatalf("Contents: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("contents %d entries, want 2 — the ghost answers by absence", len(got))
+	}
+	if d := got[withImg.ID].Parts[0].Data; d != b64 {
+		t.Error("Contents(true) did not re-attach the image bytes")
+	}
+	// expandBlobs=false keeps "blob:<sha>" where the bytes were — the shape a reader
+	// that never sends a picture answers with, and it never opens the blob table.
+	refs, err := l.Contents([]string{withImg.ID}, false)
+	if err != nil {
+		t.Fatalf("Contents(false): %v", err)
+	}
+	if d := refs[withImg.ID].Parts[0].Data; !strings.HasPrefix(d, blobPrefix) {
+		t.Errorf("Contents(false) data %q, want a %s reference", d, blobPrefix)
+	}
+}
+
 func TestDeleteReparentsAndRewritesPayload(t *testing.T) {
 	l := openTest(t)
 	root := user("root")

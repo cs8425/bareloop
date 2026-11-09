@@ -1030,13 +1030,29 @@ func (l *Log) Contents(ids []string, expandBlobs bool) (map[string]*ir.Entry, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := make(map[string]*ir.Entry, len(ids))
+	// Gather, release, then inflate — and this ordering is load-bearing, not
+	// stylistic: the store runs on a single connection (SetMaxOpenConns(1)), so
+	// an inflation that chases a blob reference needs the very connection the
+	// scan above still holds. An entry with an image part asked for inside this
+	// loop waits for itself forever (the shape Replay avoids by gathering its
+	// payloads first, and one real session's screenshots were what it took to
+	// find that out).
+	var payloads []string
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		payloads = append(payloads, p)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*ir.Entry, len(ids))
+	for _, p := range payloads {
 		e, err := l.inflate(p, expandBlobs)
 		if err != nil {
 			return nil, err
@@ -1045,7 +1061,7 @@ func (l *Log) Contents(ids []string, expandBlobs bool) (map[string]*ir.Entry, er
 			out[e.ID] = e
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // SkeletonRow is one row of the cost panel's view of the path: what a request
