@@ -304,6 +304,24 @@ func TestContentsWithImagesIsNotDeadlockedByOneConn(t *testing.T) {
 	if d := refs[withImg.ID].Parts[0].Data; !strings.HasPrefix(d, blobPrefix) {
 		t.Errorf("Contents(false) data %q, want a %s reference", d, blobPrefix)
 	}
+	// A window that repeats a screenshot pays for it once: two references, one
+	// point query, one encoding — the bill is distinct images, not references
+	// (the shape a model pays per picture it never sent twice).
+	repeat := imgEntry("again", img)
+	if err := l.AppendEntry(repeat, true); err != nil {
+		t.Fatalf("AppendEntry repeat: %v", err)
+	}
+	before := l.blobLookups
+	both, err := l.Contents([]string{withImg.ID, repeat.ID}, true)
+	if err != nil {
+		t.Fatalf("Contents pair: %v", err)
+	}
+	if got := l.blobLookups - before; got != 1 {
+		t.Errorf("blob lookups for two references of one image = %d, want 1", got)
+	}
+	if both[withImg.ID].Parts[0].Data != b64 || both[repeat.ID].Parts[0].Data != b64 {
+		t.Error("the cached encoding is not the bytes that went in")
+	}
 }
 
 func TestDeleteReparentsAndRewritesPayload(t *testing.T) {

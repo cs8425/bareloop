@@ -133,6 +133,12 @@ type Log struct {
 	agg    *Info
 	aggKey stamps
 
+	// blobLookups counts the point queries inflate has asked the blob table for.
+	// Unexported and read only from tests one package over: it is the instrument
+	// behind "one call, one fetch per distinct image", which is otherwise
+	// invisible to its callers.
+	blobLookups int64
+
 	logf func(format string, args ...any) // how something odd gets said; nil means silent
 }
 
@@ -880,6 +886,16 @@ func (l *Log) decodeEntry(payload string) (*ir.Entry, error) {
 // stay "blob:<sha>" references (the shape a reader that never sends a picture can
 // still answer with — sizes, counts, search).
 func (l *Log) inflate(payload string, expandBlobs bool) (*ir.Entry, error) {
+	return l.inflateWith(payload, expandBlobs, nil)
+}
+
+// inflateWith is inflate with a place to leave what it learned: a reader that
+// inflates a batch (Contents) hands the same call-scoped map to every row, so a
+// screenshot the window repeats crosses the wire once — one point query and one
+// base64 encoding per distinct sha rather than per reference. Scoped to one call
+// on purpose: blobs die (delete's GC), and a cache that outlives its call would
+// some day speak for a sha that is no longer there.
+func (l *Log) inflateWith(payload string, expandBlobs bool, cache map[string]string) (*ir.Entry, error) {
 	var e ir.Entry
 	if err := json.Unmarshal([]byte(payloadText(payload)), &e); err != nil {
 		return nil, err
@@ -892,14 +908,20 @@ func (l *Log) inflate(payload string, expandBlobs bool) (*ir.Entry, error) {
 		if p.Type != ir.PartImage || !strings.HasPrefix(p.Data, blobPrefix) {
 			continue
 		}
+		sha := strings.TrimPrefix(p.Data, blobPrefix)
+		if cached, ok := cache[sha]; ok {
+			p.Data = cached
+			continue
+		}
 		var raw []byte
-		err := l.db.QueryRow("SELECT bytes FROM blob WHERE sha256 = ?", strings.TrimPrefix(p.Data, blobPrefix)).Scan(&raw)
+		l.blobLookups++
+		err := l.db.QueryRow("SELECT bytes FROM blob WHERE sha256 = ?", sha).Scan(&raw)
 		if errors.Is(err, sql.ErrNoRows) {
 			// why the reference survives its blob's absence: a payload that names a sha is
 			// telling the truth about what was stored; a blob that vanished is corruption
 			// worth a line, not worth losing the entry over.
 			if l.logf != nil {
-				l.logf("entry %s references blob %s, which is not there", e.ID, strings.TrimPrefix(p.Data, blobPrefix))
+				l.logf("entry %s references blob %s, which is not there", e.ID, sha)
 			}
 			continue
 		}
@@ -907,6 +929,9 @@ func (l *Log) inflate(payload string, expandBlobs bool) (*ir.Entry, error) {
 			return nil, err
 		}
 		p.Data = base64.StdEncoding.EncodeToString(raw)
+		if cache != nil {
+			cache[sha] = p.Data
+		}
 	}
 	return &e, nil
 }
@@ -1052,8 +1077,18 @@ func (l *Log) Contents(ids []string, expandBlobs bool) (map[string]*ir.Entry, er
 		return nil, err
 	}
 	out := make(map[string]*ir.Entry, len(ids))
+	// One cache for the call: a window that sends the same screenshot in five
+	// turns fetches and encodes it once. (No SQL join reaches this: the sha
+	// lives inside the payload JSON, and the payload column is one codec's
+	// bytes away from anything SQLite can look into — the scan above is the
+	// last statement that knows ids, and inflation is the first that knows
+	// parts.)
+	var cache map[string]string
+	if expandBlobs {
+		cache = map[string]string{}
+	}
 	for _, p := range payloads {
-		e, err := l.inflate(p, expandBlobs)
+		e, err := l.inflateWith(p, expandBlobs, cache)
 		if err != nil {
 			return nil, err
 		}
