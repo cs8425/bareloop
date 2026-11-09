@@ -261,24 +261,35 @@ func (s *Session) answeringLocked() string {
 	// that lands there splits one of them from its result just as thoroughly. Counting the results is enough
 	// rather than matching ids, because runTools works through a turn's calls in order, which makes the
 	// results already on the path a prefix of the calls.
+	//
+	// The walk itself is pure spine — counting tool rows needs kind and nothing else — and the content is
+	// asked for once, of the single assistant the walk lands on: the one whose call list decides the answer.
 	answered := 0
-	for id := s.st.Tip; id != ""; {
-		e := s.st.Entries[id]
-		if e == nil {
+	for id := s.tr.Tip; id != ""; {
+		m := s.tr.Entries[id]
+		if m == nil {
 			return ""
 		}
-		if e.Kind == ir.KindTool {
+		if m.Kind == ir.KindTool {
 			answered++
-			id = e.ParentID
+			id = m.ParentID
 			continue
 		}
-		if e.Kind != ir.KindAssistant || len(e.ToolCalls) == 0 {
+		if m.Kind != ir.KindAssistant {
 			return ""
 		}
-		if answered >= len(e.ToolCalls) {
+		found, err := s.log.Contents([]string{id}, true)
+		if err != nil {
 			return ""
 		}
-		return e.ToolCalls[answered].ID
+		a := found[id]
+		if a == nil || len(a.ToolCalls) == 0 {
+			return ""
+		}
+		if answered >= len(a.ToolCalls) {
+			return ""
+		}
+		return a.ToolCalls[answered].ID
 	}
 	return ""
 }
@@ -392,7 +403,7 @@ func (s *Session) wakeLocked() {
 	// The tail is read here, under the lock, because it is the answer to "what is this wake for" — and
 	// if the path moved while the wait was being held (an entry edited, a tip rewound) there is nothing
 	// to answer and this wake must invent nothing.
-	tail := parkedTailOf(ir.Path(s.st.Entries, s.st.Tip))
+	tail := s.parkTailLocked()
 	if len(tail) == 0 {
 		// why the lock is put down here: abandoning the park means putting what was held onto the path,
 		// and appending takes this same lock. The defer picks it back up, because every caller of this
@@ -555,30 +566,60 @@ func (s *Session) stopTimerLocked() {
 	}
 }
 
-// parkedTailOf finds the tail a wake owes the loop: the assistant entry that asked for the wait, plus
-// whatever came after it. The tail rather than the one call, because a model can ask for `wait` next to
-// another tool in a single turn, and replaying the turn is how the calls it never got to make are still
-// made. Re-running `wait` itself is safe by construction: the second call recomputes the same moment
-// from the same arguments and sleeps what is left, so the answer the model reads comes from the code
-// that actually waited — once. See tailCalls, which is what keeps an already-answered call from running
-// a second time.
-func parkedTailOf(path []*ir.Entry) []*ir.Entry {
-	if len(path) == 0 {
+// parkTailLocked finds the tail a wake owes the loop: the assistant entry that asked
+// for the wait, plus whatever came after it. The tail rather than the one call,
+// because a model can ask for `wait` next to another tool in a single turn, and
+// replaying the turn is how the calls it never got to make are still made. Re-running
+// `wait` itself is safe by construction: the second call recomputes the same moment
+// from the same arguments and sleeps what is left, so the answer the model reads comes
+// from the code that actually waited — once. See tailCalls, which is what keeps an
+// already-answered call from running a second time.
+//
+// It is the spine doing the work and the tail paying for content: the walk back from
+// the tip to the first assistant needs kinds only, and exactly the stretch the tail
+// names is inflated — the same answer parkedTailOf gave from an all-resident path,
+// at the cost of one turn rather than the whole conversation. Caller holds mu.
+func (s *Session) parkTailLocked() []*ir.Entry {
+	if s.tr.Tip == "" {
 		return nil
 	}
-	i := len(path) - 1
-	for i >= 0 && path[i].Kind != ir.KindAssistant {
-		i--
+	var ids []string // tip backwards
+	foundAssistant := false
+	for id := s.tr.Tip; id != ""; {
+		m := s.tr.Entries[id]
+		if m == nil {
+			return nil // spine broken under the tip: nothing to replay
+		}
+		ids = append(ids, id)
+		if m.Kind == ir.KindAssistant {
+			foundAssistant = true
+			break
+		}
+		id = m.ParentID
 	}
-	if i < 0 {
+	if !foundAssistant {
 		return nil
 	}
-	if len(path[i].ToolCalls) == 0 {
+	content, err := s.log.Contents(ids, true)
+	if err != nil {
+		s.logf("park tail: %v", err)
+		return nil
+	}
+	tail := make([]*ir.Entry, 0, len(ids))
+	for i := len(ids) - 1; i >= 0; i-- { // back to root-to-tip order
+		e := content[ids[i]]
+		if e == nil {
+			return nil // the tail's own entry vanished: "nothing to replay" is the honest answer
+		}
+		tail = append(tail, e)
+	}
+	first := tail[len(tail)-1] // the assistant the walk stopped on is the tail's oldest row
+	if len(first.ToolCalls) == 0 {
 		// A compaction boundary, or an entry edited until it has no calls: the park's tail is gone,
 		// and "nothing to replay" is the answer that lets the caller abandon the park.
 		return nil
 	}
-	return path[i:]
+	return tail
 }
 
 // tailCalls is every call the tail is still owed, in the order the model asked for them. Anything in
@@ -620,13 +661,12 @@ func (s *Session) recoverPark() {
 	if s.park != nil || s.cancel != nil {
 		return
 	}
-	path := ir.Path(s.st.Entries, s.st.Tip)
-	tail := parkedTailOf(path)
+	tail := s.parkTailLocked()
 	// why the tail has to reach the end of the path: once anything has joined after the call — a message
 	// sent by a daemon that did not know how to hold one, an entry edited in by hand — writing the
 	// result now would put it after that, which is the ordering this whole file exists to prevent. The
 	// assembler already refuses to invent a result for a trailing call, so leaving it is not a new hole.
-	if len(tail) == 0 || tail[len(tail)-1].ID != path[len(path)-1].ID {
+	if len(tail) == 0 || tail[len(tail)-1].ID != s.tr.Tip {
 		return
 	}
 	calls := tailCalls(tail)

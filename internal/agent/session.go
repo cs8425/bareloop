@@ -55,8 +55,14 @@ type Session struct {
 
 	log *store.Log
 
-	mu  sync.Mutex
-	st  *store.State
+	mu sync.Mutex
+	// tr is the resident half of the tree: the spine of every entry plus the facts
+	// a compaction leaves on it (ir.Meta). The conversation itself lives on disk and
+	// is read through log.Contents for the stretch a moment needs — build's window,
+	// a transcript page, the tail a wake replays. Anything that wants the tree's
+	// SHAPE is a spine question and never pays for content; anything that wants the
+	// words pays only for the words it sends.
+	tr  *store.MetaState
 	cfg Config
 
 	phase phase
@@ -110,7 +116,12 @@ type Session struct {
 	lastRun  *RunInfo
 	ctxUsed  int
 	ctxKnown bool
-	nctx     int // effective window: see nctx.go (never persisted)
+	// usageCache backs Status and the trigger when ctxKnown is false: the last real
+	// usage on the live path, re-derived from disk when the session's own numbers
+	// are cold (fresh process, or the turn after a compaction). Nil means "not
+	// looked up yet", which is what keeps the lookup off every status poll.
+	usageCache *ir.Usage
+	nctx       int // effective window: see nctx.go (never persisted)
 	// nctxCfg is what config.json says (the operator's ceiling); nctxServer is what the server
 	// last reported. Keeping them apart is the only way to explain a decision, and nctx itself is
 	// derived from the two on every probe.
@@ -181,7 +192,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	log.SetLogf(func(format string, args ...any) {
 		mgr.logf("session "+id+": "+format, args...)
 	})
-	st, err := log.Replay()
+	st, err := log.ReplayMeta()
 	if err != nil {
 		_ = log.Close()
 		return nil, fmt.Errorf("replay %s: %w", cfg.ID, err)
@@ -199,7 +210,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 		mgr:           mgr,
 		log:           log,
 		cfg:           cfg,
-		st:            st,
+		tr:            st,
 		provider:      prov,
 		pendingElicit: map[string]chan mcp.ElicitResponse{},
 	}
@@ -214,9 +225,6 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	// written back to config.json.
 	s.nctxCfg = cfg.LLM.NCTX
 	s.nctx = cfg.LLM.NCTX
-	for _, id := range st.Adopted {
-		s.logf("adopted orphan compaction entry %s onto the path tip (§3.10)", id)
-	}
 	// MCP servers are started in the background: a slow or broken server must not block
 	// opening a session, and the tools appear as soon as they are ready.
 	go func() {
@@ -236,7 +244,7 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 
 // tipOfPending is the initial "already sent" watermark: everything on an existing path has
 // been sent at some point, so nothing shows as pending when a session is reopened.
-func tipOfPending(st *store.State) string { return st.Tip }
+func tipOfPending(st *store.MetaState) string { return st.Tip }
 
 // Log exposes the session log (used by the HTTP layer for imports).
 func (s *Session) Log() *store.Log { return s.log }
@@ -267,11 +275,36 @@ func (s *Session) emit(e Event) {
 
 // ---------------------------------------------------------------- path access
 
-// path returns the current root->tip path.
-func (s *Session) path() []*ir.Entry {
+// spine returns the live path as spines: the tree's shape without a byte of its
+// conversation. Every "where is the tree" question answers from this.
+func (s *Session) spine() []*ir.Meta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return ir.Path(s.st.Entries, s.st.Tip)
+	return ir.PathMeta(s.tr.Entries, s.tr.Tip)
+}
+
+// path materialises the whole root-to-tip path with content — every word in the
+// session — for callers that genuinely want all of it. Nothing hot may call this;
+// build's window, the transcript's page and the park's tail exist so that this
+// stays the expensive last resort its name admits to being.
+func (s *Session) path() []*ir.Entry {
+	spine := s.spine()
+	ids := make([]string, 0, len(spine))
+	for _, m := range spine {
+		ids = append(ids, m.ID)
+	}
+	found, err := s.log.Contents(ids, false)
+	if err != nil {
+		s.logf("path read: %v", err)
+		return nil
+	}
+	out := make([]*ir.Entry, 0, len(ids))
+	for _, id := range ids {
+		if e := found[id]; e != nil {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // appendEntry appends one entry at the tip (single writer per session, tip advance in the
@@ -287,43 +320,109 @@ func (s *Session) appendEntry(e *ir.Entry) (*ir.Entry, error) {
 // sent meanwhile has to land after all of them rather than between two (ordering, park.go).
 func (s *Session) appendLocked(e *ir.Entry) (*ir.Entry, error) {
 	if e.ParentID == "" {
-		e.ParentID = s.st.Tip
+		e.ParentID = s.tr.Tip
 	}
 	if err := s.log.AppendEntry(e, true); err != nil {
 		return nil, err
 	}
 	cp := *e
-	s.st.Entries[e.ID] = &cp
-	s.st.Tip = e.ID
+	// The resident tree learns the spine, and the words go where they belong — on disk.
+	s.tr.Entries[e.ID] = &ir.Meta{ID: e.ID, ParentID: e.ParentID, Kind: e.Kind, Ts: e.Ts, Compaction: e.Compaction}
+	s.tr.Tip = e.ID
 	s.updated_at = e.Ts
+	if e.Usage != nil && e.Usage.HasPrompt {
+		s.usageCache = e.Usage // the newest number is being written right now
+	} else {
+		s.usageCache = nil // a path that moved loses the cached answer to "what was last counted"
+	}
 	return &cp, nil
 }
 
-// effective returns the path the model actually sees (spec §3.2: planning input and
-// assembler input are produced by the same function, structurally identical).
-func (s *Session) effective() (path []*ir.Entry, kept []*ir.Entry, cmp *ir.Entry) {
+// effectiveMeta is the path as the model sees it (spec §3.2: planning input and assembler
+// input are produced by the same function, structurally identical) — as spines. The boundary,
+// the broken flag and the kept ids are all facts the spine answers without opening a payload.
+func (s *Session) effectiveMeta() (path, kept []*ir.Meta, cmp *ir.Meta) {
 	s.mu.Lock()
-	path = ir.Path(s.st.Entries, s.st.Tip)
-	kept, cmp = ir.Effective(s.st.Entries, path)
+	path = ir.PathMeta(s.tr.Entries, s.tr.Tip)
+	kept, cmp = ir.EffectiveMeta(s.tr.Entries, path)
 	s.mu.Unlock()
 	return path, kept, cmp
 }
 
-// build runs the single assembler over the effective path (§5.4 choke point).
-func (s *Session) build() (*asm.Built, *asm.Sizes, []llm.Tool) {
-	path, kept, cmp := s.effective()
+// window reads the stretch the next payload carries — the active summary (which is
+// what EffectiveMeta's kept slice never contains: the caller splices it in front) and
+// every entry the effective path keeps after its boundary — and inflates exactly
+// those. This is the memory shape the whole design aims at: the resident session is
+// the tree, the working set is the context, and a turn's transient read is the only
+// time both exist. The ids come from the spine under s.mu and are read under it too:
+// a delete cannot slip between the walk and the read, because it takes this lock to
+// reload (B0 keeps SQL inside s.mu — semantics identical to the all-resident day).
+func (s *Session) window() (kept []*ir.Entry, cmp *ir.Entry, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := ir.PathMeta(s.tr.Entries, s.tr.Tip)
+	keptM, cmpM := ir.EffectiveMeta(s.tr.Entries, path)
+	ids := make([]string, 0, len(keptM)+1)
+	if cmpM != nil {
+		ids = append(ids, cmpM.ID)
+	}
+	for _, m := range keptM {
+		ids = append(ids, m.ID)
+	}
+	found, err := s.log.Contents(ids, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cmpM != nil {
+		cmp = found[cmpM.ID]
+		if cmp == nil {
+			return nil, nil, fmt.Errorf("agent: the active compaction entry %s is not in the store", cmpM.ID)
+		}
+		// The spine's view of the summary is the one that just resolved the boundary (broken
+		// marked, summary priced); the payload and the UI read the entry off the same truth.
+		cmp.Compaction = cmpM.Compaction
+	}
+	kept = make([]*ir.Entry, 0, len(keptM))
+	for _, m := range keptM {
+		e := found[m.ID]
+		if e == nil {
+			return nil, nil, fmt.Errorf("agent: entry %s is on the path but not in the store", m.ID)
+		}
+		kept = append(kept, e)
+	}
+	return kept, cmp, nil
+}
+
+// build runs the single assembler over the effective window (§5.4 choke point).
+func (s *Session) build() (*asm.Built, *asm.Sizes, []llm.Tool, error) {
+	kept, cmp, err := s.window()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	built := asm.Assemble(asm.Payload{System: s.Config().SystemPrompt, Kept: kept, Summary: cmp}, s.cfgOptions())
 	tools := s.visibleTools()
 	head := headTokens(s.Config().SystemPrompt, tools)
-	// Ask the path for its measurements before anything reads a size table: the numbers a later
+	// Ask the window for its measurements before anything reads a size table: the numbers a later
 	// compaction will need are only available while the requests that made them are still adjacent
-	// to each other. Held with the log because measuring writes onto the entries, and a second
-	// reader must not see a half-written count.
+	// to each other. Held with the log because measuring reads content, and a second reader must not
+	// see a half-written window.
+	//
+	// The window — summary and kept, the payload's own shape — is also the whole scope Stamp needs:
+	// every usage difference it takes is between two requests that carried exactly these entries,
+	// and the compaction entry's own cost is the price on its record, not the text under it.
+	win := kept
+	if cmp != nil {
+		win = append([]*ir.Entry{cmp}, kept...)
+	}
 	s.mu.Lock()
-	asm.Stamp(path, head, built.StructuredCap)
+	asm.Stamp(win, head, built.StructuredCap)
+	if built.Summary != nil && cmp != nil {
+		// The assembler copied the summary before it was stamped; the size table reads that copy.
+		built.Summary.Tokens = cmp.Tokens
+	}
 	sizes := asm.DeriveSizes(built, head)
 	s.mu.Unlock()
-	return built, sizes, tools
+	return built, sizes, tools, nil
 }
 
 // headTokens estimates the part of every prompt that is nobody's message: the system prompt and the
@@ -414,16 +513,21 @@ func (s *Session) pendingIDs() []string {
 }
 
 func (s *Session) pendingLocked() []string {
-	path := ir.Path(s.st.Entries, s.st.Tip)
 	sent := s.sentTip
 	var out []string
-	for _, e := range path {
-		if e.Kind != ir.KindUser {
-			continue
+	for m := s.tr.Tip; m != ""; {
+		e := s.tr.Entries[m]
+		if e == nil {
+			break // spine broken: the prefix is the honest answer, as every path walk reads it
 		}
-		if sent == "" || e.ID > sent {
+		if e.Kind == ir.KindUser && (sent == "" || e.ID > sent) {
 			out = append(out, e.ID)
 		}
+		m = e.ParentID
+	}
+	// walked tip-to-root; the pending list reads root-to-tip
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
 	}
 	return out
 }
@@ -433,7 +537,7 @@ func (s *Session) pendingLocked() []string {
 // exist yet, so a message appended now would travel ahead of it (Session.awaitingReply).
 func (s *Session) markSent() {
 	s.mu.Lock()
-	s.sentTip = s.st.Tip
+	s.sentTip = s.tr.Tip
 	s.awaitingReply = true
 	s.mu.Unlock()
 }
@@ -455,8 +559,8 @@ func (s *Session) Status() *Status {
 	s.mu.Lock()
 	cfg := s.cfg
 	phase := phaseToString(s.phase)
-	tip := s.st.Tip
-	entries := len(s.st.Entries)
+	tip := s.tr.Tip
+	entries := len(s.tr.Entries)
 	turn := s.turn
 	used, known := s.ctxUsed, s.ctxKnown
 	nctx, cfgN, srvN := s.nctx, s.nctxCfg, s.nctxServer
@@ -473,17 +577,14 @@ func (s *Session) Status() *Status {
 	queued = len(s.queue)
 	s.mu.Unlock()
 
-	_, _, cmp := s.effective()
+	_, _, cmp := s.effectiveMeta()
 	published, enabled, total := s.reg.counts()
 	pendingTools := s.reg.PolicyPending(cfg)
 	if !known {
 		// Fall back to the last real usage on the path (never an estimate), stopping at the active
 		// compaction entry: usage from before it describes a payload that no longer exists (1.5),
 		// so the honest answer for that turn is contextKnown=false and a dashed-down bar.
-		stop := cmp != nil && cmp.Compaction != nil && !cmp.Compaction.Broken
-		if u := ir.LastUsage(s.path(), stop); u != nil && u.HasPrompt {
-			used, known = u.ContextUsed(), true
-		}
+		used, known = s.usageNow()
 	}
 	st := &Status{
 		Session:      s.ID,
@@ -613,11 +714,12 @@ func (s *Session) userEntry(msg Message) *ir.Entry {
 
 // needsRun reports whether the path ends with something that expects an answer.
 func (s *Session) needsRun() bool {
-	path := s.path()
-	if len(path) == 0 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last := s.tr.Entries[s.tr.Tip]
+	if last == nil {
 		return false
 	}
-	last := path[len(path)-1]
 	switch last.Kind {
 	case ir.KindUser, ir.KindTool:
 		return true
@@ -629,8 +731,76 @@ func (s *Session) needsRun() bool {
 // sitting at the end of the path unanswered? If yes, a message arrived while we were busy
 // and must be sent as soon as the lock is released (spec §1.4).
 func (s *Session) endsWithUserMsg() bool {
-	path := s.path()
-	return len(path) > 0 && path[len(path)-1].Kind == ir.KindUser
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last := s.tr.Entries[s.tr.Tip]
+	return last != nil && last.Kind == ir.KindUser
+}
+
+// usageNow is the session's answer to "what did the last completed turn cost", from
+// the cache when it holds, and from the path when it does not. ctxKnown's own number
+// (the run's last response) wins; the fallback walks the spine back to the first
+// assistant with a count — stopping at the active compaction entry, because usage
+// from before it prices a payload that no longer exists (spec 1.5), and the honest
+// answer for the turn after a commit is then "unknown, and a dashed-down bar".
+func (s *Session) usageNow() (int, bool) {
+	s.mu.Lock()
+	if s.ctxKnown {
+		used, known := s.ctxUsed, true
+		s.mu.Unlock()
+		return used, known
+	}
+	if s.usageCache == nil {
+		s.usageCache = s.scanUsageLocked()
+	}
+	u := s.usageCache
+	s.mu.Unlock()
+	if u != nil && u.HasPrompt {
+		return u.ContextUsed(), true
+	}
+	return 0, false
+}
+
+// usageScanWalk is how far back the fallback reads content: assistant rows are the
+// only candidates, and no ordinary run of a turn ends ten assistants deep — a walk
+// that reaches this far answers "unknown", which beats inflating a whole history for
+// a number nobody has counted in ten turns.
+const usageScanWalk = 10
+
+// scanUsageLocked walks the spine from the tip, collecting assistant candidates, and
+// inflates only those. Caller holds s.mu.
+func (s *Session) scanUsageLocked() *ir.Usage {
+	var cands []string
+	for id := s.tr.Tip; id != "" && len(cands) < usageScanWalk; {
+		m := s.tr.Entries[id]
+		if m == nil {
+			break
+		}
+		if m.IsCompaction() {
+			if m.Compaction != nil && m.Compaction.Broken {
+				break // fail-open sends everything, so a pre-entry count was still the wire's price —
+			}
+			return nil // but with a summary in front of it, it is not, and this answer is unknown
+		}
+		if m.Kind == ir.KindAssistant {
+			cands = append(cands, id)
+		}
+		id = m.ParentID
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	found, err := s.log.Contents(cands, false) // usage is a number; a picture never changes one
+	if err != nil {
+		s.logf("usage scan: %v", err)
+		return nil
+	}
+	for _, id := range cands {
+		if e := found[id]; e != nil && e.Usage != nil && e.Usage.HasPrompt {
+			return e.Usage
+		}
+	}
+	return nil
 }
 
 // Stop and Interrupt live in loop.go.
@@ -650,20 +820,20 @@ func (s *Session) DeleteEntry(id string) error {
 
 // PatchEntry rewrites one entry's content (used by the UI's edit).
 func (s *Session) PatchEntry(id, content string) error {
-	s.mu.Lock()
-	e, ok := s.st.Entries[id]
-	if !ok {
-		s.mu.Unlock()
+	found, err := s.log.Contents([]string{id}, true)
+	if err != nil {
+		return err
+	}
+	e := found[id]
+	if e == nil {
 		return fmt.Errorf("agent: no such entry %q", id)
 	}
-	cp := *e
-	cp.Content = content
-	s.mu.Unlock()
-	if err := s.log.Patch(&cp); err != nil {
+	e.Content = content
+	if err := s.log.Patch(e); err != nil {
 		return err
 	}
 	s.reload()
-	s.emit(Event{Type: EvtEntry, Entry: &cp})
+	s.emit(Event{Type: EvtEntry, Entry: e})
 	return nil
 }
 
@@ -687,12 +857,13 @@ func (s *Session) SetTip(id string) error {
 func (s *Session) Reload() error { return s.reload() }
 
 func (s *Session) reload() error {
-	st, err := s.log.Replay()
+	st, err := s.log.ReplayMeta()
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.st = st
+	s.tr = st
+	s.usageCache = nil // the tree was re-read; the cached number's own entry may not be in it
 	s.mu.Unlock()
 	return nil
 }
@@ -713,7 +884,10 @@ func (s *Session) SetFlags(pinned, archived *bool) error {
 	return s.mgr.SaveConfig(cfg)
 }
 
-// Path returns the current root->tip path (the sequence that gets sent).
+// Path returns the current root->tip path (the sequence that gets sent). It inflates
+// the whole path from disk on every call — the endpoints that show a slice of it
+// answer from the spine and one page of content instead; this one is the on-demand
+// whole, and it stays the deliberate, occasional thing this name asks for.
 func (s *Session) Path() []*ir.Entry {
 	path := s.path()
 	out := make([]*ir.Entry, 0, len(path))
@@ -1013,15 +1187,18 @@ func (s *Session) Tools() *ToolsView {
 	s.mu.Unlock()
 
 	// Uses and LastUsed come from the transcript: "never called in forty turns" is the argument
-	// for switching a tool off, and the data is already in the log.
-	uses := map[string]int{}
-	lastUsed := map[string]string{}
-	for _, e := range s.path() {
-		if e.Kind != ir.KindTool || e.Tool == "" {
-			continue
+	// for switching a tool off, and the data is already in the log — read one row at a time by
+	// the ids the spine names, because a drawer opening is not a reason to inflate a history.
+	var toolIDs []string
+	for _, m := range s.spine() {
+		if m.Kind == ir.KindTool {
+			toolIDs = append(toolIDs, m.ID)
 		}
-		uses[e.Tool]++
-		lastUsed[e.Tool] = e.Ts.UTC().Format(time.RFC3339)
+	}
+	uses, lastUsed, err := s.log.ToolUses(toolIDs)
+	if err != nil {
+		s.logf("tool uses: %v", err)
+		uses, lastUsed = map[string]int{}, map[string]string{}
 	}
 	total, visible := 0, 0
 	for i := range view.Servers {
@@ -1245,8 +1422,12 @@ type InspectRow struct {
 
 // Inspect renders the inspector view (§4: always available, input is the choke point's output).
 func (s *Session) Inspect() *Inspection {
-	built, sizes, tools := s.build()
-	_, _, cmp := s.effective()
+	built, sizes, tools, err := s.build()
+	if err != nil {
+		s.logf("inspect: %v", err)
+		return &Inspection{Session: s.ID}
+	}
+	_, _, cmp := s.effectiveMeta()
 	ins := &Inspection{
 		Session:     s.ID,
 		NCTX:        s.nctxLocked(),
@@ -1261,9 +1442,11 @@ func (s *Session) Inspect() *Inspection {
 		ins.Broken = cmp.Compaction.Broken
 	}
 	// Same rule as the trigger and the progress bar (1.5): stop at the active compaction entry,
-	// because a usage from before it prices a payload that is no longer built.
+	// because a usage from before it prices a payload that is no longer built. The window is the
+	// walk's whole scope — what the assembler assembled is what the server counted. The window's
+	// own entries carry their usage; the summary copy in front of them is the stop line.
 	stop := cmp != nil && cmp.Compaction != nil && !cmp.Compaction.Broken
-	if u := ir.LastUsage(s.path(), stop); u != nil && u.HasPrompt {
+	if u := ir.LastUsage(built.Entries, stop); u != nil && u.HasPrompt {
 		ins.ContextUsed, ins.ContextKnown = u.ContextUsed(), true
 	}
 	cfg := s.Config()
@@ -1301,13 +1484,46 @@ func (s *Session) Inspect() *Inspection {
 // Payload is the exact request body the next request would carry: system head, messages (system
 // first) and tool definitions. Inspect sizes them, this shows them; nothing about the prompt is
 // hidden behind a byte count.
-func (s *Session) Payload() map[string]any {
-	built, _, tools := s.build()
+func (s *Session) Payload() (map[string]any, error) {
+	built, _, tools, err := s.build()
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"system":   built.System,
 		"messages": built.All(),
 		"tools":    tools,
-	}
+	}, nil
+}
+
+// ---------------------------------------------------------------- spine endpoints
+
+// SpinePage cuts a transcript window from the spine: the same rule PageOf applies to
+// entries, answered without touching a payload. The caller materialises the page it
+// names with PageContents — a session a hundred turns deep answers one page at the
+// cost of one page.
+func (s *Session) SpinePage(o ir.PageOptions) (*ir.SpinePage, error) {
+	return ir.PageOfSpine(s.spine(), o)
+}
+
+// PageContents inflates the named entries with images attached — the wire shape the
+// transcript has always shown. Order is the caller's to keep (the spine page names
+// it); the map is a lookup, not a list.
+func (s *Session) PageContents(ids []string) (map[string]*ir.Entry, error) {
+	return s.log.Contents(ids, true)
+}
+
+// TurnRows is the ruler over the path, cut from the spine and quoted by exactly the
+// turn-start entries the kept rows name.
+func (s *Session) TurnRows(limit int) (*ir.TurnList, error) {
+	return ir.TurnsSpine(s.spine(), limit, func(ids []string) (map[string]*ir.Entry, error) {
+		return s.log.Contents(ids, false) // a snippet never needs a picture's bytes
+	})
+}
+
+// UsageRows is the cost panel's skeleton, read row by row from disk.
+func (s *Session) UsageRows() ([]store.SkeletonRow, error) {
+	return s.log.Skeleton()
 }
 
 func (s *Session) nctxLocked() int {

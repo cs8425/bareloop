@@ -340,7 +340,10 @@ func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message
 	if p.ChunkFit(nctx) <= 0 {
 		t.Fatalf("no window means no fit: nctx = %d", nctx)
 	}
-	built, _, tools := s.build()
+	built, _, tools, err := s.build()
+	if err != nil {
+		t.Fatalf("the fixture's window could not be read: %v", err)
+	}
 	if len(tools) == 0 {
 		t.Logf("the fixture produced no tools; the tool assertions below compare two empties")
 	}
@@ -500,7 +503,10 @@ func TestTheChainNeverSummarisesNothing(t *testing.T) {
 	s, cp := chainFixture(t, "chain-blind", 4096)
 	fillChainPath(t, s, 6, 3000)
 	cfg := s.Config()
-	built, _, tools := s.build()
+	built, _, tools, err := s.build()
+	if err != nil {
+		t.Fatalf("the fixture's window could not be read: %v", err)
+	}
 	// More entries than there are messages: no boundary through this payload can be trusted.
 	refs := summaryPayload(nil, nil, built.All(), asm.EntryIDs(built), tools, len(built.Entries)+3)
 	if refs.msgs != nil {

@@ -872,9 +872,20 @@ func (l *Log) Replay() (*State, error) {
 // decodeEntry re-attaches the blob bytes an entry's payload references, so callers get
 // back the byte-identical ir.Entry AppendEntry was handed.
 func (l *Log) decodeEntry(payload string) (*ir.Entry, error) {
+	return l.inflate(payload, true)
+}
+
+// inflate reads one stored payload. expandBlobs decides whether image parts come
+// back as base64 (the wire shape, what a model or a transcript page is owed) or
+// stay "blob:<sha>" references (the shape a reader that never sends a picture can
+// still answer with — sizes, counts, search).
+func (l *Log) inflate(payload string, expandBlobs bool) (*ir.Entry, error) {
 	var e ir.Entry
 	if err := json.Unmarshal([]byte(payloadText(payload)), &e); err != nil {
 		return nil, err
+	}
+	if !expandBlobs {
+		return &e, nil
 	}
 	for i := range e.Parts {
 		p := &e.Parts[i]
@@ -898,6 +909,268 @@ func (l *Log) decodeEntry(payload string) (*ir.Entry, error) {
 		p.Data = base64.StdEncoding.EncodeToString(raw)
 	}
 	return &e, nil
+}
+
+// MetaState is the resident half of a session: the tree's shape and the facts a
+// compaction leaves on it, and nothing else. One row per entry, every field a
+// spine — this is what a session may hold in RAM for the length of a conversation,
+// where holding the conversations themselves is what Replay costs and what an
+// idle session should not be paying for (docs/design.md, memory).
+type MetaState struct {
+	Entries map[string]*ir.Meta
+	Tip     string
+	Seq     int64
+}
+
+// ErrClosed is what every reader answers once Close has run: the log handed its
+// file back to the process, and a reader that raced the close (an emitState on a
+// connect goroutine, say) is owed an error, not a nil pointer. Every statement
+// below asks through it for that reason.
+var ErrClosed = errors.New("store: log is closed")
+
+// ReplayMeta reads the tree's shape without inflating a payload — except the
+// compaction rows, whose boundary is a fact inside their JSON and whose count
+// grows with the number of summaries rather than the length of the history.
+// The rows arrive in seq order so the spine is assembled exactly as Replay
+// would assemble the entries; Tip and Seq mean the same thing here as in State.
+func (l *Log) ReplayMeta() (*MetaState, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, ErrClosed
+	}
+	// Two statements rather than one, and neither pays for the other's column:
+	// the spine scan never touches the payload column at all (in a compressed
+	// store that column is most of the file), and the payload scan is bounded by
+	// the number of summaries the session ever made. IFNULL is the table's own
+	// sentence — NULL is how it spells a root's parent.
+	type spineRow struct {
+		id, parent, kind string
+		ts               float64
+	}
+	var spine []spineRow
+	rows, err := l.db.Query("SELECT id, IFNULL(parent,''), kind, ts FROM entry ORDER BY seq")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var r spineRow
+		if err := rows.Scan(&r.id, &r.parent, &r.kind, &r.ts); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		spine = append(spine, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	summaries := map[string]*ir.CompactionMeta{}
+	crows, err := l.db.Query("SELECT id, payload FROM entry WHERE kind = ?", ir.KindCompaction)
+	if err != nil {
+		return nil, err
+	}
+	for crows.Next() {
+		var id, p string
+		if err := crows.Scan(&id, &p); err != nil {
+			crows.Close()
+			return nil, err
+		}
+		var e ir.Entry
+		if err := json.Unmarshal([]byte(payloadText(p)), &e); err != nil {
+			crows.Close()
+			return nil, err
+		}
+		summaries[id] = e.Compaction
+	}
+	if err := crows.Err(); err != nil {
+		crows.Close()
+		return nil, err
+	}
+	crows.Close()
+	st := &MetaState{Entries: map[string]*ir.Meta{}}
+	for _, r := range spine {
+		if r.id == "" {
+			continue // a row with no id can speak of no entry
+		}
+		sec := int64(r.ts)
+		m := &ir.Meta{ID: r.id, ParentID: r.parent, Kind: r.kind,
+			Ts: time.Unix(sec, int64((r.ts-float64(sec))*float64(time.Second))).UTC()}
+		m.Compaction = summaries[r.id] // nil unless this row is a summary
+		st.Entries[m.ID] = m
+	}
+	st.Tip = l.effectiveTip()
+	st.Seq = l.seq
+	return st, nil
+}
+
+// Contents inflates exactly the named entries, in one statement, and reports the
+// ones that are there: ids that were deleted answer by absence rather than error,
+// because a reader that walked from the live tree can be between a write and a
+// reload and the honest answer to "what is this id" is then "nothing". This is
+// the store side of the resident spine: the session's window is kept + cmp ids,
+// a page's is its own slice, and neither drags a whole history into RAM.
+func (l *Log) Contents(ids []string, expandBlobs bool) (map[string]*ir.Entry, error) {
+	if len(ids) == 0 {
+		return map[string]*ir.Entry{}, nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, ErrClosed
+	}
+	house := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		house[i] = "?"
+		args[i] = id
+	}
+	rows, err := l.db.Query("SELECT payload FROM entry WHERE id IN ("+strings.Join(house, ",")+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]*ir.Entry, len(ids))
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		e, err := l.inflate(p, expandBlobs)
+		if err != nil {
+			return nil, err
+		}
+		if e.ID != "" {
+			out[e.ID] = e
+		}
+	}
+	return out, rows.Err()
+}
+
+// SkeletonRow is one row of the cost panel's view of the path: what a request
+// cost, not what it said. Content, reasoning, tool calls and images are absent
+// by construction — the panel's entire vocabulary, and nothing the transcript
+// already answers.
+type SkeletonRow struct {
+	ID       string    `json:"id"`
+	ParentID string    `json:"parentId,omitempty"`
+	Kind     string    `json:"kind"`
+	Role     string    `json:"role"`
+	Usage    *ir.Usage `json:"usage,omitempty"`
+	// Summary is the per-call list a compaction's Usage is the total of — the
+	// refused retries included, so the panel can show the line items behind the row.
+	Summary []ir.SummaryAttempt `json:"summaryRequests,omitempty"`
+	Finish  string              `json:"finishReason,omitempty"`
+	Ms      int64               `json:"ms,omitempty"`
+	Ts      time.Time           `json:"ts"`
+}
+
+// Skeleton answers the cost panel for the live path without putting the path in
+// RAM: the spine arrives in one cheap scan, then each payload is inflated and
+// stripped one at a time, so the memory is a row and the bill is CPU — the same
+// trade Search already makes, and the reason this reader exists next to Contents
+// (which would happily hold a whole session's conversation to answer a table of
+// numbers). Rows come back in path order, oldest first; a chain that walks into
+// a missing parent stops at the prefix, as every path walk here does.
+func (l *Log) Skeleton() ([]SkeletonRow, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, ErrClosed
+	}
+	parent := map[string]string{}
+	rows, err := l.db.Query("SELECT id, IFNULL(parent,'') FROM entry ORDER BY seq")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id, p string
+		if err := rows.Scan(&id, &p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		parent[id] = p
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	// walk the chain from the tip and reverse, then read each payload alone
+	var chain []string
+	seen := map[string]bool{}
+	for id := l.effectiveTip(); id != ""; id = parent[id] {
+		if seen[id] {
+			break // corrupt cycle: the prefix is the honest answer
+		}
+		seen[id] = true
+		if _, ok := parent[id]; !ok {
+			break // the tip names an entry that is not there
+		}
+		chain = append(chain, id)
+	}
+	out := make([]SkeletonRow, 0, len(chain))
+	for i := len(chain) - 1; i >= 0; i-- {
+		var p string
+		err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", chain[i]).Scan(&p)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // deleted between the spine scan and the read: the panel loses a row, not a truth
+		}
+		if err != nil {
+			return nil, err
+		}
+		e, err := l.inflate(p, false) // no blobs: a picture has no line in the cost panel
+		if err != nil {
+			return nil, err
+		}
+		row := SkeletonRow{ID: e.ID, ParentID: e.ParentID, Kind: e.Kind, Role: e.Role, Usage: e.Usage, Finish: e.Finish, Ms: e.Ms, Ts: e.Ts}
+		if e.Compaction != nil {
+			row.Summary = e.Compaction.Summary
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+// ToolUses counts the tool entries named by ids — the drawer's "never called in
+// forty turns" column — inflating one payload at a time, so the memory of the
+// answer is a row rather than the path. That is the same trade Skeleton makes and
+// for the same reason: the column wants a name and a timestamp from each row, and
+// a session should not have to hold its conversation to say which tools it uses.
+// Names come from the entries; timestamps from the column, which is where Replay
+// reads them too.
+func (l *Log) ToolUses(ids []string) (uses map[string]int, lastUsed map[string]string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, nil, ErrClosed
+	}
+	uses, lastUsed = map[string]int{}, map[string]string{}
+	for _, id := range ids {
+		var (
+			p  string
+			ts float64
+		)
+		err := l.db.QueryRow("SELECT payload, ts FROM entry WHERE id = ?", id).Scan(&p, &ts)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // deleted since the spine walk: the count loses a use, not a truth
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		e, err := l.inflate(p, false) // a tool result's name is not a picture
+		if err != nil {
+			return nil, nil, err
+		}
+		if e.Kind != ir.KindTool || e.Tool == "" {
+			continue
+		}
+		uses[e.Tool]++
+		sec := int64(ts)
+		lastUsed[e.Tool] = time.Unix(sec, int64((ts-float64(sec))*float64(time.Second))).UTC().Format(time.RFC3339)
+	}
+	return uses, lastUsed, nil
 }
 
 // effectiveTip is the tip the session stands on: meta's, when it names a live entry;

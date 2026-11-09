@@ -99,20 +99,8 @@ type Page struct {
 func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	// Every combination check lives here rather than in the HTTP layer, so that one rule about what
 	// the parameters mean has one home and is testable without a server.
-	if o.Before != "" && o.Anchor != "" {
-		return nil, errors.New("ir: before and anchor cannot be combined")
-	}
-	if o.After != "" && (o.Before != "" || o.Anchor != "") {
-		// Two named places are two stretches of the path, and the request that means one but is
-		// answered with the other is the one a pager writes when it grows its window in both
-		// directions at once. Refused rather than given a precedence.
-		return nil, errors.New("ir: after cannot be combined with before or anchor")
-	}
-	// why refused rather than answered with no ceiling: an anchored page with no size grows until it
-	// has swallowed the path, so the answer to "centre a page of nothing in particular here" is the
-	// whole transcript — the one thing paging exists to keep out of a response.
-	if o.Anchor != "" && o.Limit <= 0 {
-		return nil, errors.New("ir: anchor needs a limit: an anchor is a place in a page, not a page")
+	if err := checkPageOptions(o); err != nil {
+		return nil, err
 	}
 	// The three ids are resolved once, here, so that "not on this path" is refused whatever else the
 	// request looked like — including an empty path, where there is nowhere for any of them to be, and
@@ -139,22 +127,59 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	if n == 0 {
 		return p, nil
 	}
-	// A page is still cut when no size was asked for. "Everything before this entry" is a request, and
-	// an id that is not on the path is an error whoever typed it — neither is a reason to answer with
-	// the whole path, which is what an early "no limit means everything" return here would have done.
-	// limit is the ceiling in force; p.Limit reports what the caller asked for instead (0 = none).
-	limit := o.Limit
-	if limit <= 0 {
-		limit = n
-	} else {
-		if limit > MaxPageEntries {
-			limit = MaxPageEntries
-			p.Clamped = true
-		}
-		p.Limit = limit
-	}
+	limit, clamped, requested := pageLimit(o, n)
+	p.Limit, p.Clamped = requested, clamped
+	lo, hi := pageCut(n, turnStarts(path), bi, ai, afi, limit)
+	p.Entries = path[lo:hi]
+	p.HasOlder = lo > 0
+	p.HasNewer = hi < n
+	p.Truncated = hi-lo > limit
+	return p, nil
+}
 
-	starts := turnStarts(path)
+// checkPageOptions is the rule about which window parameters may share a request, in
+// one place so the entry version and the spine version answer with the same sentences.
+func checkPageOptions(o PageOptions) error {
+	if o.Before != "" && o.Anchor != "" {
+		return errors.New("ir: before and anchor cannot be combined")
+	}
+	if o.After != "" && (o.Before != "" || o.Anchor != "") {
+		// Two named places are two stretches of the path, and the request that means one but is
+		// answered with the other is the one a pager writes when it grows its window in both
+		// directions at once. Refused rather than given a precedence.
+		return errors.New("ir: after cannot be combined with before or anchor")
+	}
+	// why refused rather than answered with no ceiling: an anchored page with no size grows until it
+	// has swallowed the path, so the answer to "centre a page of nothing in particular here" is the
+	// whole transcript — the one thing paging exists to keep out of a response.
+	if o.Anchor != "" && o.Limit <= 0 {
+		return errors.New("ir: anchor needs a limit: an anchor is a place in a page, not a page")
+	}
+	return nil
+}
+
+// pageLimit settles the ceiling in force for a request: the caller's number (clamped to
+// MaxPageEntries) or the whole path when no size was named. "Everything before this
+// entry" is a request, and an id that is not on the path is an error whoever typed it —
+// neither is a reason to answer with the whole path, which is what an early "no limit
+// means everything" return would have done. It reports what the caller asked for
+// separately (0 = none) because the response says both.
+func pageLimit(o PageOptions, n int) (limit int, clamped bool, requested int) {
+	if o.Limit <= 0 {
+		return n, false, 0
+	}
+	limit = o.Limit
+	if limit > MaxPageEntries {
+		limit = MaxPageEntries
+		clamped = true
+	}
+	return limit, clamped, limit
+}
+
+// pageCut is the index arithmetic of PageOf, split out so the spine of a session
+// (PageOfSpine) cuts pages by exactly the rule its entries do rather than by a copy
+// of it that can drift. lo/hi are a half-open range into a path of n entries.
+func pageCut(n int, starts []int, bi, ai, afi int, limit int) (int, int) {
 	// edge is one past the last entry of turn k.
 	edge := func(k int) int {
 		if k+1 < len(starts) {
@@ -164,7 +189,7 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 	}
 	lo, hi := 0, n
 	switch {
-	case o.Anchor != "":
+	case ai >= 0:
 		// Two cursors, because the page grows in both directions from the anchored turn and one cursor
 		// walking outwards would move the far edge back in when the near one stepped out.
 		ol, ne := turnAt(starts, ai), turnAt(starts, ai)
@@ -183,7 +208,7 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 			ne++
 			hi = edge(ne)
 		}
-	case o.After != "":
+	case afi >= 0:
 		// The turn holding `after` is the one the caller is already standing on, whatever the id points
 		// at, so the page begins at the next turn and whole turns are added towards the tip. Walking
 		// this with a page's newestId reproduces the path forwards with no gap and no overlap — the
@@ -199,7 +224,7 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 			// after lies inside the last turn: nothing newer than it exists.
 			lo, hi = n, n
 		}
-	case o.Before != "":
+	case bi >= 0:
 		// The turn containing before belongs to the newer page whatever the id points at, so the
 		// page ends at the turn edge at or before it. Then whole turns are added towards the past.
 		k := turnAt(starts, bi) - 1
@@ -221,11 +246,7 @@ func PageOf(path []*Entry, o PageOptions) (*Page, error) {
 		}
 		lo = starts[k]
 	}
-	p.Entries = path[lo:hi]
-	p.HasOlder = lo > 0
-	p.HasNewer = hi < n
-	p.Truncated = hi-lo > limit
-	return p, nil
+	return lo, hi
 }
 
 // turnStarts lists the positions in path a page may begin at: the start of every turn, plus position
@@ -239,6 +260,89 @@ func turnStarts(path []*Entry) []int {
 		}
 	}
 	return starts
+}
+
+// IsTurnStartM is IsTurnStart read off the spine: kind is the rule (the writer keeps
+// role and kind in step, and legacy logs that predate the role column are what the
+// kind fallback in IsTurnStart always meant), so a page boundary needs no content.
+func IsTurnStartM(m *Meta) bool {
+	return m != nil && (m.Kind == KindCompaction || m.Kind == KindUser)
+}
+
+// turnStartsM is turnStarts over the spine.
+func turnStartsM(path []*Meta) []int {
+	starts := []int{0}
+	for i, m := range path {
+		if i > 0 && IsTurnStartM(m) {
+			starts = append(starts, i)
+		}
+	}
+	return starts
+}
+
+// SpinePage is a Page cut from a spine: the same window the transcript endpoint
+// answers, as positions in the path rather than entries. The caller materialises
+// exactly the ids the page holds — which is what lets a long session answer a page
+// without any conversation in RAM except the one it is handing over.
+type SpinePage struct {
+	IDs       []string
+	Total     int
+	HasOlder  bool
+	HasNewer  bool
+	Limit     int
+	Clamped   bool
+	Truncated bool
+}
+
+// PageOfSpine is PageOf over the spine, resolved by the same pageCut and
+// pageLimit as the entry version — one rule about what the window parameters
+// mean, two shapes it is answered in.
+func PageOfSpine(path []*Meta, o PageOptions) (*SpinePage, error) {
+	if err := checkPageOptions(o); err != nil {
+		return nil, err
+	}
+	n := len(path)
+	p := &SpinePage{Total: n}
+	for _, m := range path {
+		p.IDs = append(p.IDs, m.ID)
+	}
+	if n == 0 {
+		return p, nil
+	}
+	bi, ai, afi := -1, -1, -1
+	if o.Before != "" {
+		if bi = indexOfM(path, o.Before); bi < 0 {
+			return nil, fmt.Errorf("ir: before entry %q is not on the path", o.Before)
+		}
+	}
+	if o.After != "" {
+		if afi = indexOfM(path, o.After); afi < 0 {
+			return nil, fmt.Errorf("ir: after entry %q is not on the path", o.After)
+		}
+	}
+	if o.Anchor != "" {
+		if ai = indexOfM(path, o.Anchor); ai < 0 {
+			return nil, fmt.Errorf("ir: anchor entry %q is not on the path", o.Anchor)
+		}
+	}
+	limit, clamped, requested := pageLimit(o, n)
+	p.Limit, p.Clamped = requested, clamped
+	lo, hi := pageCut(n, turnStartsM(path), bi, ai, afi, limit)
+	p.IDs = p.IDs[lo:hi]
+	p.HasOlder = lo > 0
+	p.HasNewer = hi < n
+	p.Truncated = hi-lo > limit
+	return p, nil
+}
+
+// indexOfM is indexOf over the spine.
+func indexOfM(path []*Meta, id string) int {
+	for i, m := range path {
+		if m.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // turnAt returns the index in starts of the turn that holds position i. starts is ascending and

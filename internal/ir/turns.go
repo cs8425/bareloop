@@ -112,6 +112,54 @@ func turnRows(path []*Entry, starts []int) []Turn {
 	return out
 }
 
+// TurnsSpine is TurnsOf over the spine, for a session that keeps its conversation
+// on disk: the rows' handles, kinds and timestamps come off the spine, and the one
+// lookup function is asked for exactly the turn-start entries the kept rows will
+// quote — the snippets and nothing else. A lookup that cannot name an id (an entry
+// deleted between the cut and the read) answers the row with an empty snippet: the
+// ruler's jump target is the id, and the id is still true.
+func TurnsSpine(path []*Meta, limit int, contents func(ids []string) (map[string]*Entry, error)) (*TurnList, error) {
+	l := &TurnList{Limit: MaxTurnRows, Turns: []Turn{}}
+	if limit > 0 {
+		l.Limit = limit
+		if limit > MaxTurnRows {
+			l.Limit = MaxTurnRows
+			l.Clamped = true
+		}
+	}
+	if len(path) == 0 {
+		// why answered with no turns rather than one row: turnStarts always offers position 0 as a
+		// boundary because every path has to be cuttable, and a path with nothing on it has no entry to
+		// put in that row — a row with no id would be a jump target no client can draw.
+		return l, nil
+	}
+	starts := turnStartsM(path)
+	l.Total = len(starts)
+	if len(starts) > l.Limit {
+		// Whole turns are dropped from the old end and never cut in half: what comes back is a suffix
+		// of the turn list, so it still concatenates with the turns above it.
+		starts = starts[len(starts)-l.Limit:]
+		l.HasOlder = true
+	}
+	ids := make([]string, 0, len(starts))
+	for _, i := range starts {
+		ids = append(ids, path[i].ID)
+	}
+	snips, err := contents(ids)
+	if err != nil {
+		return nil, err
+	}
+	for k, i := range starts {
+		m := path[i]
+		row := Turn{ID: m.ID, Kind: m.Kind, Ts: m.Ts}
+		if e, ok := snips[ids[k]]; ok && e != nil {
+			row.Snippet = snippetOf(e)
+		}
+		l.Turns = append(l.Turns, row)
+	}
+	return l, nil
+}
+
 // snippetOf returns the first line of what an entry has to say, cut at MaxTurnSnippet runes.
 func snippetOf(e *Entry) string {
 	// TrimSpace first: what it removes is what a pasted prompt brings along (a leading blank line,

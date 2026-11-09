@@ -305,14 +305,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, errors.New("usage=1 answers the whole path as a skeleton; drop the window parameters"))
 			return
 		}
-		path := sess.Path()
-		entries := make([]usageEntry, 0, len(path))
-		for _, e := range path {
-			row := usageEntry{ID: e.ID, ParentID: e.ParentID, Kind: e.Kind, Role: e.Role, Usage: e.Usage, Finish: e.Finish, Ms: e.Ms, Ts: e.Ts}
-			if e.Compaction != nil {
-				row.Summary = e.Compaction.Summary
-			}
-			entries = append(entries, row)
+		// The skeleton arrives row by row from disk (store.Skeleton): the cost panel wants
+		// arithmetic, and reading the session's whole conversation to answer it was never the deal.
+		entries, err := sess.UsageRows()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
 		}
 		cfg := sess.Config()
 		cfg.LLM.APIKey = "" // the key is never echoed back to the browser
@@ -324,16 +322,27 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	page, err := ir.PageOf(sess.Path(), o)
+	// The window is cut from the spine, and exactly the entries it names are inflated:
+	// a page costs a page, however long the session has grown (ir.PageOfSpine).
+	page, err := sess.SpinePage(o)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	found, err := sess.PageContents(page.IDs)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 	// Each entry is encoded once and handed on as raw bytes: encoding/json passes a json.RawMessage
 	// through unchanged, so adding up those lengths prices the page without encoding it twice.
-	entries := make([]json.RawMessage, 0, len(page.Entries))
+	entries := make([]json.RawMessage, 0, len(page.IDs))
 	size := 0
-	for _, e := range page.Entries {
+	for _, id := range page.IDs {
+		e := found[id]
+		if e == nil {
+			continue // deleted between the cut and the read: the page loses a row, not a window
+		}
 		raw, err := json.Marshal(e)
 		if err != nil {
 			// An entry that will not encode is a broken log, not a bad request.
@@ -344,8 +353,8 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, raw)
 	}
 	oldest, newest := "", ""
-	if len(page.Entries) > 0 {
-		oldest, newest = page.Entries[0].ID, page.Entries[len(page.Entries)-1].ID
+	if len(page.IDs) > 0 {
+		oldest, newest = page.IDs[0], page.IDs[len(page.IDs)-1]
 	}
 	cfg := sess.Config()
 	cfg.LLM.APIKey = "" // the key is never echoed back to the browser
@@ -360,7 +369,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 			"newestId":  newest,
 			"hasOlder":  page.HasOlder,
 			"hasNewer":  page.HasNewer,
-			"count":     len(page.Entries),
+			"count":     len(page.IDs),
 			"total":     page.Total,
 			"bytes":     size,
 			"limit":     page.Limit,
@@ -371,22 +380,10 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// usageEntry is one row of the ?usage=1 skeleton: what a request cost, not what it said. The
-// fields are the cost panel's entire vocabulary — the path walk needs parentId, the bill needs
-// usage — and content, reasoning, tool calls and images are absent by construction, not by flag.
-type usageEntry struct {
-	ID       string    `json:"id"`
-	ParentID string    `json:"parentId,omitempty"`
-	Kind     string    `json:"kind"`
-	Role     string    `json:"role"`
-	Usage    *ir.Usage `json:"usage,omitempty"`
-	// Summary is the per-call list a compaction's Usage is the total of — the refused
-	// retries included, so the panel can show the line items behind the one row.
-	Summary []ir.SummaryAttempt `json:"summaryRequests,omitempty"`
-	Finish  string              `json:"finishReason,omitempty"`
-	Ms      int64               `json:"ms,omitempty"`
-	Ts      time.Time           `json:"ts"`
-}
+// SkeletonRow is one row of the ?usage=1 skeleton: what a request cost, not what it
+// said — the cost panel's entire vocabulary, read off the spine row by row in
+// store.Skeleton. The type lives there now; this endpoint only answers it. (kept as a
+// pointer-comment for the vocabulary's home: store.SkeletonRow)
 
 // triFlag reads one of this endpoint's picky boolean query parameters: absent, 0 or false is
 // off, 1 or true is on, and anything else is a 400 — silently accepting "yes" is how two
@@ -845,7 +842,12 @@ func (s *Server) handlePayload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, sess.Payload())
+	payload, err := sess.Payload()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, payload)
 }
 
 // handleTurns answers the shape of a transcript without its content: one row per turn of the path,
@@ -865,7 +867,12 @@ func (s *Server) handleTurns(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	list := ir.TurnsOf(sess.Path(), limit)
+	// The ruler is cut from the spine and quoted by exactly the turn-start rows it keeps.
+	list, err := sess.TurnRows(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"turns":    list.Turns,
 		"count":    len(list.Turns),

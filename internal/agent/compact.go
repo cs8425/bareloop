@@ -254,7 +254,14 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 	res := CompactResult{Trigger: trig, Manual: manual}
 
 	// Planning input = assembler input: both come out of the single choke point (§3.2).
-	built, sizes, tools := s.build()
+	built, sizes, tools, err := s.build()
+	if err != nil {
+		// The window could not be read: there is no planning input, and a compaction without one
+		// is exactly the thing §1.1 refuses to guess its way through.
+		res.Skipped = "window read failed: " + err.Error()
+		s.logf("compaction (%s): skipped: %v", trig, err)
+		return res
+	}
 	region := built.Entries
 	nctx := s.nctxLocked()
 	res.Model = cfg.LLM.Model
@@ -876,10 +883,16 @@ func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Pa
 	s.mu.Lock()
 	s.ctxUsed, s.ctxKnown = 0, false
 	s.mu.Unlock()
-	_, sizes, _ := s.build()
+	_, sizes, _, err := s.build()
+	if err != nil {
+		// The summary is committed either way; "after" is a number the report would like, not a
+		// decision, and a dashboard that sees 0 beside a committed compaction reads the log line.
+		s.logf("compaction: post-commit size: %v", err)
+	} else {
+		res.After = sizes.Total()
+	}
 	res.Committed = true
 	res.EntryID = entry.ID
-	res.After = sizes.Total()
 	res.SummaryCap = p.SummaryCap(s.nctxLocked())
 	res.Replaced = plan.Replaced
 	if res.SummaryText == "" {

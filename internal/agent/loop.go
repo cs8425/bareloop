@@ -218,11 +218,11 @@ func (s *Session) Resume(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	path := s.path()
-	if len(path) == 0 {
+	spine := s.spine()
+	if len(spine) == 0 {
 		return errors.New("agent: nothing to resume: the path is empty")
 	}
-	last := path[len(path)-1]
+	last := spine[len(spine)-1]
 	switch last.Kind {
 	case ir.KindUser, ir.KindTool, ir.KindCompaction:
 	default:
@@ -239,7 +239,7 @@ func (s *Session) Resume(ctx context.Context) error {
 	if s.phase != phaseRunning {
 		return errors.New("agent: resume did not start a run")
 	}
-	s.logf("resume: continuing from %s (kind %s, %d entries on the path)", last.ID, last.Kind, len(path))
+	s.logf("resume: continuing from %s (kind %s, %d entries on the path)", last.ID, last.Kind, len(spine))
 	return nil
 }
 
@@ -364,7 +364,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 	}
 
 	for {
-		grown := len(s.path())
+		grown := len(s.spine())
 		aborted, err := s.turns(ctx)
 		if err != nil {
 			s.emit(Event{Type: EvtError, Info: err.Error()})
@@ -373,7 +373,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 		if aborted {
 			return
 		}
-		if len(s.path()) == grown {
+		if len(s.spine()) == grown {
 			// Nothing was committed this round, so needsRun() still says an answer is owed and the
 			// loop below would ask the provider the same question again — forever. One round per
 			// failure is enough: the error has been emitted, and it is the user's turn now.
@@ -439,7 +439,10 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		// answer — a tool call with no result yet, or this very request's own reply — waits in the queue until
 		// the answer it belongs behind has been written, and joins the path there (answeringLocked). So no
 		// turn is ever assembled from a message that jumped ahead of the thing it was sent after.
-		built, sizes, tools := s.build()
+		built, sizes, tools, err := s.build()
+		if err != nil {
+			return false, err
+		}
 		s.markSent()
 		s.emitPending()
 
@@ -458,7 +461,10 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			// the redundant-compaction pattern the triggers exist to avoid, and a request the provider then
 			// refuses for size is the accepted end of a turn that genuinely cannot fit (see the overflow
 			// rescue below, and "Refusing one request is the accepted design").
-			built, sizes, tools = s.build()
+			built, sizes, tools, err = s.build()
+			if err != nil {
+				return false, err
+			}
 			s.markSent()
 			s.emitPending()
 		}
@@ -467,7 +473,10 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		if cfg.Compact.UseInLoop() {
 			if res := s.compactHere(ctx, compact.TriggerInLoop, false); res.Committed {
 				s.emit(Event{Type: EvtCompact, Data: res})
-				built, sizes, tools = s.build()
+				built, sizes, tools, err = s.build()
+				if err != nil {
+					return false, err
+				}
 				s.markSent()
 				s.emitPending()
 				shrunk, err := s.guardFit(ctx, sizes)
@@ -476,7 +485,10 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 				}
 				if shrunk {
 					// Again: the check shrank the path after this payload was assembled.
-					built, sizes, tools = s.build()
+					built, sizes, tools, err = s.build()
+					if err != nil {
+						return false, err
+					}
 					s.markSent()
 					s.emitPending()
 				}
@@ -1163,7 +1175,10 @@ func (s *Session) guardFit(ctx context.Context, sizes *asm.Sizes) (bool, error) 
 		s.emit(Event{Type: EvtCompact, Data: res})
 		used, known = s.usedNow()
 		if !known {
-			_, s2 := s.sizesNow()
+			_, s2, err := s.sizesNow()
+			if err != nil {
+				return false, err
+			}
 			used = s2.Total()
 		}
 		if used < nctx*98/100 {
@@ -1178,27 +1193,14 @@ func (s *Session) guardFit(ctx context.Context, sizes *asm.Sizes) (bool, error) 
 }
 
 // usedNow returns the real context usage of the last completed turn (spec §0: the trigger
-// never uses an estimate; only the pre-send guard falls back to one).
+// never uses an estimate; only the pre-send guard falls back to one). Session.usageNow is
+// the one answer — cached number when the run's own response holds it, and a walk back
+// over the spine (stopping at the active compaction entry, spec 1.5) when it does not.
 func (s *Session) usedNow() (int, bool) {
-	s.mu.Lock()
-	used, known := s.ctxUsed, s.ctxKnown
-	s.mu.Unlock()
-	if known {
-		return used, true
-	}
-	// Nothing cached (fresh process, or the cache was invalidated by a commit): re-derive from the
-	// log, but only from the region that is still on the wire. A usage older than the active
-	// compaction boundary is a stale number, and spec 1.3 says unavailable means "do not check, do
-	// not guess" - the pre-send guard already falls back to the built payload size in that case.
-	_, _, cmp := s.effective()
-	stop := cmp != nil && cmp.Compaction != nil && !cmp.Compaction.Broken
-	if u := ir.LastUsage(s.path(), stop); u != nil && u.HasPrompt {
-		return u.ContextUsed(), true
-	}
-	return 0, false
+	return s.usageNow()
 }
 
-func (s *Session) sizesNow() (*asm.Built, *asm.Sizes) {
-	built, sizes, _ := s.build()
-	return built, sizes
+func (s *Session) sizesNow() (*asm.Built, *asm.Sizes, error) {
+	built, sizes, _, err := s.build()
+	return built, sizes, err
 }

@@ -337,7 +337,11 @@ func payloadJSON(t *testing.T, m *agent.Manager, id string) string {
 	if err != nil {
 		t.Fatalf("open %s: %v", id, err)
 	}
-	b, err := json.Marshal(sess.Payload())
+	payload, err := sess.Payload()
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	b, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
