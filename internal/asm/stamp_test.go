@@ -191,3 +191,50 @@ func TestDeriveSizesCountsTheHeadOnce(t *testing.T) {
 		t.Fatal("a payload with an unmeasured entry reported itself as entirely measured")
 	}
 }
+
+// TestStampOnlyPricesWhatTheWindowCarries is the r101 B0 division of labour: a session hands
+// Stamp the window it actually assembles — the active summary and what it kept, the payload's
+// own shape — and nothing outside that window is ever touched. An entry a compaction replaced
+// is history by reference now; giving it a fresh number every time the path is assembled would
+// be measuring a conversation no request has carried since the summary was written.
+func TestStampOnlyPricesWhatTheWindowCarries(t *testing.T) {
+	replaced := stampedTxt("u0", "user", 4000) // what the summary replaced: not in any window
+	summary := &ir.Entry{ID: "cmp", Kind: ir.KindCompaction, Role: "user",
+		Compaction: &ir.CompactionMeta{SummarySize: 700}}
+	kept := stampedTxt("u1", "user", 500)
+	first := countedReply("a1", 900, 0, 20) // counted against summary+kept: a window with no earlier count in it
+	win := []*ir.Entry{summary, kept, first}
+
+	if got := Stamp(win, 0, 0); got != 2 {
+		t.Fatalf("the first pass measured %d entries, want the summary and its answer only", got)
+	}
+	if replaced.Tokens != 0 {
+		t.Fatalf("an entry outside the window was measured: %d", replaced.Tokens)
+	}
+	if summary.Tokens != 700 {
+		t.Errorf("the summary is priced at %d, want the 700 the summariser was charged", summary.Tokens)
+	}
+	if kept.Tokens != 0 {
+		t.Errorf("the first request after the record was subtracted across nothing: kept measured at %d", kept.Tokens)
+	}
+	if first.Tokens != 20 {
+		t.Errorf("the reply is its own answer inside a window too: %d", first.Tokens)
+	}
+
+	// The window's second request finally has an earlier count beside it, and the growth
+	// between the two belongs to what arrived in between — all of it inside the window.
+	second := stampedTxt("u2", "user", 500)
+	next := countedReply("a2", 1000, 0, 30)
+	win = append(win, second, next)
+	Stamp(win, 0, 0)
+
+	if second.Tokens != 80 {
+		t.Errorf("the entry between the window's two counts is worth %d, want the 80 that were added", second.Tokens)
+	}
+	if next.Tokens != 30 {
+		t.Errorf("the second reply is worth %d, want the 30 it generated", next.Tokens)
+	}
+	if kept.Tokens != 0 || first.Tokens != 20 || replaced.Tokens != 0 {
+		t.Errorf("a measured (or unmeasured) number moved on a second pass: %d %d %d", kept.Tokens, first.Tokens, replaced.Tokens)
+	}
+}
