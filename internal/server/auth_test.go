@@ -76,13 +76,43 @@ func TestGateTable(t *testing.T) {
 		if rec.Code != 401 {
 			t.Fatalf("%s without credentials: %d", p, rec.Code)
 		}
-		if wa := rec.Header().Get("WWW-Authenticate"); !strings.HasPrefix(wa, "Basic ") {
-			t.Fatalf("%s: expected a Basic challenge, got %q", p, wa)
-		}
 		var body map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["error"] != "authentication required" {
 			t.Fatalf("%s: 401 body is not the usual JSON error shape: %s", p, rec.Body)
 		}
+	}
+}
+
+// No 401 carries a Basic challenge, to any client. The challenge enrols the
+// origin into the browser's HTTP auth cache — live, that turned the UI's own
+// fetches into ERR_INVALID_AUTH_CREDENTIALS and hung the boot behind a login
+// dialog that could no longer see its 401 — and a machine client never needed
+// it: curl -u and go tool pprof -header send Authorization preemptively.
+func TestNoChallengeAnywhere(t *testing.T) {
+	a := testAuth()
+	h := gated(a)
+	cases := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"curl", nil},
+		{"address bar", map[string]string{"Sec-Fetch-Mode": "navigate"}},
+		{"fetch", map[string]string{"Sec-Fetch-Mode": "cors"}},
+		{"websocket upgrade", map[string]string{"Sec-WebSocket-Key": "abc="}},
+	}
+	for _, c := range cases {
+		rec := do(h, "GET", "/api/sessions", "", c.headers)
+		if rec.Code != 401 {
+			t.Fatalf("%s: %d", c.name, rec.Code)
+		}
+		if wa := rec.Header().Get("WWW-Authenticate"); wa != "" {
+			t.Fatalf("%s: a challenge would pop the browser or poison its auth cache: %q", c.name, wa)
+		}
+	}
+	// And a wrong Basic gets the same bare answer — the challenge must not come
+	// back on the retry path either, which is exactly where Chrome would eat it.
+	if rec := do(h, "GET", "/api/sessions", "", map[string]string{"Authorization": basic("op", "wrong")}); rec.Code != 401 || rec.Header().Get("WWW-Authenticate") != "" {
+		t.Fatalf("wrong basic: %d %q", rec.Code, rec.Header().Get("WWW-Authenticate"))
 	}
 }
 

@@ -15,10 +15,11 @@ import (
 // The login gate: one credential pair from the daemon config, a browser session
 // cookie issued by POST /api/login, and HTTP Basic as the parallel way in for
 // everything a browser popup cannot reach (curl -u, go tool pprof, the profiler
-// mounted on this same port). Both ways are accepted on every protected route,
-// and a request already carrying a live cookie is never asked for a password
-// again — that precedence is the whole "pprof passes if you logged into the UI"
-// rule, one if-order, not a second system.
+// mounted on this same port). Basic is accepted preemptively and never demanded
+// with a challenge — see denied. Both ways are accepted on every protected
+// route, and a request already carrying a live cookie is never asked for a
+// password again — that precedence is the whole "pprof passes if you logged
+// into the UI" rule, one if-order, not a second system.
 //
 // What the gate is not: an account system. One operator, one password, no
 // users table — and when a forward-auth proxy or OAuth frontend arrives, the
@@ -183,9 +184,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			a.denied(w, r)
 			return
 		}
-		// Neither: the challenge. WWW-Authenticate names Basic so curl -u and
-		// the browser popup both know the way in; the UI's fetch sees the 401
-		// JSON and opens the login dialog instead.
+		// Neither: the bare 401. No WWW-Authenticate header, ever — see denied.
 		a.denied(w, r)
 	})
 }
@@ -198,8 +197,17 @@ func protected(r *http.Request) bool {
 	return strings.HasPrefix(p, "/api/") || p == "/ws" || strings.HasPrefix(p, "/debug/")
 }
 
+// denied answers without a door: 401 JSON and no WWW-Authenticate header. The
+// absence of that header is the whole design, learned live twice over. A
+// challenge is an invitation every browser must obey — it pops Chrome's native
+// dialog over the API's own JSON body, and worse it enrols the origin into the
+// browser's HTTP auth cache, where one bad pair later rides every request and
+// turns even fetches into ERR_INVALID_AUTH_CREDENTIALS, killing the very 401
+// the UI's login dialog exists to catch. A machine client does not need the
+// invitation either: curl -u sends its Authorization preemptively on request
+// one, and go tool pprof -header does the same. So Basic stays fully accepted
+// (the compare is below, in the credential order) — it is only never asked for.
 func (a *Auth) denied(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("WWW-Authenticate", `Basic realm="bareloop"`)
 	writeErr(w, http.StatusUnauthorized, errAuth)
 }
 
