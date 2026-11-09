@@ -32,6 +32,7 @@ import { api } from './api.js';
 import { u } from './base.js';
 import { wireComposer } from './composer.js';
 import { wireSettings } from './settings.js';
+import { wireAuth } from './auth.js';
 import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
 import './stats.js'; // registers the cost tab's renderer (js/panel.js); it owns no wiring of its own
@@ -233,6 +234,7 @@ function wire() {
   // (js/composer.js rememberHeld).
   wireComposer({ onStatus: renderStatus });
   wireSettings();
+  wireAuth();
   wirePanel();
   wireTools();
   // One delegated listener for every picture the transcript will ever draw, so an entry rendered next month is

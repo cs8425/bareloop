@@ -3,6 +3,7 @@
 import { state } from './state.js';
 import { fail } from './ui.js';
 import { u } from './base.js';
+import { requireLogin } from './auth.js';
 
 // api makes one request and always resolves to an object: a server that answers with something that
 // is not JSON (an HTML error page from a proxy, say) comes back as {raw: "..."} instead of throwing
@@ -24,6 +25,12 @@ export async function api(path, opts = {}) {
     }
   }
   if (!res.ok) {
+    // The login gate's 401 is treated as recoverable: the dialog opens (one dialog,
+    // however many requests answer 401 at once), and when it comes back granted the
+    // same request runs again as if nothing interrupted it — callers never need to
+    // know a session lapsed in the middle of a fetch. A refused or cancelled dialog
+    // falls through to the ordinary error, which says exactly what the daemon said.
+    if (res.status === 401 && (await requireLogin())) return api(path, opts);
     throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
   }
   return data;

@@ -40,6 +40,10 @@ const PATHS = {
   settings:
     '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>',
   menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
+  // Lucide's log-out: the door frame and the arrow leaving it. Kept in the same
+  // 24x24 stroke-2 language as the rest, because this button stands between two
+  // icons of that family and would shout at a different stroke width.
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   down: '<path d="m19 12-7 7-7-7"/><path d="M12 5v14"/>',
   // A pin is drawn standing up (head at the top, point at the bottom) because it is hung above a row of

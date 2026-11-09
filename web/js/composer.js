@@ -94,8 +94,8 @@ function renderAttachments() {
 }
 
 // syncComposer is the single place that decides what the composer's right-hand slot offers:
-// idle -> send (dim until there is a draft), running -> the red square plus the bolt once a draft exists,
-// compacting -> the square alone. A manual summary is not a generation, so it does not get the bolt, whose promise is
+// idle -> send (dim until there is a draft), running -> send plus the red square, and the bolt
+// once a draft exists, compacting -> send and the square. A manual summary is not a generation, so it does not get the bolt, whose promise is
 // "abort this generation and send this message instead": a summary has written nothing to keep and no answer
 // is owed to anything. Typing still works, and what is typed is not lost - agent.holdMessageLocked keeps it off
 // the path until the boundary the summary is writing exists, then it lands behind that boundary and earns its
@@ -113,7 +113,13 @@ export function syncComposer(running, compacting) {
   const send = $('#btn-send');
   const stop = $('#btn-stop');
   const interrupt = $('#btn-interrupt');
-  send.classList.toggle('hidden', r);
+  // The send button survives a live run. Mid-run it means exactly what the
+  // endpoint does with it — queue the draft for the next turn boundary — and on
+  // glass it is the only send gesture there is (Enter inserts a newline there),
+  // so hiding it used to leave a phone owner holding one door only: the bolt.
+  // "Queue it" must never require choosing "abort the run" first; aborting is
+  // and stays the bolt's separate, louder job.
+  send.title = r ? 'queue it — lands at the next turn boundary' : 'send (Enter)';
   stop.classList.toggle('hidden', !(r || c));
   // The square ends whatever is in flight, and what is in flight is what the button is promising: a run
   // has half an answer worth keeping, a summary has written nothing yet. The words are set here because

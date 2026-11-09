@@ -81,6 +81,8 @@
           </span>
           <button id="btn-inspect" type="button" class="icon-btn" title="the request panel — what would be sent, the window, the cost, the tools" aria-label="open the request panel"><span data-icon="detail"></span></button>
           <button id="btn-settings" type="button" class="icon-btn" title="model, MCP servers, compaction" aria-label="session settings"><span data-icon="settings"></span></button>
+          <!-- Stays hidden until the daemon answers /api/whoami with a user: a gate-less daemon has no door to log out of, and js/auth.js does not draw a key for it. -->
+          <button id="btn-logout" type="button" class="icon-btn hidden" title="log out" aria-label="log out"><span data-icon="logout"></span></button>
         </header>
 
         <div id="log-wrap">
