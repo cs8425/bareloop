@@ -104,7 +104,11 @@ read, because every frame is either decodable with its own book or it fails loud
    beside them, the way it carries `config.json`.
 3. **Rotating means a new id, and the old book survives.** Old frames never lose
    their stamp; rewriting them onto a newer book is `-recompress`'s job (deferred —
-   until it ships, keep every book you ever pointed `-zdict` at).
+   until it ships, keep every book you ever pointed `-zdict` at). The interim tool
+   is the fork: a full fork decompresses and rewrites every row under the daemon's
+   current `-compress`/`-zdict`, so switching knobs and forking a session once
+   migrates the copy while the original stays exactly as it was (image bytes travel
+   by sha, untouched).
 4. **The shipped book changes only with a release and a commit**, because the
    binary that reads old frames must keep carrying the book they name until every
    store has been rewritten. A book that "improves" every restart is a book that
