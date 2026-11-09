@@ -3,7 +3,7 @@
 import { state } from './state.js';
 import { fail } from './ui.js';
 import { u } from './base.js';
-import { requireLogin } from './auth.js';
+import { requireLogin, loginPending } from './auth.js';
 
 // api makes one request and always resolves to an object: a server that answers with something that
 // is not JSON (an HTML error page from a proxy, say) comes back as {raw: "..."} instead of throwing
@@ -30,7 +30,14 @@ export async function api(path, opts = {}) {
     // same request runs again as if nothing interrupted it — callers never need to
     // know a session lapsed in the middle of a fetch. A refused or cancelled dialog
     // falls through to the ordinary error, which says exactly what the daemon said.
-    if (res.status === 401 && (await requireLogin())) return api(path, opts);
+    // But only the request that opened the dialog waits behind it. Every 401 that
+    // arrives while it stands answers with the error it already has, because a held
+    // request replays itself the instant the credential lands — a poll held there
+    // for the minutes a restarted server takes to be logged into would come back
+    // as one request per tick, all in the same heartbeat.
+    if (res.status === 401 && !loginPending()) {
+      if (await requireLogin()) return api(path, opts);
+    }
     throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
   }
   return data;

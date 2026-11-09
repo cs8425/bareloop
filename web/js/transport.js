@@ -12,6 +12,7 @@ import { state } from './state.js';
 import { setConn, note } from './ui.js';
 import { handleEvent } from './events.js';
 import { refresh } from './session.js';
+import { loginPending } from './auth.js';
 import { u } from './base.js';
 
 const MIN_DELAY = 600; // first retry: fast enough that a restarting server costs one blink
@@ -246,8 +247,12 @@ function startSSE() {
   });
   src.onerror = () => {
     // EventSource reconnects by itself while its readyState is CONNECTING; only once it has given up
-    // is it worth dropping to the last channel.
-    if (src.readyState === EventSource.CLOSED) stopFallback = startPolling();
+    // is it worth dropping to the last channel — and giving up means tearing this one down first:
+    // reassigning stopFallback over a live stream loses the only way back to its teardown.
+    if (src.readyState === EventSource.CLOSED) {
+      stopFallback();
+      stopFallback = startPolling();
+    }
   };
   return () => {
     state.es = null;
@@ -258,7 +263,11 @@ function startSSE() {
 function startPolling() {
   setConn(true, 'polling · websocket down', 'poll');
   state.poll = setInterval(() => {
-    if (state.id) refresh().catch(() => {});
+    // While the login dialog stands open a tick asks nothing: its answer is a 401,
+    // and a request held behind the dialog replays itself the moment the credential
+    // lands — minutes of ticks then fire in one heartbeat. The next tick, 1.5
+    // seconds after the login, asks instead.
+    if (state.id && !loginPending()) refresh().catch(() => {});
   }, 1500);
   return () => {
     clearInterval(state.poll);

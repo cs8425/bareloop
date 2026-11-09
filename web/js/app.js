@@ -235,6 +235,11 @@ function wire() {
   wireComposer({ onStatus: renderStatus });
   wireSettings();
   wireAuth();
+  // ...and the socket learns that it may dial the moment a credential exists: auth.js
+  // dispatches on a granted login, and connect() drops whatever backoff was pending.
+  // Without this the page rides the fallback poll (one session read every 1.5s) until
+  // the exponential schedule happens to knock again.
+  window.addEventListener('bareloop:login', () => connect());
   wirePanel();
   wireTools();
   // One delegated listener for every picture the transcript will ever draw, so an entry rendered next month is

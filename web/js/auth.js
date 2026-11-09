@@ -18,6 +18,15 @@ import { u } from './base.js';
 // mistake for it.
 let ask = null;
 
+// loginPending says whether the dialog stands open — between the 401 that raised
+// it and the answer. Callers that are not the one holding the dialog should not
+// queue behind it: api.js answers those with their own error, because held
+// requests all replay at once the moment a login finally lands, and a server
+// restarted under an open page holds the dialog for minutes.
+export function loginPending() {
+  return !!ask;
+}
+
 export function requireLogin() {
   if (ask) return ask;
   let settle;
@@ -102,9 +111,15 @@ export function requireLogin() {
 
   cancel.onclick = () => dlg.close(); // Escape closes the same way; both leave returnValue empty
   dlg.addEventListener('close', () => {
-    settle(dlg.returnValue === 'ok');
+    const granted = dlg.returnValue === 'ok';
+    settle(granted);
     ask = null;
     dlg.remove(); // ui.js's modal does the same: one dialog per question, no corpses with listeners
+    // A login is the moment the main channel becomes dialable again. The socket's
+    // backoff can be a full retry interval (up to 15s) from its next knock, and
+    // every second of that wait is spent riding the fallback poll — requests a
+    // server log can read. transport.js listens for this and dials now, not next.
+    if (granted) window.dispatchEvent(new Event('bareloop:login'));
   });
   dlg.appendChild(form);
   document.body.appendChild(dlg);
