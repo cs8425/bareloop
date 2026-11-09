@@ -680,6 +680,134 @@ func (l *Log) ImportAll(entries []*ir.Entry, tip string) error {
 	return nil
 }
 
+// ImportTx is an import as a living transaction: rows arrive one at a time from a
+// decoder and are written as they arrive, so the size of an import stops being a
+// RAM bill. The all-or-nothing rule an import has always promised is the
+// transaction's own — Finish settles at the end the two questions that used to
+// need the whole file in hand (does the tip stand among the rows; is every parent
+// a row that exists), each one SELECT over the rows as written, and a failed
+// Finish or an Abort leaves the store exactly as it was found, the caller's
+// rollback (delete the fresh directory) doing the rest.
+//
+// The store lock is held for the life of the transaction: under the single
+// connection no other statement runs while a tx lives, and an import is aimed at
+// a store nobody else is writing — a birth, not a merge. ImportAll stays for
+// callers that already hold every entry (the blimport converter, and every test
+// that asserts what an import is in one line); it is this type's batch shape.
+type ImportTx struct {
+	l    *Log
+	tx   *sql.Tx
+	n    int
+	last string // id of the last row written: the tip when the file names none
+}
+
+// ImportStream opens the living transaction. As with ImportAll, a failed attempt
+// may leave l.seq advanced in memory — the same caller (delete the directory)
+// owns both forms of the undo.
+func (l *Log) ImportStream() (*ImportTx, error) {
+	l.mu.Lock()
+	if l.db == nil {
+		l.mu.Unlock()
+		return nil, ErrClosed
+	}
+	tx, err := l.db.Begin() // BEGIN IMMEDIATE, as everywhere
+	if err != nil {
+		l.mu.Unlock()
+		return nil, err
+	}
+	return &ImportTx{l: l, tx: tx}, nil
+}
+
+// Entry writes one row, keeping the id exactly as the file carries it and moving
+// seq past every numeric id — the same rules ImportAll applies, one row at a
+// time. A duplicate id fails here on the spot, on the primary key's own sentence.
+func (t *ImportTx) Entry(e *ir.Entry) error {
+	if e.ID == "" {
+		return errors.New("store: imported entries must carry their id")
+	}
+	if n, err := strconv.ParseInt(e.ID, 10, 64); err == nil && n > t.l.seq {
+		t.l.seq = n // ids sort lexicographically; seq must not walk over them backwards
+	}
+	if e.Ts.IsZero() {
+		e.Ts = time.Now().UTC()
+	}
+	payload, refs, err := t.l.encodeEntry(e)
+	if err != nil {
+		return err
+	}
+	kind := e.Kind
+	if kind == "" {
+		kind = "unknown"
+	}
+	for _, r := range refs {
+		if err := blobUpsert(t.tx, r); err != nil {
+			return err
+		}
+	}
+	if _, err := t.tx.Exec(`INSERT INTO entry(id, parent, kind, seq, ts, payload) VALUES(?, ?, ?, ?, ?, ?)`,
+		e.ID, nullString(e.ParentID), kind, t.l.seq, float64(e.Ts.Unix()), maybeCompress(payload)); err != nil {
+		return err
+	}
+	t.n++
+	t.last = e.ID
+	return nil
+}
+
+// Finish asks the two whole-file questions over the rows as written and commits.
+// An empty tip stands on the last row, the way the format has always meant it.
+func (t *ImportTx) Finish(tip string) error {
+	defer t.l.mu.Unlock()
+	defer t.tx.Rollback() // harmlessly wrong after Commit
+	if t.n == 0 {
+		return errors.New("store: nothing to import")
+	}
+	if tip == "" {
+		tip = t.last
+	}
+	var one string
+	err := t.tx.QueryRow("SELECT id FROM entry WHERE id = ?", tip).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("store: the tip %q is not among the entries", tip)
+	}
+	if err != nil {
+		return err
+	}
+	var badID, badParent string
+	err = t.tx.QueryRow(`SELECT e.id, e.parent FROM entry e
+		WHERE e.parent IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM entry p WHERE p.id = e.parent) LIMIT 1`).Scan(&badID, &badParent)
+	if err == nil {
+		return fmt.Errorf("store: entry %q names parent %q that the import never carries", badID, badParent)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := upsertMeta(t.tx, metaTip, tip); err != nil {
+		return err
+	}
+	if err := upsertMeta(t.tx, metaSeqNext, strconv.FormatInt(t.l.seq, 10)); err != nil {
+		return err
+	}
+	if err := t.tx.Commit(); err != nil {
+		return err
+	}
+	t.l.agg = nil
+	return nil
+}
+
+// Rows counts the rows written so far — what Finish would commit, and what the
+// route reports after it commits.
+func (t *ImportTx) Rows() int { return t.n }
+
+// Abort unwinds the living transaction; the store keeps whatever it held before
+// the import began, which is the whole point of opening one.
+func (t *ImportTx) Abort() error {
+	defer t.l.mu.Unlock()
+	err := t.tx.Rollback()
+	t.l.agg = nil
+	return err
+}
+
 // SetTip moves the path tip. An empty id says "no tip", and Replay then stands the
 // session on its newest entry — the same promise the log's tipString made.
 func (l *Log) SetTip(id string) error {

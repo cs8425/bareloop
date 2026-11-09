@@ -52,6 +52,121 @@ func imgEntry(text string, img []byte) *ir.Entry {
 
 func shaOfBytes(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
 
+// TestImportStreamSettlesAtTheEnd is the living transaction's whole contract: rows
+// arrive one at a time, the two whole-file verdicts (the tip among the rows, every
+// parent a row that exists) answer at Finish over the rows as written, and every
+// failure — a ghost tip, a hole in the tree, an explicit Abort — leaves the store
+// exactly as it was found. A duplicate id fails on the spot, on the key's own
+// sentence.
+func TestImportStreamSettlesAtTheEnd(t *testing.T) {
+	l := openTest(t)
+	imported := func() int {
+		st, err := l.Replay()
+		if err != nil {
+			t.Fatalf("replay: %v", err)
+		}
+		return len(st.Entries)
+	}
+
+	tx, err := l.ImportStream()
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	if err := tx.Entry(&ir.Entry{ID: "i1", Kind: ir.KindUser, Role: "user", Content: "a"}); err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	if err := tx.Entry(&ir.Entry{ID: "i1", Kind: ir.KindUser, Role: "user"}); err == nil {
+		t.Error("a duplicate id was accepted, want the key's refusal")
+	}
+	if err := tx.Abort(); err != nil {
+		t.Fatalf("Abort after the refusal: %v", err)
+	}
+	if got := imported(); got != 0 {
+		t.Fatalf("the refused import left %d rows, want 0", got)
+	}
+
+	tx, err = l.ImportStream()
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	if err := tx.Entry(&ir.Entry{ID: "i1", Kind: ir.KindUser, Role: "user"}); err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	if err := tx.Finish("ghost"); err == nil || !strings.Contains(err.Error(), "not among the entries") {
+		t.Fatalf("Finish over a ghost tip = %v, want the tip refusal", err)
+	}
+	if got := imported(); got != 0 {
+		t.Fatalf("the ghost-tipped import left %d rows, want 0", got)
+	}
+
+	tx, err = l.ImportStream()
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	tx.Entry(&ir.Entry{ID: "i1", Kind: ir.KindUser, Role: "user"})
+	if err := tx.Entry(&ir.Entry{ID: "i2", ParentID: "ghost", Kind: ir.KindUser, Role: "user"}); err != nil {
+		t.Fatalf("Entry hole: %v", err)
+	}
+	if err := tx.Finish("i2"); err == nil || !strings.Contains(err.Error(), "never carries") {
+		t.Fatalf("Finish over a hole = %v, want the parent refusal", err)
+	}
+	if got := imported(); got != 0 {
+		t.Fatalf("the holed import left %d rows, want 0 (all rows or none)", got)
+	}
+
+	img := []byte("png-bytes")
+	tx, err = l.ImportStream()
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	imgE := imgEntry("look", img)
+	imgE.ID = "9"
+	if err := tx.Entry(imgE); err != nil {
+		t.Fatalf("Entry image: %v", err)
+	}
+	if err := tx.Abort(); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if got := imported(); got != 0 {
+		t.Fatalf("the aborted import left %d rows, want 0", got)
+	}
+
+	// The committed shape: no tip named means the last row stands, images arrive
+	// under their sha, and seq moved past the imported numeric ids — the next fresh
+	// id is exactly one past the highest one imported. (Non-numeric ids keep seq
+	// where it is, the rule ImportAll has always had: only a number can move a
+	// counter.)
+	tx, err = l.ImportStream()
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	for _, e := range []*ir.Entry{
+		imgE,
+		{ID: "10", ParentID: "9", Kind: ir.KindUser, Role: "user", Content: "next"},
+	} {
+		if err := tx.Entry(e); err != nil {
+			t.Fatalf("Entry: %v", err)
+		}
+	}
+	if err := tx.Finish(""); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	st, err := l.Replay()
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(st.Entries) != 2 || st.Tip != "10" {
+		t.Fatalf("imported %d rows tip %q, want 2 and 10 (the last row stands)", len(st.Entries), st.Tip)
+	}
+	got := st.Entries["9"].Parts[0].Data
+	if want := base64.StdEncoding.EncodeToString(img); got != want {
+		t.Error("the imported image is not the bytes the file carried")
+	}
+	if nid := l.NextID(); nid != "0000011" {
+		t.Fatalf("NextID %q, want 0000011 (seq moved one past the highest imported id)", nid)
+	}
+}
+
 // replayAll reads the tree back the way a session opening would.
 func replayAll(t *testing.T, l *Log) *State {
 	t.Helper()

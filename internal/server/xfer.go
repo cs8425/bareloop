@@ -211,6 +211,13 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, xfer.ErrTooLarge), errors.As(err, &tooBig):
 			writeErr(w, http.StatusRequestEntityTooLarge, err)
+		case errors.Is(err, agent.ErrMCPLocked):
+			// A bundle that carries MCP servers this daemon will not host is the lock
+			// speaking, not a bad file: import is how a session — or anything that can
+			// POST — could otherwise walk a server set past mcpLock.
+			writeErr(w, http.StatusForbidden, err)
+		case strings.Contains(err.Error(), "already exists"):
+			writeErr(w, http.StatusConflict, err)
 		default:
 			writeErr(w, http.StatusBadRequest, err)
 		}
@@ -228,65 +235,108 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		importErr(err)
 		return
 	}
-	var imp *xfer.Import
-	switch kind {
-	case xfer.KindNative:
-		imp, err = xfer.DecodeNative(stream)
-	case xfer.KindWebUI:
-		imp, err = xfer.DecodeWebUI(stream)
-	}
-	if err != nil {
-		importErr(err)
-		return
+
+	// The config the file carried (the native dialect carries one, the webui dialect
+	// offers at most a system prompt) seeds the session; the name the caller gave the
+	// query outranks the name the file remembers. Secrets stripped on the way out stay
+	// stripped on the way in — a file that arrives with an API key someone pasted in is
+	// not a reason to store it.
+	cfgFor := func(fileCfg *agent.Config, fileName, system string) agent.Config {
+		cfg := agent.Config{ID: id}
+		if fileCfg != nil {
+			cfg = *fileCfg
+			cfg.ID = id
+			cfg.LLM.APIKey = ""
+			cfg.LLM.Headers = nil
+		}
+		if n := strings.TrimSpace(r.URL.Query().Get("name")); n != "" {
+			cfg.Name = n
+		}
+		if cfg.Name == "" && fileName != "" {
+			cfg.Name = fileName
+		}
+		if system != "" && strings.TrimSpace(cfg.SystemPrompt) == "" {
+			cfg.SystemPrompt = system
+		}
+		return cfg
 	}
 
-	// The config the file carried (native exports only) seeds the session; the name the
-	// caller gave the query outranks the name the file remembers. Secrets stripped on the
-	// way out stay stripped on the way in — a file that arrives with an API key someone
-	// pasted in is not a reason to store it.
-	cfg := agent.Config{ID: id}
-	if imp.Config != nil {
-		cfg = *imp.Config
-		cfg.ID = id
-		cfg.LLM.APIKey = ""
-		cfg.LLM.Headers = nil
-	}
-	if n := strings.TrimSpace(r.URL.Query().Get("name")); n != "" {
-		cfg.Name = n
-	} else if cfg.Name == "" && imp.Name != "" {
-		cfg.Name = imp.Name
-	}
-	if imp.System != "" && strings.TrimSpace(cfg.SystemPrompt) == "" {
-		cfg.SystemPrompt = imp.System
-	}
-
-	dst, err := s.mgr.Create(r.Context(), cfg)
-	if err != nil {
-		// A bundle that carries MCP servers this daemon will not host is the lock speaking, not
-		// a bad file: import is how a session — or anything that can POST — could otherwise
-		// walk a server set past mcpLock.
-		if errors.Is(err, agent.ErrMCPLocked) {
-			writeErr(w, http.StatusForbidden, err)
-			return
-		}
-		if strings.Contains(err.Error(), "already exists") {
-			writeErr(w, http.StatusConflict, err)
-			return
-		}
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	wrote := false
+	// An import is all rows or none. The native route streams: rows land as the
+	// decoder reads them, the two whole-file verdicts (the tip among the rows, every
+	// parent a row that is there) are Finish's SELECTs over what was written, and a
+	// failed attempt is unwound twice over — the living transaction unwinds the rows,
+	// this route deletes the directory. The webui dialect stays whole: its
+	// parent-bypass walk wants the file in hand, and it is the legacy shape that
+	// carries no megabytes of images — refactoring it would be paying to stream the
+	// dialect nobody imports while the one everybody imports already streams.
+	var (
+		dst                    *agent.Session
+		itx                    *store.ImportTx
+		created, wrote, txOpen bool
+	)
 	defer func() {
-		if !wrote {
+		if txOpen {
+			if err := itx.Abort(); err != nil {
+				s.logf("import %q: could not unwind the failed transaction: %v", id, err)
+			}
+		}
+		if created && !wrote {
 			if err := s.mgr.Remove(id); err != nil {
 				s.logf("import %q: could not undo the failed import: %v", id, err)
 			}
 		}
 	}()
-	if err := dst.Log().ImportAll(imp.Entries, imp.Tip); err != nil {
-		importErr(err) // a duplicate id inside the file, a corrupt payload: the file's fault, 400
-		return
+
+	var entries int
+	if kind == xfer.KindNative {
+		tip := ""
+		err := xfer.DecodeNativeStream(stream, func(h *xfer.Header) error {
+			sess, cerr := s.mgr.Create(r.Context(), cfgFor(h.Session.Config, h.Session.Name, ""))
+			if cerr != nil {
+				return cerr
+			}
+			dst, created = sess, true
+			tx, terr := dst.Log().ImportStream()
+			if terr != nil {
+				return terr
+			}
+			itx, txOpen, tip = tx, true, h.Tip
+			return nil
+		}, func(e *ir.Entry) error {
+			werr := itx.Entry(e)
+			if werr != nil && strings.Contains(werr.Error(), "UNIQUE constraint") {
+				return fmt.Errorf("duplicate entry id %q", e.ID) // the key's own sentence in the file's words
+			}
+			return werr
+		})
+		if err != nil {
+			importErr(err)
+			return
+		}
+		if err := itx.Finish(tip); err != nil {
+			txOpen = false // Finish consumed the transaction, committed or not
+			importErr(err)
+			return
+		}
+		txOpen = false
+		entries = itx.Rows()
+	} else {
+		imp, derr := xfer.DecodeWebUI(stream)
+		if derr != nil {
+			importErr(derr)
+			return
+		}
+		sess, cerr := s.mgr.Create(r.Context(), cfgFor(imp.Config, imp.Name, imp.System))
+		if cerr != nil {
+			importErr(cerr)
+			return
+		}
+		dst, created = sess, true
+		if err := dst.Log().ImportAll(imp.Entries, imp.Tip); err != nil {
+			importErr(err) // a duplicate id inside the file, a corrupt payload: the file's fault, 400
+			return
+		}
+		entries = len(imp.Entries)
 	}
 	// The opened session re-reads what it just wrote, so the caller's first GET after
 	// the import answers with the imported story, not with the empty moment Create
@@ -296,5 +346,5 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wrote = true
-	writeJSON(w, map[string]any{"id": id, "format": kind, "entries": len(imp.Entries), "status": dst.Status()})
+	writeJSON(w, map[string]any{"id": id, "format": kind, "entries": entries, "status": dst.Status()})
 }

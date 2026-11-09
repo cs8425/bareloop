@@ -269,8 +269,10 @@ type Import struct {
 	Entries []*ir.Entry
 }
 
-// DecodeNative reads a native stream. Sniff has already vouched for line 1; one decoder
-// then walks header and entries in order, which is also the file's writing order.
+// DecodeNative reads a native stream in full. Sniff has already vouched for line 1;
+// one decoder then walks header and entries in order, which is also the file's
+// writing order. The route streams (DecodeNativeStream); this is the shape for
+// callers that want the entries in hand — a converter, a test, an audit.
 func DecodeNative(r io.Reader) (*Import, error) {
 	dec := json.NewDecoder(r)
 	var hdr Header
@@ -295,6 +297,56 @@ func DecodeNative(r io.Reader) (*Import, error) {
 		return nil, fmt.Errorf("xfer: header tip %q is not among the entries", tip)
 	}
 	return &Import{Name: hdr.Session.Name, Config: hdr.Session.Config, Tip: tip, Entries: entries}, nil
+}
+
+// DecodeNativeStream walks a native stream handing every entry to put the moment
+// it is read — the file's size never needs to be RAM — and answers the header's
+// tip at the end ("" when the file named none; settling it is the writer's
+// business, and a tip that names no row fails the whole import there). The header
+// itself lands in hdr first: the route needs the config it carries before the
+// first row has anywhere to go. The whole-file refusals that need no whole file
+// (no id, an unreadable line, an empty body) happen here row by row; the two
+// that used to need every id in hand (a parent the file never carries, a tip
+// among no entry) are the store transaction's SELECTs at Finish. Duplicate ids
+// fail on the primary key's own sentence, mid-stream, where they always did in
+// the store.
+func DecodeNativeStream(r io.Reader, hdr func(*Header) error, put func(*ir.Entry) error) error {
+	dec := json.NewDecoder(r)
+	var h Header
+	if err := dec.Decode(&h); err != nil {
+		return fmt.Errorf("xfer: header: %w", err)
+	}
+	if h.Harness != Harness {
+		return fmt.Errorf("xfer: not a %s export (harness %q)", Harness, h.Harness)
+	}
+	if h.Format != FormatV1 {
+		return fmt.Errorf("xfer: format %q is not %s", h.Format, FormatV1)
+	}
+	if err := hdr(&h); err != nil {
+		return err
+	}
+	n := 0
+	for {
+		var e ir.Entry
+		err := dec.Decode(&e)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("xfer: entry %d: %w", n+2, err)
+		}
+		if e.ID == "" {
+			return fmt.Errorf("xfer: entry %d carries no id", n+2)
+		}
+		n++
+		if err := put(&e); err != nil {
+			return err
+		}
+	}
+	if n == 0 {
+		return errors.New("xfer: no entries after the header")
+	}
+	return nil
 }
 
 // decodeEntries reads entry objects to EOF, refusing what an import must not carry:
