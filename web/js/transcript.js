@@ -7,7 +7,7 @@ import { $, el, collapseDataUrls, fmtN, logEl, newSessionId, pretty, whoName, tp
 import { fmtDay, fmtFull, fmtTime } from './clock.js';
 import { state } from './state.js';
 import { api, call } from './api.js';
-import { confirmBox, note } from './ui.js';
+import { confirmBox, modal, note, promptBox } from './ui.js';
 import { markPinned, scrollDown } from './scroll.js';
 import { emit, EV_JUMP, EV_REFRESH } from './bus.js';
 import { icon, swapIcon } from './icons.js';
@@ -265,32 +265,14 @@ function actions(e, node) {
 
   // Forking from here is not the branch button in disguise: a branch moves this session's path (and is
   // off until a tree view makes the way back visible), a fork leaves this session exactly where it is
-  // and opens a new one whose history ends at this entry. Nothing is given up either way, which is why
-  // this one needs no confirmation and no tree — and the reader lands in the copy, so there is never a
-  // path they cannot find again.
+  // and opens a new one whose history ends at this entry. Nothing is given up either way. What it used
+  // to give up silently was the choosing: which slice travels, what the copy is called, which id it
+  // gets — three decisions the daemon made unseen while the page jumped. They are asked in one box now,
+  // the export button's own question answered the same way; the defaults are exactly the old behaviour.
   act(
     'fork',
     'fork from here — a new session whose history ends at this entry; this session keeps its own path',
-    async () => {
-      // api and not call: a taken id is a retry this handler owns, and call's habit of putting
-      // every failure on screen would announce the accident before the second try fixed it.
-      const once = (theId) =>
-        api(`/api/session/${encodeURIComponent(state.id)}/fork`, { body: { id: theId, at: e.id } });
-      let id = newSessionId();
-      let d = await once(id).catch((err) => ({ err: String((err && err.message) || err) }));
-      // A taken id is a coin-toss accident on a suggested name: pick another and try once, the same
-      // rule the new-session dialog follows. Anything else the reader hears about, once.
-      if (d.err && /exists|taken/i.test(d.err)) {
-        id = newSessionId();
-        d = await once(id).catch((err2) => ({ err: String((err2 && err2.message) || err2) }));
-      }
-      if (d.err) {
-        note(d.err, 'error');
-        return;
-      }
-      note(`forked to ${d.id} — ${d.entries} entries`);
-      location.hash = `#/s/${encodeURIComponent(d.id)}`; // hashchange does the rest (js/app.js)
-    },
+    () => forkDialog(e.id),
     !!e.id,
   );
 
@@ -371,6 +353,90 @@ function actions(e, node) {
   );
 
   return row;
+}
+
+// forkDialog is the three questions "fork from here" used to answer silently: which slice of the
+// tree travels, what the copy is called, and which id it gets. The scope words are the export
+// dialog's own three, so the two boxes read as one vocabulary; the path default is what the silent
+// click always did (this entry as the cut). A taken id sends the reader back to the box instead of
+// coin-tossing a second suggestion unseen — the daemon refuses, this dialog asks again, keeping
+// whatever was typed.
+async function forkDialog(at) {
+  const srcName = state.status?.name || state.id;
+  const body = el('div');
+  body.appendChild(el('p', '', `Fork ${srcName} — what should the copy carry, and what is it called?`));
+  const scope = (value, checked, text) => {
+    const lab = el('label', 'fork-scope');
+    lab.style.display = 'block';
+    const r = el('input');
+    r.type = 'radio';
+    r.name = 'forkscope';
+    r.value = value;
+    r.checked = checked;
+    lab.append(r, el('span', '', ` ${text}`));
+    return lab;
+  };
+  body.appendChild(scope('path', true, `path — the line of history up to ${at}; the rest stays behind`));
+  body.appendChild(scope('ctx', false, 'context — what the next request would send: the summary plus what survived around it'));
+  body.appendChild(scope('full', false, 'whole tree — every branch, abandoned ones included'));
+  const idField = el('input');
+  idField.name = 'fid';
+  idField.value = newSessionId();
+  idField.spellcheck = false;
+  idField.title = 'the new session\'s id — the directory name on the daemon';
+  const nameField = el('input');
+  nameField.name = 'fname';
+  nameField.placeholder = `${srcName} (fork)`;
+  body.appendChild(el('p', 'hint', 'id'));
+  body.appendChild(idField);
+  body.appendChild(el('p', 'hint', 'name (empty: the daemon appends " (fork)")'));
+  body.appendChild(nameField);
+  const answer = await modal({
+    title: `fork ${srcName} from ${at}`,
+    body,
+    autofocus: 'fid',
+    actions: [
+      { value: 'cancel', label: 'cancel' },
+      { value: 'fork', label: 'fork', primary: true },
+    ],
+  });
+  if (answer !== 'fork') return;
+  const chosen = body.querySelector('input[name=forkscope]:checked')?.value || 'path';
+  let id = idField.value.trim();
+  if (!id) {
+    note('a fork needs an id', 'error');
+    return;
+  }
+  const name = nameField.value.trim();
+  for (;;) {
+    // api and not call: a taken id is this dialog's conversation with the reader, and call's
+    // habit of putting every failure on screen would shout before the re-ask could fix it.
+    const d = await api(`/api/session/${encodeURIComponent(state.id)}/fork`, {
+      body: {
+        id,
+        at: chosen === 'ctx' ? 'ctx' : chosen === 'path' ? at : undefined,
+        full: chosen === 'full' || undefined,
+        name: name || undefined,
+      },
+    }).catch((err) => ({ err: String((err && err.message) || err) }));
+    if (!d.err) {
+      note(`forked to ${d.id} — ${d.entries} entries`);
+      location.hash = `#/s/${encodeURIComponent(d.id)}`; // hashchange does the rest (js/app.js)
+      return;
+    }
+    if (/exists|taken/i.test(d.err)) {
+      const again = await promptBox(`id "${id}" is taken — pick another for the fork`, {
+        title: 'fork',
+        value: newSessionId(),
+      });
+      if (!again) return;
+      id = again.trim();
+      if (!id) return;
+      continue;
+    }
+    note(d.err, 'error');
+    return;
+  }
 }
 
 // copyText puts the synchronous path first on purpose. It is not legacy decoration: this UI is normally

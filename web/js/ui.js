@@ -70,6 +70,17 @@ export function modal({ title, body, actions, autofocus, focus = 'primary' }) {
   }
   form.appendChild(row);
   dlg.appendChild(form);
+  // Enter in a field is the answer the caret is already next to. Without this line the browser's
+  // implicit submission uses the form's *first* submit button — the cancel every one of these
+  // strips puts first so the safe button sits on the reading side — which turned the modal
+  // comment's promise ("a stray Enter" commits the primary) inside out: pressing Enter after
+  // typing an id dismissed the dialog as a cancel. Route the key to the primary explicitly.
+  form.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' || ev.target.tagName === 'TEXTAREA' || !ev.target.closest('input')) return;
+    ev.preventDefault();
+    const def = row.querySelector('.primary') || row.querySelector('button');
+    if (def) dlg.close(def.value);
+  });
   document.body.appendChild(dlg);
   dlg.showModal();
   // Where the caret starts is the answer a stray Enter commits, so it is chosen, not inherited: an
