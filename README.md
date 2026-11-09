@@ -87,7 +87,8 @@ and none of it is compiled into the binary. That is how a page that is still bei
 how such a page fetches a fixture — a page opened from disk can import neither a module script nor a JSON
 file. It is off unless you name it, a file that is not there is a 404 rather than the single page, and
 nothing in it is cached. Naming the directory `bareloopd` runs from is refused, because that is where
-`config.json` and `data/` are and nothing in front of this port authenticates. `testdata/bench-stream.html`
+`config.json` and `data/` are, and static paths — `/testdata/` among them — are what the login gate
+does not cover (`keeping the daemon behind a login`). `testdata/bench-stream.html`
 lives there today.
 
 The UI puts the session in the URL (`#/s/<id>`): reload, bookmark or paste the link and you are back at that
@@ -187,6 +188,8 @@ its own copy in `data/<id>/config.json`.
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
 | `sessions[]` | optional sessions to create at startup |
 | `mcpLock` | freezes every session's MCP server set over the API: sessions may enable, disable and re-policy the servers of `defaults.mcp` and nothing else about them ([locking the server set](#locking-the-server-set)) |
+| `bind` | how the listener presents itself: `tls.cert`/`tls.key` (paths — serve https, and the startup line says so), `trustedProxies` (CIDRs whose `X-Forwarded-For` the login gate may believe about who a client was) ([behind a login](#keeping-the-daemon-behind-a-login)) |
+| `auth` | one operator login in front of everything that acts: `user`, `pass` (env-expanded, so the file can hold `${VAR}`), `session.idleTimeout`, `rateLimit.maxAttempts`/`window` ([behind a login](#keeping-the-daemon-behind-a-login)) |
 
 Keys are lowerCamelCase, and they are matched case-insensitively (`"SendReasoning"` is understood).
 Two things bite harder than a typo:
@@ -388,6 +391,53 @@ gets refused. The way back to a session's server set is the one for every other 
 `data/<id>/config.json`, start again. What the lock promises is narrow and total: nothing arriving over the API
 can change which MCP servers this machine runs.
 
+### Keeping the daemon behind a login
+
+`auth` puts one operator login in front of everything that acts: the API under `/api/`, the event
+transports (`/ws`, SSE), and `/debug/` when it is mounted. The static page itself and
+`GET /api/health` answer without it — the first so the UI can load far enough to ask for the
+password, the second so a probe stays probeable.
+
+| field | default | what it is |
+|---|---|---|
+| `user`, `pass` | — | the one account; the block does nothing unless both are set. `${VAR}` expansion works here as everywhere in the config, which is how the password stays out of the file: `"pass": "${BARELOOP_AUTH_PASS}"` |
+| `session.idleTimeout` | `168h` | how long a login cookie lives; each authenticated request slides it forward, so an open tab never asks again |
+| `rateLimit.maxAttempts` · `window` | `5` · `15m` | wrong passwords one client may spend per window; past it every answer is `429` with a `Retry-After` until the window closes |
+
+Two credentials are accepted: the cookie the UI receives from `POST /api/login`, and HTTP Basic
+sent **pre-emptively** — `curl -u`, `go tool pprof -header`. Basic arriving because the server
+asked is a different animal, and this server never asks: **a 401 carries no `WWW-Authenticate`,
+ever.** A browser challenge pops its own dialog over this UI's login form, and worse, registers
+the origin in the browser's HTTP auth cache, where one remembered wrong pair answers every later
+request and poisons every `fetch` from the origin. A 401 here says 401 and means the JSON beside
+it; the UI sees the number and shows its own form. ([design.md](docs/design.md#the-login-gate))
+
+Wrong passwords are counted per client, and "client" is the **TLS fingerprint of the connection**
+when there is TLS and the IP otherwise — one laptop reconnecting onto a new address cannot walk
+past a lockout it earned there. Every login answer, right or wrong, is held to a constant
+half-second, so timing says nothing about which half was wrong; blocked attempts are not charged,
+and a success clears the slate for that client. A refused login is a bare error envelope,
+`{"error": "authentication required"}` — the endpoint never says which half failed.
+
+A login over plain HTTP to a machine you do not control sends the password in the clear, so with
+auth on, a non-loopback `addr` and no `bind.tls` prints a warning at startup. A self-signed pair
+is one command:
+
+```
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+```
+
+Browsers need the warning dismissed once per origin; over TLS the session cookie carries
+`Secure`, and the login dialog the UI raises remembers the user across reloads until the idle
+timeout expires or the logout button is pressed. `X-Forwarded-For` is consulted only for
+addresses listed in `bind.trustedProxies` — an unasked reverse proxy cannot hand the gate a
+forged client, and behind one that is not declared, all traffic shares one fingerprint bucket.
+
+One transport footnote worth knowing before filing a bug: Go's HTTP/2 has no extended CONNECT
+(RFC 8441), so a browser that negotiated h2 opens a parallel HTTP/1.1 connection for the
+websocket. It is normal, and it authenticates with the same cookie like any other request.
+
 ### Tools: switches, prefixes and the cache
 
 A tool is published under its **own name**: `fs_list`, not `mcp-vroot__fs_list`. Nothing is namespaced
@@ -548,8 +598,10 @@ BARELOOP_PAYLOAD_DUMP=1 ./bin/bareloopd ...        # and dump every request to t
 
 `-pprof` is off unless you ask: `-pprof 127.0.0.1:6060` gets a listener of its own, `-pprof same` mounts
 `/debug/pprof/` on the API port (the config file's `"pprof"` field takes either, and the flag wins).
-Nothing authenticates any of it, and `/debug/pprof/profile` holds a connection for thirty seconds of CPU
-sampling, so `same` on a non-loopback `-addr` earns a startup warning. It answers what no log in this
+Nothing authenticates a listener of its own, and `/debug/pprof/profile` holds a connection for thirty seconds of CPU
+sampling, so `same` on a non-loopback `-addr` earns a startup warning — though `same` is the one mount a
+configured `auth` covers: `/debug/` is behind the gate, so it wants the credential pre-emptively
+(`go tool pprof -header Authorization: Basic …`). It answers what no log in this
 project can: what one session and its MCP servers cost in goroutines, whether an interrupted run left one
 parked, and whether the process is still holding every `data/<id>/` transcript it opened at startup.
 Nothing about the browser — that side has its own instruments.
@@ -587,7 +639,9 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/session/{id}/events` · `/ws` | the event stream as SSE (fallback transport) / as a websocket (primary) |
 
 The two promises this table rests on are worth memorising; the parameters, the `window` fields,
-the refused combinations and every event frame are in **[`docs/api.md`](docs/api.md)**.
+the refused combinations and every event frame are in **[`docs/api.md`](docs/api.md)** — which also
+carries the three endpoints a configured `auth` adds (`login`, `logout`, `whoami`) and what a `401`
+means there ([behind a login](#keeping-the-daemon-behind-a-login)).
 
 **The transcript is paged and cannot be talked out of it.** `GET /api/session/{id}` answers with
 the **path** — the entries that would be sent, oldest first — and no request shape buys the whole

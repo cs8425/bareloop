@@ -543,6 +543,82 @@ due at one instant everywhere on earth, and the session's timezone is for what t
 rather than only while parked — the few seconds of a wake are a live run with an unanswered call, and a queue
 nobody can see during them reads like a lost message.
 
+## The login gate
+
+The daemon is arbitrary code on this machine (MCP stdio spawns it), files it reads and writes,
+and LLM quota it spends. Bound to loopback that is a personal tool and the operator is the
+network boundary; bound to anything else, it needs a gate. One account, one password, configured
+in `config.json` — this is a single-operator tool, and an account database would be a second
+product.
+
+**Server-side sessions behind an HttpOnly cookie, not Bearer tokens in localStorage.** Three
+transports must carry the same credential — `fetch`, the SSE stream, and the websocket — and a
+websocket hand-shake cannot attach an `Authorization` header at all, which leaves the cookie as
+the only kind that covers all three without special cases. HttpOnly means a rendered-markdown
+XSS cannot read the credential off storage, and the session map costs a map: no token format, no
+signing secret, nothing to rotate. **The map lives in memory and dies with the process, on
+purpose** — a signing key or a session dump on disk would be one more secret the `data/`
+directory does not need, and "everybody logs in again after a restart" is the honest and only
+cost.
+
+**HTTP Basic is accepted but never requested.** Accepted, because the tooling speaks it —
+`curl -u`, `go tool pprof -header` — and both send it pre-emptively, without being asked.
+Never requested, because of a live incident worth writing down: the moment a 401 carries
+`WWW-Authenticate`, Chrome registers the origin in its HTTP auth cache and pops its own dialog
+over the app's login form. If the pair remembered there is ever wrong, the cache answers every
+later request to the origin itself — and then poisons it: fetches fail with
+`net::ERR_INVALID_AUTH_CREDENTIALS`, or hang pending while the console repeats `HTTP
+Authentication failed; no valid credentials available`. The UI's login dialog is triggered by a
+JSON 401, so a poisoned cache locks the front door by eating the very response that opens it —
+with no user error behind it, a bad pair can be cached from a single challenged 401 nobody
+answered. An intermediate fix (challenge only requests browsers do not `fetch` — which is exactly
+what `go tool pprof` sends) was tried and works, and was removed anyway: it keeps the poison path
+open in every browser that ever implemented the cache. A 401 here is a bare
+`{"error": "authentication required"}` with no challenge header, and the UI that reads it shows
+its own dialog — a native `<dialog>`, with the message the server earned for a wrong password.
+
+**The login endpoint is slow on purpose and unfair on purpose.** Every answer is held to a
+constant 500 ms, so timing does not say which half was wrong; the hold measures real time
+(`time.Since`, not the injected clock) because a clock jump during a hold would otherwise put a
+login to sleep for the size of the jump. Wrong passwords are metered per client: `maxAttempts`
+per `window`, then every answer is `429` with an honest `Retry-After` — and a blocked attempt is
+**not charged**, or the lockout would be the one moment the endpoint could be hammered for free.
+A successful login clears that client's slate: an honest user who mistyped five times waits
+fifteen minutes at most, not the whole window.
+
+**"Client" is the TLS fingerprint of the connection when there is TLS, and the IP otherwise**,
+because an address is what a lockout cannot be anchored to: a reconnect, a DHCP renewal, or a
+phone changing cells walks past an IP-keyed gate with a quarter-second's pause. The fingerprint
+is a JA4-style hash of the ClientHello — cipher list in order, TLS versions, and the extension
+list — after three filters that make it stable per client rather than per connection: every
+**GREASE** codepoint is dropped (RFC 8701; they appear in ciphers, extensions, curves and
+versions alike, and a raw digest changes every connect), **extensions are sorted** (Chrome
+shuffles them per connect), and the handful of extension slots that record *state* rather than
+identity — session ticket, early data, the post-HRR echo slot, the PSK-KEM ids whose contents
+change on every resume — are removed, so a resuming hello and a full one fingerprint the same.
+A HelloRetryRequest carries a server-chosen subset and never enters the table at all. The
+differences from published JA4 are deliberate and one note long: JA4 sorts ciphers against
+"TLS stunting" while this keeps their order (no hostile middlebox is in the threat model, and
+real clients keep real orders), JA4 keeps the resumption signals to identify *the same client*
+across reconnects while this filters them to bucket *the same kind of client* — the use here is
+a rate-limit key, not personhood — and it does not read signature algorithms at all, which is
+how it survived, unmodified, the June 2026 BoringSSL change that greased sigalgs values and
+burst 16 distinct JA4 codes per Chrome session across a CDN's dedupe. Nothing is licensed from
+that family — JA4+ carries a patent-pending licence — because the whole implementation is two
+hundred local lines, and the field is described as JA4-style for exactly that reason. A changed
+fingerprint rehashes into a fresh bucket (a rebuilt browser is a new client, and earns its own
+allowance), and buckets idle for an hour are evicted. With no TLS there is no hello to hash and
+the IP is all there is; behind an unconfigured reverse proxy every client shares one bucket,
+which is why `bind.trustedProxies` exists and why `X-Forwarded-For` is consulted right-to-left,
+stopping at the first untrusted hop — never at all when no proxy is declared, because a header
+any passer-by can set is not an identity.
+
+Two log lines carry the whole subsystem's observability, because a gate that is working is
+silent: one at startup naming the protection in force, and one per first-seen client,
+`tls client <fp> from <host>`, repeated only when that peer's fingerprint changes. A TLS peer
+certificate chain, deliberately, is not part of it: nobody authenticates here except after the
+gate, so what a chain identifies is a browser, not a person.
+
 ## The UI, and why it is shaped like this
 
 `web/js/session.js` and its neighbours are plain ES modules; the behaviours worth knowing are the ones that
@@ -722,8 +798,8 @@ answers differ from the UI's, both because this is a directory being edited rath
 delivered: a name that is not there is a 404 rather than the entry point (a fixture typed one character
 wrong arriving as a page full of HTML is a JSON parse error nobody can read), and nothing in it is cacheable.
 Off unless named, so a released binary has no mount to serve - and the one directory it refuses to serve is
-the one `bareloopd` runs from, since that is where the config file and the session logs are and this port
-authenticates nothing.
+the one `bareloopd` runs from, since that is where the config file and the session logs are, and static
+paths - this mount among them - are what the login gate does not cover.
 
 ## Markdown rendering
 

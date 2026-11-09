@@ -6,6 +6,18 @@
   "debug": false,
   "mcpLock": false,
 
+  "bind": {
+    "tls": { "cert": "_cert/server.crt", "key": "_cert/server.key" },
+    "trustedProxies": []
+  },
+
+  "auth": {
+    "user": "admin",
+    "pass": "${BARELOOP_AUTH_PASS}",
+    "session": { "idleTimeout": "168h" },
+    "rateLimit": { "maxAttempts": 5, "window": "15m" }
+  },
+
   "defaults": {
     "name": "main",
     "systemPrompt": "You are a careful assistant. Use the tools when they help. Reply in the same language and the same script the user writes in: if they write Traditional Chinese answer in Traditional Chinese, if they write Simplified Chinese answer in Simplified Chinese. Never change language or script on your own, and never add a translation of your own answer.",

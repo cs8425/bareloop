@@ -36,11 +36,55 @@ Anything else arriving on the socket is answered with an error that says where t
 - **Timestamps** are UTC, RFC 3339. **Entry ids** are per-session and sortable; the log assigns
   them, nobody passes them in.
 
+## Authentication
+
+With `auth` in the daemon's config, the whole surface below asks for a login: every `/api/` path,
+`/ws`, the SSE stream, and `/debug/` when it is mounted. Two things answer without one:
+`GET /api/health`, and everything that is not an API path — the static UI itself, so it can load
+far enough to ask for the password. Without `auth` in the config there is no gate and none of this
+applies.
+
+- **Cookie.** `POST /api/login` with `{"user": "…", "pass": "…"}` answers `{ok, user}` and sets a
+  session cookie (`HttpOnly`, `SameSite=Lax`, `Secure` over TLS) that lives for
+  `session.idleTimeout` and slides forward with every authenticated request.
+  `POST /api/logout` kills the session its cookie names; the response carries the expiry that
+  drops the cookie here too.
+- **HTTP Basic, sent pre-emptively.** `curl -u user:pass` sends the header without being asked,
+  and the gate takes it — that is also what makes `go tool pprof -header Authorization: …` work.
+  The gate never *asks*: **a 401 carries no `WWW-Authenticate` header**, ever. A browser challenge
+  registers the origin in the browser's HTTP auth cache, where one remembered wrong pair would
+  then answer — and shadow — every later request from that origin, this page's own `fetch`es
+  included. ([the whole story](design.md#the-login-gate))
+- **`401`** is the bare error envelope — `{"error": "authentication required"}` — for a missing,
+  stale or wrong credential; it never says which half failed, and a JSON body is the whole point
+  of not challenging: a client that reads the envelope can react to it. The shipped UI answers a
+  401 with its own login dialog and retries the refused request in place after a success.
+- **`429`** arrives once `rateLimit.maxAttempts` wrong passwords have been spent inside
+  `rateLimit.window`, with a `Retry-After` (seconds) that counts down honestly, because a blocked
+  attempt is not charged. `POST /api/login` holds every answer — right, wrong, blocked-then-late
+  — to a constant half-second, so timing says nothing about which half failed.
+- **`GET /api/whoami`** is how a page asks "is there a gate, and am I through it?": `{user}` for a
+  live session, the usual 401 otherwise, and a plain 404 (no such endpoint) when no gate exists.
+  Nothing about it is an error to explain.
+
+```
+curl -c jar -X POST 127.0.0.1:8090/api/login -d '{"user":"op","pass":"…"}'
+curl -b jar 127.0.0.1:8090/api/sessions          # the cookie
+curl -u  op:…     127.0.0.1:8090/api/sessions    # or pre-emptive Basic, no jar
+```
+
+Wrong passwords are counted per client — the IP, or the TLS fingerprint of the connection when
+there is TLS, so a laptop that reconnects on a new address cannot walk past a lockout it earned.
+`X-Forwarded-For` is believed only from `bind.trustedProxies`.
+
 ## The surface in one table
 
 | method | path | what it is |
 |---|---|---|
-| GET | `/api/health` | liveness: `{ok, time}` |
+| GET | `/api/health` | liveness: `{ok, time}` — the one API path that never asks for a login |
+| POST | `/api/login` | only with `auth`: `{user, pass}` → `{ok, user}` + session cookie; 500 ms held, `429`+`Retry-After` over quota |
+| POST | `/api/logout` | only with `auth`: kills the session its cookie names |
+| GET | `/api/whoami` | only with `auth`: `{user}` while the cookie lives |
 | GET | `/api/sessions` | every session as a list row (below); answered from the index, opens nothing |
 | POST | `/api/sessions` | create a session; body is a config, `id` required |
 | POST | `/api/sessions/import` | create a session from a transcript file — bareloop's own export or a llama-ui one |
@@ -414,6 +458,12 @@ guess. Two tabs on one session stay in sync from these events, and a tab re-read
 the tip moves to an entry it has never seen: another tab moved the path or appended to it while
 this one was in the background.
 
+With a login gate configured, the UI notices it on its own: the first refused call (or the boot
+probe of `GET /api/whoami`) raises the app's own login dialog — no browser auth prompt is
+involved, because no 401 ever carries a challenge — a refused request retries itself in place
+after a successful login, the dropped websocket reconnects itself inside its retry loop, and the
+header grows a logout button that disappears when no gate exists.
+
 ## Static files and mounts
 
 - Everything that is not an `/api/`, `/ws`, `/testdata/` or `/debug/pprof/` path is the UI:
@@ -426,5 +476,6 @@ this one was in the background.
   default, never cached, no listing, no SPA fallback — a missing file is a 404.
 - **`/debug/pprof/…`** is Go's runtime profiler on the API port, only when the operator asked
   (`-pprof same`).
-- The websocket accepts any origin: authentication is expected to terminate at a reverse proxy,
-  and the default deployment is a local port.
+- The websocket accepts any origin: the credential is the SameSite=Lax session cookie the
+  hand-shake carries, there are no cross-site pages to defend against on a local port, and a
+  deployment that wants origin policy runs behind one that applies it.
