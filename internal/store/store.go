@@ -342,8 +342,9 @@ var gzReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 // pool (see SetZdict): swapping a dictionary mid-process costs one fresh pair, never a
 // silent misread of frames stamped by the old one. EncodeAll/DecodeAll are safe for
 // concurrent use on one instance, and a gzip-default process never pays either one's
-// buffers. The encoder window is this codec's real RAM note — tens of megabytes,
-// spent only by a process that chose zstd, which is why the import is lazy.
+// buffers. The encoder window is this codec's real RAM note — ~80MB resident at
+// the pinned 1MB window, ~67MB of it the fixed tables of the chosen encoder (see
+// zstdWindow) — which is why the window is pinned and why the import is lazy.
 type zstdPairVal struct {
 	enc *zstd.Encoder
 	dec *zstd.Decoder
@@ -368,11 +369,47 @@ var (
 // behind one constant on purpose.
 const ZstdLevel = zstd.SpeedBetterCompression
 
+// zstdWindow is the encoder's match history. Measured on the heap profile (the
+// docs only mention the 8MB default): the history buffer scales with the window —
+// 68MB at 8MB, 8MB at 1MB — and whatever else the better-dict encoder carries
+// resident per pool slot does not follow the window. The library default arrived
+// as ~135MB on this machine; pinning 1MB lands the floor at ~80MB, which is the
+// fixed cost per pool slot times the slot count — see zstdEncoderSlots for the
+// other half of that product, and neither WithLowerEncoderMem (it only trims the
+// history, worth ~1MB here) nor WithDecoderLowmem (already the default — true)
+// has anything left to give.
+//
+// One row per EncodeAll frame is how payloads are written, and a frame never
+// matches outside itself — the window only has to cover the largest single
+// payload, and 1MB does that with headroom (measured: reforking the corpus store
+// byte-for-byte under the new window — same 282,624 path bytes, so no ratio
+// change). A dictionary must fit inside the window (the format requires it), which
+// SetZdict enforces loudly instead of letting NewWriter fail into "store text"
+// silence. Old frames carry their own window size in every frame header, so
+// shrinking this constant decodes the existing corpus unchanged.
+const zstdWindow = 1 << 20
+
+// ZstdSlots pins the EncodeAll pool depth, and pinning it is the difference
+// between a RAM figure and a rumor: the library sizes that pool at GOMAXPROCS —
+// one full set of better-dict tables (~10MB) per core, born when the first row big
+// enough to compress is written and held forever — so an unpinned encoder costs 80MB on this 8-core machine and would
+// cost 300MB+ on a 32-core one. The store cannot use the extra slots: every
+// AppendEntry holds its Log's mutex across the compression, so only cross-store
+// concurrent writes reach the pool at all — two slots cover a session writing
+// while an import or fork runs, and past that writers queue on the channel,
+// costing latency in microseconds while costing megabytes not to have.
+// Zero or negative means auto — leave the library's GOMAXPROCS sizing alone —
+// which is what -zstd-slots spells for anyone whose trade is different.
+var ZstdSlots = 2
+
 // SetZdict installs the operator's zstd dictionary (nil or empty clears it, leaving
 // the seed). The bytes are validated here so a wrong file fails at startup rather
 // than at the first frame that quietly needed it.
 func SetZdict(b []byte) error {
 	if len(b) > 0 {
+		if len(b) > zstdWindow {
+			return fmt.Errorf("store: zstd dictionary is %d bytes, over the %d byte encoder window it must fit inside", len(b), zstdWindow)
+		}
 		if _, err := zstd.InspectDictionary(b); err != nil {
 			return fmt.Errorf("store: not a zstd dictionary: %w", err)
 		}
@@ -426,7 +463,10 @@ func buildZstdPair(pool [][]byte) zstdPairVal {
 	// constants' mapping itself may shift between versions — for a store whose
 	// bytes live on disk for years, that makes the go.mod pin load-bearing and an
 	// upgrade worth a fresh du of the corpus.
-	eopts := []zstd.EOption{zstd.WithEncoderLevel(ZstdLevel)}
+	eopts := []zstd.EOption{zstd.WithEncoderLevel(ZstdLevel), zstd.WithWindowSize(zstdWindow)}
+	if ZstdSlots > 0 {
+		eopts = append(eopts, zstd.WithEncoderConcurrency(ZstdSlots))
+	}
 	var dopts []zstd.DOption
 	if len(pool) > 0 {
 		eopts = append(eopts, zstd.WithEncoderDict(pool[len(pool)-1]))

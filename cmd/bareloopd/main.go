@@ -143,6 +143,7 @@ func main() {
 		pprofAddr = flag.String("pprof", "", "runtime profiles: an address like 127.0.0.1:6060, or the word same to mount them on the API port; empty = off")
 		comp      = flag.String("compress", "zstd", `compression of new payloads: zstd | gzip | none (zstd writes stamp the dictionary embedded in the binary, or -zdict; old stores read whichever codec wrote them)`)
 		zdictPath = flag.String("zdict", "", "zstd dictionary file: new zstd payloads are stamped with it — the file is data, not a toggle: frames it writes need it to read back forever")
+		zstdSlots = flag.Int("zstd-slots", 2, `resident zstd encoder pool depth, ~10MB of tables per slot; 0 or -1 means auto: one slot per CPU core (80MB+ of RAM that never leaves on an 8-core box, 300MB+ on a 32-core one — the depth only matters when several sessions write at once, which the per-store lock serializes anyway)`)
 	)
 	flag.Parse()
 
@@ -157,6 +158,7 @@ func main() {
 	default:
 		logger.Fatalf("compress: %q is not gzip, zstd or none", *comp)
 	}
+	store.ZstdSlots = *zstdSlots // ≤0 leaves the library's per-core sizing in charge; read at first compression
 	if *zdictPath != "" {
 		b, err := os.ReadFile(*zdictPath)
 		if err != nil {

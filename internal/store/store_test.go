@@ -1033,3 +1033,17 @@ func TestSetZdictRejectsNonDictionary(t *testing.T) {
 		t.Fatalf("clearing: %v", err)
 	}
 }
+
+// TestSetZdictRejectsOversizedDictionary: the format requires a dictionary to fit
+// inside the encoder window; without this refusal the failure would be NewWriter
+// erroring and buildZstdPair answering the only way it can — no compression, in
+// silence. The size check precedes the content check: oversized junk is refused
+// for the size that actually kills the encoder, not for its dictionary magic.
+func TestSetZdictRejectsOversizedDictionary(t *testing.T) {
+	if err := SetZdict(make([]byte, zstdWindow+1)); err == nil {
+		t.Fatal("SetZdict accepted a dictionary larger than the encoder window")
+	}
+	if err := SetZdict(nil); err != nil {
+		t.Fatalf("clearing: %v", err)
+	}
+}

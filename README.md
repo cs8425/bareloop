@@ -20,7 +20,16 @@ endpoint.
   WAL journalling makes a torn commit a rollback, not a repaired file. Payloads compress per
   row — zstd with a trained dictionary by default — and a row's own bytes say which codec
   wrote it, so every store reads every store
-  ([`docs/zstd-dictionary.md`](docs/zstd-dictionary.md)). It is a tree, but the UI shows one
+  ([`docs/zstd-dictionary.md`](docs/zstd-dictionary.md)). One RAM note with the default:
+  zstd's high-compression encoder keeps roughly 20 MB of match tables resident once the
+  first row big enough to compress (at or above the 512-byte floor) has been written —
+  the library would size them per CPU core (~10 MB each), but
+  the pool depth is pinned at two slots (`-zstd-slots`; `0` hands it back to the core
+  count), so the figure is flat whatever the machine has
+  (measured on the heap profile; it is the encoder, the decoder stays lazy). That is the
+  encoder's appetite, not compression per se — gzip's pooled writers cost a few hundred
+  KB each — so run with `-compress gzip` if even 20 MB matters more than the ratio:
+  rows record the codec that wrote them, so any store still reads either way. It is a tree, but the UI shows one
   path at a time: what is not on the path is not drawn, and there is no branch switcher yet
   (`docs/design.md`, Deferred).
 - **The loop runs on the server**, not in the browser, so a run survives a page reload and survives

@@ -27,6 +27,34 @@ none got worse. Scanning every payload takes ~108 ms zstd against ~205 ms gzip, 
 the dictionary buys disk without spending the read path. Training a book from 7.3 MB
 of payloads costs ~3 s.
 
+## What it costs in RAM
+
+The codecs are not equal on the resident-memory line, and it is the **encoder** that
+is billed — decoding is lazy and low-memory in all three, so a process that only
+reads stores pays nothing here. The trigger is also not any write: rows below the
+512-byte floor are stored as text and never wake the encoder, so a daemon that has
+only ever written short messages has not paid this bill yet (one tool call or a
+paragraph-long answer spends it, and it is spent for the process's life):
+
+| `-compress` | resident once a row at or above the 512-byte compression floor has been written | measured how |
+|---|---|---|
+| `zstd` (default) | **~20 MB**, flat across machines | heap profile × pinned pool: the resident set is *slots × ~10 MB per slot* (better-dict tables + history each). The library sizes the pool at **GOMAXPROCS** — one slot per CPU core, built when the first compressible row is written, held forever — which would make the figure a function of the machine (~80 MB at 8 cores, 300 MB+ at 32); the store pins it at **2 slots** — `-zstd-slots`, where `0` or `-1` hands the decision back to GOMAXPROCS — because `AppendEntry` compresses under its Log's mutex, so only cross-store concurrent writes ever reach the pool and past two the rest merely queue. Window pinned at 1 MB as well (the library's 8 MB default added ~50 MB per slot on top) |
+| `gzip` | **~0.3 MB** per in-flight writer | source-level: a 32 KB window and two fixed tables per `flate` writer, reused through a pool — it exists only while a write is happening, a handful at the very most |
+| `none` | none | no encoder at all; every payload goes to disk as text (a codec already stores text whenever compression loses, but only after trying) |
+
+Set against the size table above — zstd + book is ~11 % smaller than gzip on the
+same corpus — the trade is disk for RAM at roughly **20 MB resident for 11 % of
+store size**. On a machine where even that is the scarce thing (a small VPS sharing
+it with the models, browser tabs, or everything else), the honest recommendation is:
+
+```sh
+bareloopd -compress gzip    # ~20 MB never resident; stores ~11 % bigger; reads unchanged
+```
+
+Nothing about the choice is permanent: rows record the codec that wrote them, so
+switching later costs no conversion and no migration — new rows arrive in the new
+codec while every old row keeps reading itself.
+
 ## Where the shipped book comes from
 
 `internal/store/seeddict.bin` is compiled into the binary. It is produced by a person,

@@ -71,6 +71,7 @@ func main() {
 	verify := flag.Bool("verify", false, "re-open imported stores and print aggregates + payload digest")
 	comp := flag.String("compress", "zstd", `compress new payloads: zstd | gzip | none (the -verify digest weighs the text either way)`)
 	zdictPath := flag.String("zdict", "", "zstd dictionary file: new zstd writes are stamped with it (keep the file: its frames need it to read back)")
+	zstdSlots := flag.Int("zstd-slots", 2, `resident zstd encoder pool depth, ~10MB of tables per slot; 0 or -1 means auto: one slot per CPU core`)
 	gendict := flag.Bool("gendict", false, "train a zstd dictionary from the store payloads under <src-data-dir>, write -dictout, and exit")
 	dictout := flag.String("dictout", "zdict.bin", "output file for -gendict")
 	maxdict := flag.Int("maxdict", 32768, "dictionary budget for -gendict, bytes")
@@ -86,6 +87,7 @@ func main() {
 	default:
 		fail("compress: %q is not gzip, zstd or none", *comp)
 	}
+	store.ZstdSlots = *zstdSlots
 	if *zdictPath != "" {
 		b, err := os.ReadFile(*zdictPath)
 		if err != nil {
