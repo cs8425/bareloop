@@ -13,6 +13,7 @@ package asm
 
 import (
 	"encoding/json"
+	"encoding/json/jsontext"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -46,6 +47,10 @@ type ContentPart struct {
 // with 500 "key 'text' not found" — which an image with no text used to trigger, because
 // `json:"text,omitempty"` dropped the key. Field order is fixed by the structs below, so a rebuild
 // produces the same bytes (KV cache prefix).
+//
+// It is now the fallback, not the highway: an engine that sees MarshalJSONTo prefers it, so this
+// method serves builds compiled with GOEXPERIMENT=nojsonv2 — and the golden table pins both
+// methods to the same shapes so the escape hatch cannot rot.
 func (p ContentPart) MarshalJSON() ([]byte, error) {
 	if p.ImageURL != nil {
 		return json.Marshal(struct {
@@ -61,6 +66,73 @@ func (p ContentPart) MarshalJSON() ([]byte, error) {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}{typ, p.Text})
+}
+
+// MarshalJSONTo is the v2-native twin of MarshalJSON — same shapes, same field order, same
+// discriminator (the ImageURL pointer, never the Type string), written token by token into the
+// engine's own encoder.
+//
+// It exists because of what the v1 method costs: handed only MarshalJSON, the v2 engine calls it,
+// re-parses its output, reformats every byte for policy compliance and clones the result — per
+// part, per turn, forever. That compat tax was the daemon's single largest allocation source.
+// MarshalJSONTo streams into the encoder instead: the same bytes, no intermediates.
+//
+// Escaping is deliberately absent here. The encoder this method receives owns the escaping policy
+// (the v1-compat layer of json.Marshal runs the HTML trio plus the JS pair on this build; the
+// wire path through jsonv2.Marshal runs nothing beyond JSON's own rules), so this method writes
+// logical strings and lets the caller's regime decide their bytes. Hand-escaping anywhere inside
+// would double-escape the moment a caller already escapes — the golden table's two columns are
+// the fence against exactly that class of bug.
+func (p ContentPart) MarshalJSONTo(e *jsontext.Encoder) error {
+	if p.ImageURL != nil {
+		if err := e.WriteToken(jsontext.BeginObject); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.String("type")); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.String(PartTypeImage)); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.String("image_url")); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.BeginObject); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.String("url")); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.String(p.ImageURL.URL)); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.EndObject); err != nil {
+			return err
+		}
+		return e.WriteToken(jsontext.EndObject)
+	}
+	typ := p.Type
+	if typ == "" {
+		typ = PartTypeText
+	}
+	if err := e.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	if err := e.WriteToken(jsontext.String("type")); err != nil {
+		return err
+	}
+	if err := e.WriteToken(jsontext.String(typ)); err != nil {
+		return err
+	}
+	// "text" is emitted unconditionally, exactly like the struct tag above: llama.cpp's 500
+	// does not care which engine produced the bytes.
+	if err := e.WriteToken(jsontext.String("text")); err != nil {
+		return err
+	}
+	if err := e.WriteToken(jsontext.String(p.Text)); err != nil {
+		return err
+	}
+	return e.WriteToken(jsontext.EndObject)
 }
 
 // ToolCallOut is a tool call as it appears in an assistant message.

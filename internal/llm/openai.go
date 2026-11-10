@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,16 +76,19 @@ type streamOptions struct {
 }
 
 type chatRequest struct {
-	Model           string         `json:"model"`
-	Messages        []asm.Message  `json:"messages"`
-	Tools           []toolDefJSON  `json:"tools,omitempty"`
-	ToolChoice      any            `json:"tool_choice,omitempty"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
-	Temperature     *float64       `json:"temperature,omitempty"`
-	MaxTokens       int            `json:"max_tokens,omitempty"`
-	Stop            []string       `json:"stop,omitempty"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []asm.Message  `json:"messages"`
+	Tools         []toolDefJSON  `json:"tools,omitempty"`
+	ToolChoice    any            `json:"tool_choice,omitempty"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	// omitzero, not omitempty: measured on this build, v2's omitempty no longer drops a
+	// numeric zero (an int 0 here reached the wire), and "max_tokens":0 instructs the server
+	// to generate nothing. omitzero is honoured by both engines (v1 since Go 1.24, v2 natively).
+	MaxTokens       int      `json:"max_tokens,omitzero"`
+	Stop            []string `json:"stop,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 }
 
 func (p *openai) encodeBody(req Request, stream bool) ([]byte, error) {
@@ -111,22 +115,32 @@ func (p *openai) encodeBody(req Request, stream bool) ([]byte, error) {
 	}
 	extra := req.Extra
 	if len(extra) == 0 {
-		return json.Marshal(body)
+		return jsonv2.Marshal(body)
 	}
-	// Merge provider-specific fields. Deterministic: encoding/json sorts map keys, and the
-	// whole session uses one config, so the rendered prefix stays byte-identical.
-	raw, err := json.Marshal(body)
+	// Merge provider-specific fields.
+	//
+	// All three steps run v2-native on purpose. The final map pass is where a stray v1
+	// json.Marshal would sneak the escaping regime back — the compat layer re-escapes the
+	// strings it parsed (this build measures HTML trio plus JS pair), silently un-writing
+	// the wire's "no escaping beyond JSON's own rules". The body golden test is the fence.
+	//
+	// Deterministic(true) is load-bearing, not decorative: v1 always sorted map keys, v2
+	// deliberately does NOT (map order is random without it — measured here as a scrambled
+	// body). Every turn re-sends this body as the KV prefix, so "same input, same bytes"
+	// is a wire property, not a nicety; the old comment claiming "encoding/json sorts map
+	// keys" died with the v1 engine.
+	raw, err := jsonv2.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := jsonv2.Unmarshal(raw, &m); err != nil {
 		return nil, err
 	}
 	for k, v := range extra {
 		m[k] = v
 	}
-	return json.Marshal(m)
+	return jsonv2.Marshal(m, jsonv2.Deterministic(true))
 }
 
 func (p *openai) newHTTP(ctx context.Context, body []byte) (*http.Request, error) {
