@@ -349,23 +349,39 @@ func TestForkCtxBrokenTravelsBroken(t *testing.T) {
 	}
 	st := replay(t, m, "win")
 	// Fail-open widens the window to the whole path (the summary re-sends everything),
-	// and the boundary that names an id nobody ever had travels as it stands.
-	var c *ir.Entry
-	for _, e := range st.Entries {
-		if e.IsCompaction() {
-			c = e
-		}
-	}
-	if c == nil || c.Compaction == nil {
-		t.Fatalf("no compaction in the copy")
-	}
+	// and the boundary that names an id nobody ever had travels as it stands. The copy
+	// holds two summaries then — k5 broken, and the older k3 that fail-open re-sends as
+	// part of the path — so "the copy's summary" is not whatever the map hands last:
+	// it is the one Effective resolves, and reading it out of map iteration order is
+	// the dice that made this test a coin flip.
 	path := ir.Path(st.Entries, st.Tip)
 	_, active := ir.Effective(st.Entries, path)
-	if active == nil || !active.Compaction.Broken {
+	if active == nil || active.Compaction == nil {
+		t.Fatalf("no compaction in the copy")
+	}
+	if !active.Compaction.Broken {
 		t.Fatalf("the copy's summary does not read broken — the alarm was silenced in transit")
 	}
-	if *c.Compaction.BoundaryID != "deleted" {
-		t.Fatalf("boundary %q was rewritten; a broken summary travels as it stands", *c.Compaction.BoundaryID)
+	if *active.Compaction.BoundaryID != "deleted" {
+		t.Fatalf("boundary %q was rewritten; a broken summary travels as it stands", *active.Compaction.BoundaryID)
+	}
+	// And the summary that is nobody's alarm resolves in the copy: k3's boundary lands
+	// on the copy's own first row, remapped like every other edge.
+	var older *ir.Entry
+	for _, e := range st.Entries {
+		if e.IsCompaction() && e.ID != active.ID {
+			older = e
+		}
+	}
+	if older == nil {
+		t.Fatalf("fail-open did not re-send the replaced summary that the broken one sits on")
+	}
+	if older.Compaction == nil || older.Compaction.BoundaryID == nil || older.Compaction.Broken {
+		t.Fatalf("the replaced summary reads broken too — the copy invented an alarm")
+	}
+	if *older.Compaction.BoundaryID != path[0].ID {
+		t.Fatalf("the replaced summary's boundary %q is not the copy's head %q",
+			*older.Compaction.BoundaryID, path[0].ID)
 	}
 }
 
