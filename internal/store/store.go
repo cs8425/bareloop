@@ -34,6 +34,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -284,7 +285,13 @@ func (l *Log) encodeEntry(e *ir.Entry) (string, []blobRef, error) {
 			refs = append(refs, blobRef{sha: hex.EncodeToString(sum[:]), mime: p.MimeType, size: len(raw), data: raw})
 		}
 	}
-	b, err := json.Marshal(&out)
+	// v2-native on purpose: the compat layer escapes < > & (and U+2028/29 besides) on the
+	// way to disk while native writes what JSON itself requires — 5 bytes per special
+	// character saved in every stored text field, permanently, which in a code-heavy
+	// transcript is most of the log. Deterministic is insurance: ir.Entry carries no map
+	// fields today, and if one grows, rewriteParent's re-marshal must not shuffle bytes.
+	// This is a write-shape change, not a format change — old escaped payloads read on.
+	b, err := jsonv2.Marshal(&out, jsonv2.Deterministic(true))
 	return string(b), refs, err
 }
 
@@ -1061,7 +1068,9 @@ func rewriteParent(payload, parent string) (string, error) {
 		return "", err
 	}
 	e.ParentID = parent
-	b, err := json.Marshal(&e)
+	// v2 like encodeEntry; the rewrite lands in the store's new write shape even when
+	// the payload it read was old — parse-equivalent either way.
+	b, err := jsonv2.Marshal(&e, jsonv2.Deterministic(true))
 	return string(b), err
 }
 

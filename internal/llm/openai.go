@@ -66,9 +66,13 @@ type toolDefJSON struct {
 }
 
 type functionDef struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// omitzero, not omitempty (ToolCall.Args saga, internal/ir): encodeBody only fills a
+	// *missing* schema, so a literal `{}` arrives here as-is — and v2's omitempty reads
+	// `{}` as an empty JSON object and drops the key, deleting the tool's schema from
+	// the wire. A wire contract cannot rest on "MCP schemas are never empty".
+	Parameters json.RawMessage `json:"parameters,omitzero"`
 }
 
 type streamOptions struct {

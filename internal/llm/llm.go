@@ -21,9 +21,10 @@ import (
 
 // Tool is a tool definition sent to the model.
 type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// omitzero not omitempty — a `{}` parameter schema is a schema (see functionDef in openai.go).
+	Parameters json.RawMessage `json:"parameters,omitzero"`
 }
 
 // Request is a chat completion request.

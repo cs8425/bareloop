@@ -35,9 +35,14 @@ type Part struct {
 
 // ToolCall is a tool invocation requested by the model.
 type ToolCall struct {
-	ID     string          `json:"id"`
-	Name   string          `json:"name"`
-	Args   json.RawMessage `json:"arguments,omitempty"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// omitzero, not omitempty: v2's omitempty tests JSON-level emptiness — "a JSON null
+	// or empty JSON string, object, or array" (package docs) — so an arguments of `{}`,
+	// the commonest shape there is, would be dropped from log, export and GET. omitzero
+	// asks the Go value instead (nil omitted, `{}` kept) and both engines agree on it.
+	// The xfer round-trip test is what proved this field could bleed.
+	Args   json.RawMessage `json:"arguments,omitzero"`
 	Server string          `json:"server,omitempty"` // MCP server that owns the tool
 }
 
@@ -162,7 +167,9 @@ type Entry struct {
 	// re-indented, and never mixed into Content. Whether it reaches the model is decided by the
 	// assembler per session and per server (asm.StructuredMode), so changing that decision cannot
 	// rewrite the log — and storing it once keeps a large blob from being written twice.
-	Structured json.RawMessage `json:"structuredContent,omitempty"`
+	// omitzero for the ToolCall.Args reason: a server answering structuredContent `{}` is an
+	// empty document, not no document, and it must survive the store.
+	Structured json.RawMessage `json:"structuredContent,omitzero"`
 
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Model       string `json:"model,omitempty"`

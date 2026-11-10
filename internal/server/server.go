@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -344,7 +345,10 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		if e == nil {
 			continue // deleted between the cut and the read: the page loses a row, not a window
 		}
-		raw, err := json.Marshal(e)
+		// v2-native: the same bytes the store holds and an export writes, so GET, export
+		// and the stored row remain one byte shape — escaping included — which is what the
+		// xfer header's "jq works both" promise is worth when a text field holds < or &.
+		raw, err := jsonv2.Marshal(e, jsonv2.Deterministic(true))
 		if err != nil {
 			// An entry that will not encode is a broken log, not a bad request.
 			writeErr(w, http.StatusInternalServerError, err)

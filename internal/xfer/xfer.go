@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	jsontext "encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -100,9 +102,15 @@ func Encode(w io.Writer, hdr Header, entries []*ir.Entry) error {
 // story in RAM to write it. next answers in file order (parent before child) and
 // io.EOF means the last row has been handed over.
 func EncodeStream(w io.Writer, hdr Header, next func() (*ir.Entry, error)) error {
-	enc := json.NewEncoder(w)
+	// v2-native NDJSON: one top-level value per line — the trailing newline is jsontext's
+	// own top-level habit, the same shape json.NewEncoder.Encode wrote — and no compat
+	// escaping, which is what keeps "re-export equals GET" byte-true now that the store
+	// writes the same shape. Deterministic is not insurance here: the header carries a
+	// Config whose LLM.Headers is a map[string]string, and a re-export that shuffled keys
+	// would move bytes TestReEncodeIsByteIdentical exists to refuse.
+	enc := jsontext.NewEncoder(w)
 	hdr.Harness, hdr.Format = Harness, FormatV1
-	if err := enc.Encode(hdr); err != nil {
+	if err := jsonv2.MarshalEncode(enc, hdr, jsonv2.Deterministic(true)); err != nil {
 		return err
 	}
 	for {
@@ -113,7 +121,7 @@ func EncodeStream(w io.Writer, hdr Header, next func() (*ir.Entry, error)) error
 		if err != nil {
 			return err
 		}
-		if err := enc.Encode(e); err != nil {
+		if err := jsonv2.MarshalEncode(enc, e, jsonv2.Deterministic(true)); err != nil {
 			return err
 		}
 	}
