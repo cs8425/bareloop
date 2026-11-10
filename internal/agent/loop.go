@@ -402,13 +402,15 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 // With BARELOOP_PAYLOAD_DUMP=1 the exact body (messages + tool definitions) is appended as JSON,
 // which is how you check that nothing but the user's own words steers the model — language and
 // script included. The dump is the whole payload, so it is large: set it only when debugging.
+// The line counts, never serialises: the byte column it used to print cost a full
+// json.Marshal of the payload per turn for nothing but a log digit (r106 heap profile: 39GB).
 func (s *Session) logPayload(turn int, built *asm.Built, tools []llm.Tool) {
 	if built.System == "" {
-		s.logf("turn %d: %d messages, NO system prompt (session systemPrompt is empty), %d tools, %d bytes",
-			turn, len(built.Messages), len(tools), built.Bytes())
+		s.logf("turn %d: %d messages, NO system prompt (session systemPrompt is empty), %d tools",
+			turn, len(built.Messages), len(tools))
 	} else {
-		s.logf("turn %d: %d messages + system prompt (%d bytes), %d tools, %d bytes",
-			turn, len(built.Messages), len(built.System), len(tools), built.Bytes())
+		s.logf("turn %d: %d messages + system prompt (%d bytes), %d tools",
+			turn, len(built.Messages), len(built.System), len(tools))
 	}
 	if os.Getenv("BARELOOP_PAYLOAD_DUMP") == "" {
 		return

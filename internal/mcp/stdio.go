@@ -109,7 +109,7 @@ func newStdio(ctx context.Context, cfg StdioConfig) (*stdio, error) {
 		return nil, fmt.Errorf("mcp: start %s: %w", cfg.Command, err)
 	}
 	t.cmd, t.stdin = cmd, stdin
-	t.stdoutR = bufio.NewReaderSize(stdout, 1<<20)
+	t.stdoutR = bufio.NewReaderSize(stdout, 1<<18) // 256 KB initial read; ReadBytes grows for the megabyte JSON lines (r106: 1 MB × server-count was resident)
 	t.stderrR = bufio.NewReaderSize(stderr, 1<<16)
 	go t.readLoop()
 	go t.stderrLoop()

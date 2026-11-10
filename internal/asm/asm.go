@@ -462,16 +462,7 @@ func unsendableAssistant(e *ir.Entry) bool {
 	return true
 }
 
-// Bytes returns the serialised size of the payload (inspector helper column, never a
-// primary token estimate — spec §2.4).
-func (b *Built) Bytes() int {
-	raw, err := json.Marshal(b.All())
-	if err != nil {
-		return 0
-	}
-	return len(raw)
-}
-
+// join is the string joiner of this file.
 func join(xs []string, sep string) string {
 	out := ""
 	for i, x := range xs {

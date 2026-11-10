@@ -1498,7 +1498,6 @@ func (s *Session) Inspect() *Inspection {
 		Summary:     cmp != nil,
 		SystemBytes: len(built.System),
 		System:      built.System,
-		TotalBytes:  built.Bytes(),
 		Synthetic:   built.Synthetic,
 	}
 	if cmp != nil && cmp.Compaction != nil {
@@ -1529,6 +1528,14 @@ func (s *Session) Inspect() *Inspection {
 	}
 	for _, t := range tools {
 		ins.Tools = append(ins.Tools, t.Name)
+	}
+	// TotalBytes is the payload's weight in the log, summed from the size table the payload was
+	// built with — the same entryBytes the row column already shows. It used to be a full
+	// json.Marshal of the payload per inspect for a number no decision reads (r106: 39GB).
+	for _, e := range built.Entries {
+		if sz, ok := sizes.Get(e.ID); ok {
+			ins.TotalBytes += sz.Bytes
+		}
 	}
 	// The plan is computed from the very slice the assembler produced (§4). Select does not know
 	// which trigger would run it, so this is also the cut an automatic compaction makes: what it

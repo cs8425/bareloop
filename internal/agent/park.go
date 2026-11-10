@@ -278,7 +278,7 @@ func (s *Session) answeringLocked() string {
 		if m.Kind != ir.KindAssistant {
 			return ""
 		}
-		found, err := s.log.Contents([]string{id}, true)
+		found, err := s.log.Contents([]string{id}, false) // the question is about calls, never about pictures
 		if err != nil {
 			return ""
 		}
