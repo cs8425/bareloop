@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -469,4 +470,48 @@ func idsOf(path []*ir.Entry) []string {
 		out = append(out, e.ID)
 	}
 	return out
+}
+
+// TestForkLargePathCopiesInOneTransaction sizes the copy for the record: two
+// thousand entries and a 25 KB blob that ten of them name, forked as one commit
+// with every row landing. The transaction's limits are argued where the copy is
+// written (fork.go, "How big can all of it get"); this is the measurement that
+// keeps that argument honest — a fork nobody could defend would first show up
+// here as a slow or failed commit at a size today's largest session stands at.
+func TestForkLargePathCopiesInOneTransaction(t *testing.T) {
+	const n = 2000
+	img := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xAB}, 25<<10))
+	entries := make([]*ir.Entry, 0, n)
+	for i := 1; i <= n; i++ {
+		e := &ir.Entry{
+			ID:      fmt.Sprintf("%07d", i),
+			Kind:    ir.KindUser,
+			Role:    "user",
+			Content: strings.Repeat("x", 2048),
+		}
+		if i > 1 {
+			e.ParentID = fmt.Sprintf("%07d", i-1)
+		}
+		if i%200 == 0 {
+			e.Parts = []ir.Part{{Type: ir.PartImage, MimeType: "image/png", Data: img}}
+		}
+		entries = append(entries, e)
+	}
+	m := NewManager(t.TempDir(), false, Config{}, nil, nil)
+	forkSrc(t, m, "src", entries, fmt.Sprintf("%07d", n))
+
+	_, cnt, err := m.Fork(context.Background(), "src", ForkOptions{ID: "dst"})
+	if err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	if cnt != n {
+		t.Fatalf("copy reported %d entries, want %d", cnt, n)
+	}
+	st := replay(t, m, "dst")
+	if len(st.Entries) != n {
+		t.Fatalf("copy carries %d entries, want %d", len(st.Entries), n)
+	}
+	if st.Tip != fmt.Sprintf("%07d", n) {
+		t.Fatalf("copy tip = %s, want %07d (ids reissue in path order, so the copy's tip is n)", st.Tip, n)
+	}
 }

@@ -573,6 +573,54 @@ func TestBlobSize(t *testing.T) {
 	}
 }
 
+// TestImportTxSpeaksThroughItsOwnTransaction is the fork's pair of primitives: ids
+// are issuable and blobs landable while the import transaction holds the store's
+// lock — where the plain Log methods would deadlock against it — and everything
+// arrives together at Finish, refcount included: the PutBlob-and-name pair charges
+// exactly what AppendEntry charges for one entry, no more.
+func TestImportTxSpeaksThroughItsOwnTransaction(t *testing.T) {
+	l := openTest(t)
+	img := bytes.Repeat([]byte{0x42}, 4096)
+	it, err := l.ImportStream()
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	head := it.NextID()
+	if head != "0000001" {
+		t.Fatalf("NextID = %q, want 0000001", head)
+	}
+	if err := it.PutBlob(shaOfBytes(img), "image/png", img); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	named := imgEntry("look", img)
+	named.ID = head
+	if err := it.Entry(named); err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	tail := it.NextID()
+	second := user("second")
+	second.ID = tail
+	second.ParentID = head
+	if err := it.Entry(second); err != nil {
+		t.Fatalf("Entry second: %v", err)
+	}
+	if err := it.Finish(tail); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	st := replayAll(t, l)
+	if len(st.Entries) != 2 || st.Tip != tail {
+		t.Fatalf("committed copy = %d entries, tip %s; want 2, tip %s", len(st.Entries), st.Tip, tail)
+	}
+	if b, _, found, err := l.BlobBytes(shaOfBytes(img)); err != nil || !found || !bytes.Equal(b, img) {
+		t.Fatalf("blob after commit = %d bytes, found %v, err %v; want %d,true,nil", len(b), found, err, len(img))
+	}
+	var refcount int
+	l.db.QueryRow("SELECT refcount FROM blob WHERE sha256 = ?", shaOfBytes(img)).Scan(&refcount)
+	if refcount != 1 {
+		t.Fatalf("refcount = %d, want 1: the naming row charges it inside the same transaction", refcount)
+	}
+}
+
 func TestDeleteReparentsAndRewritesPayload(t *testing.T) {
 	l := openTest(t)
 	root := user("root")

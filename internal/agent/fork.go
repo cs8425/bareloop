@@ -52,9 +52,12 @@ import (
 // needs the source's whole tree in RAM, and nothing here would be legal with the store's
 // one-connection rule if it tried: every read is a self-contained statement.
 //
-// The copy writes through the store handle, not through Session.appendEntry: appendEntry
-// is a conversation move — it advances the tip and publishes — and a fork is a transcript
-// being born, not a turn being taken. The new session is unloaded before Fork returns, so
+// The copy writes through the store's own import transaction, not through
+// Session.appendEntry: appendEntry is a conversation move — it advances the tip and
+// publishes — and a fork is a transcript being born, not a turn being taken. The
+// transaction adds the promise the row-by-row handle never made: rows, blobs and tip
+// commit together or not at all, so no half copy outlives its failure. The new
+// session is unloaded before Fork returns, so
 // the next Get replays what was written rather than trusting an in-memory snapshot of an
 // empty store.
 
@@ -137,20 +140,47 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 	if err != nil {
 		return "", 0, err
 	}
+	srcLog, log := src.Log(), dst.Log()
+	// The copy runs as one living transaction, which is what makes "how much of
+	// it landed" a settled fact instead of a forensics question: rows, blobs and
+	// the tip appear together or not at all, and anything short of Finish is
+	// undone by Abort plus the half-copy removal below.
+	//
+	// How big can "all of it" get, and what bites first in one transaction?
+	// Nothing that scales with the row count: each row's INSERT binds six
+	// parameters however many rows the copy writes — SQLite's variable limit is
+	// 32,766 since 3.32, and because per-row statements are never concatenated,
+	// the statement text never grows either; the per-string/blob ceiling
+	// (about 1 GB) is a single blob's problem, not the transaction's; and the
+	// uncommitted pages live in SQLite's own page cache, spilling to its temp
+	// store, not onto this process's heap. What the copy does grow is the WAL,
+	// up to the checkpoint, and one final commit. In short the ceiling is the
+	// disk, not the engine — and the largest fork anyone has run (a thousand-
+	// entry session with images) sits orders of magnitude under all of it.
+	// The source's own store is read through its own handle (a different Log,
+	// a different lock), so streaming interleaves freely with the transaction.
+	it, err := log.ImportStream()
+	if err != nil {
+		return "", 0, fmt.Errorf("agent: fork %q: opening the copy transaction: %w", o.ID, err)
+	}
 	written := 0
-	// Anything short of a finished copy leaves a directory that lists as a session: the
-	// half copy is not a fork anyone could defend, so the failed attempt is undone here,
-	// in the one place that knows how much it made.
+	// Anything short of a committed copy leaves a directory that lists as a
+	// session: the half copy is not a fork anyone could defend, so the failed
+	// attempt is undone here, in the one place that knows how much it made —
+	// the transaction first (its handle is open on that directory), then the
+	// directory itself.
+	committed := false
 	defer func() {
-		if written == len(ids) {
+		if committed {
 			return
 		}
-		if err := m.Remove(o.ID); err != nil {
-			m.logf("fork %q: could not undo the failed copy (%d entries in): %v", o.ID, written, err)
+		if aerr := it.Abort(); aerr != nil {
+			m.logf("fork %q: could not roll back the copy transaction: %v", o.ID, aerr)
+		}
+		if rerr := m.Remove(o.ID); rerr != nil {
+			m.logf("fork %q: could not undo the failed copy (%d entries in): %v", o.ID, written, rerr)
 		}
 	}()
-
-	srcLog, log := src.Log(), dst.Log()
 	mapped := make(map[string]string, len(ids))
 	copied := make(map[string]bool)
 	for _, id := range ids {
@@ -170,7 +200,7 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 			e = rw(written, e)
 		}
 		ne := *e
-		nid := log.NextID()
+		nid := it.NextID()
 		mapped[e.ID] = nid
 		ne.ID = nid
 		if ne.ParentID != "" {
@@ -202,25 +232,29 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 			if !found {
 				return "", 0, fmt.Errorf("agent: fork %q: entry %s names blob %s, which is not in the source store", o.ID, id, sha)
 			}
-			if err := log.PutBlob(sha, mime, b); err != nil {
+			if err := it.PutBlob(sha, mime, b); err != nil {
 				return "", 0, fmt.Errorf("agent: fork %q: putting blob %s: %w", o.ID, sha, err)
 			}
 			copied[sha] = true
 		}
-		if err := log.AppendEntry(&ne, false); err != nil {
+		if err := it.Entry(&ne); err != nil {
 			return "", 0, fmt.Errorf("agent: fork %q: %w", o.ID, err)
 		}
 		written++
 	}
-	if tipSrc != "" {
-		if err := log.SetTip(mapped[tipSrc]); err != nil {
-			return "", 0, fmt.Errorf("agent: fork %q: setting the tip: %w", o.ID, err)
-		}
+	// Finish commits the tip with the rows and answers two questions the manual
+	// path never asked: the tip stands among the copied rows, and every parent
+	// the copy carries was copied. (A source whose tip nobody could read — the
+	// full shape's rare stumble — gets the last row copied as tip, which is
+	// where the log's own replay would stand the session anyway.)
+	if err := it.Finish(mapped[tipSrc]); err != nil {
+		return "", 0, fmt.Errorf("agent: fork %q: committing the copy: %w", o.ID, err)
 	}
+	committed = true
 	// The opened session still carries its empty snapshot; drop it so the next reader
 	// replays the copy from disk.
 	if _, err := m.Unload(o.ID); err != nil {
 		return "", 0, err
 	}
-	return o.ID, len(ids), nil
+	return o.ID, written, nil
 }

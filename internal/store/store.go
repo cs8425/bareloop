@@ -821,6 +821,26 @@ func (t *ImportTx) Entry(e *ir.Entry) error {
 	return nil
 }
 
+// NextID issues a fresh id inside the living transaction — what a fork hands its
+// rows as it copies them. The plain Log.NextID would deadlock where this is needed:
+// the transaction holds the store's lock for its whole life, and the copy must be
+// able to name rows inside the transaction that owns the store.
+func (t *ImportTx) NextID() string {
+	t.l.seq++
+	return fmt.Sprintf("%07d", t.l.seq)
+}
+
+// PutBlob lands one blob's bytes inside the living transaction — the fork's half
+// of the table-to-table move. It makes Log.PutBlob's promises unchanged (an sha
+// already here is ignored; the count is raised later by the payload that names
+// it), with one more: the bytes commit in the same transaction as the rows that
+// reference them, so no reader can ever see a reference whose bytes are missing.
+func (t *ImportTx) PutBlob(sha, mime string, b []byte) error {
+	_, err := t.tx.Exec(`INSERT INTO blob(sha256, mime, size, refcount, bytes) VALUES(?, ?, ?, 0, ?)
+		ON CONFLICT(sha256) DO NOTHING`, sha, mime, len(b), b)
+	return err
+}
+
 // Finish asks the two whole-file questions over the rows as written and commits.
 // An empty tip stands on the last row, the way the format has always meant it.
 func (t *ImportTx) Finish(tip string) error {
