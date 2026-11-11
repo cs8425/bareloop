@@ -249,21 +249,23 @@
             <input name="priceOutput" type="number" min="0" step="any" placeholder="per 1M tokens"
               title="what one million generated tokens cost." />
           </label>
-          <label title="the share of n_ctx above which automatic compaction fires — and, because the summary cap and the kept tail add up to it, the ceiling on what is left afterwards. A cap set at or above this number leaves the tail nothing at all.">compact above %
+          <label title="the share of n_ctx above which automatic compaction fires. It no longer decides what is left afterwards: the kept tail has its own budget below, and the summary its own cap.">compact above %
             <input name="threshold" type="number" min="1" max="100" /></label>
-          <label title="the ceiling on the summary itself: longer is retried, and after max attempts the session is asked what to do. The messages kept after the summary get (trigger − cap)% of the window — and 0 is a number that means something: a compaction then keeps head plus summary and nothing else, unless min kept messages floors the tail and makes the budget pay for the newest messages.">summary cap %
+          <label title="the ceiling on the summary itself: longer is retried, and after max attempts the session is asked what to do. It says nothing about the tail — that is the kept budget's answer.">summary cap %
             <input name="keepTarget" type="number" min="1" max="99" /></label>
+          <label title="the share of n_ctx the kept tail gets after a compaction — set apart from the summary cap on purpose, because how short the summariser must write and how much raw history you keep are two questions. 0 is a number that means something: a compaction then keeps head plus summary and nothing else, unless min kept messages floors the tail and makes the budget pay for the newest messages.">kept budget %
+            <input name="keepBudget" type="number" min="0" max="99" /></label>
           <label title="max_tokens of the summary request itself, as a share of n_ctx: how much the summariser may write, not what it may leave behind">max_tokens %
             <input name="summaryMax" type="number" min="1" max="99" /></label>
           <label title="how many times the summary is asked again when it comes back over the cap; after that the session is asked whether to accept, retry, or keep the full history">summary attempts
             <input name="maxAttempts" type="number" min="1" max="9" /></label>
-          <!-- This one is the floor under the tail above it: with a summary cap at or above the trigger the kept
-               tail is 0 tokens, and this number then decides how many raw messages stay behind anyway — a floor is
+          <!-- This one is the floor under the tail above it: with the kept budget at 0 the tail is 0 tokens, and
+               this number then decides how many raw messages stay behind anyway — a floor is
                what the tail is made of when it disagrees with the budget, so raising it changes the size of the
                tail, never whether compaction runs. It is not a percentage, and 0 is its default (compact everything
                allowed), which is why the arithmetic line has to read it to say anything true.
           -->
-          <label title="how many raw messages a compaction has to leave behind, whatever the tail budget says: the tail is the greater of the budget and the newest N messages, rounded outwards so the cut stays legal (that can keep more than N, never fewer). 0 — the default — says it may keep nothing but the summary (head + summary), which is what a summary cap at or above the trigger asks for. What a floor costs in tokens is in inspect, not here.">min kept messages
+          <label title="how many raw messages a compaction has to leave behind, whatever the tail budget says: the tail is the greater of the budget and the newest N messages, rounded outwards so the cut stays legal (that can keep more than N, never fewer). 0 — the default — says it may keep nothing but the summary (head + summary), which is what a kept budget of 0 asks for. What a floor costs in tokens is in inspect, not here.">min kept messages
             <input name="minKeptMessages" type="number" min="0" max="99" /></label>
           <!-- The two parameters that refuse a compaction rather than size one, which is why this dialog was
                built without them: neither changes the arithmetic line below. One constrains where a cut may land,

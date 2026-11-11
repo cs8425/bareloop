@@ -26,7 +26,7 @@ func TestBudgetSummaryCapTriggerLevelArePercentagesOfNCtx(t *testing.T) {
 			t.Errorf("%s: SummaryCap(%d) = %d, want %d", c.what, c.nctx, got, c.cap)
 		}
 		if got := p.Budget(c.nctx); got != c.budget {
-			t.Errorf("%s: Budget(%d) = %d, want %d (threshold - keepTarget)", c.what, c.nctx, got, c.budget)
+			t.Errorf("%s: Budget(%d) = %d, want %d (keepBudget, defaulted)", c.what, c.nctx, got, c.budget)
 		}
 		if got := p.SummaryMaxTokens(c.nctx); got != c.mx {
 			t.Errorf("%s: SummaryMaxTokens(%d) = %d, want %d", c.what, c.nctx, got, c.mx)
@@ -34,14 +34,22 @@ func TestBudgetSummaryCapTriggerLevelArePercentagesOfNCtx(t *testing.T) {
 	}
 }
 
-// TestBudgetIsTheDifferenceNotAReservation locks spec §2.1: the budget is exactly
-// (threshold - keepTarget)% of the window. Adding a hidden reservation on top makes the observed
-// kept size stop matching what the user set, which is how this feature becomes un-debuggable.
-func TestBudgetIsTheDifferenceNotAReservation(t *testing.T) {
-	if got := (Params{ThresholdPct: 70, KeepTargetPct: 20}).Budget(40960); got != 20480 {
-		t.Fatalf("70/20 budget = %d, want 20480", got)
+// TestBudgetIsKeepBudgetNotADerivation locks the decoupled §2.1: the tail's budget is keepBudget%
+// of the window, the user's own number. It used to be (threshold − keepTarget), which meant
+// tightening the summary's acceptance cap silently resized the tail — the two settings answer
+// different questions and the test pins that they no longer share arithmetic.
+func TestBudgetIsKeepBudgetNotADerivation(t *testing.T) {
+	if got := (Params{ThresholdPct: 70, KeepTargetPct: 20}).Budget(40960); got != 8192 {
+		t.Fatalf("an absent keepBudget must land on the default 20%%, got %d", got)
 	}
-	if got := (Params{ThresholdPct: 70, KeepTargetPct: 20}).SummaryCap(40960); got != 8192 {
+	// Same threshold, same keepTarget, different keepBudget: only the budget moves.
+	a := Params{ThresholdPct: 70, KeepTargetPct: 20, KeepBudgetPct: intp(30)}
+	b := Params{ThresholdPct: 70, KeepTargetPct: 20, KeepBudgetPct: intp(10)}
+	if a.Budget(40960) != 12288 || b.Budget(40960) != 4096 {
+		t.Fatalf("keepBudget must set the budget: %d %d", a.Budget(40960), b.Budget(40960))
+	}
+	// And the summary cap keeps answering only to keepTarget.
+	if got := (Params{ThresholdPct: 70, KeepTargetPct: 20, KeepBudgetPct: intp(30)}).SummaryCap(40960); got != 8192 {
 		t.Fatalf("70/20 summary cap = %d, want 8192", got)
 	}
 	if got := (Params{ThresholdPct: 3, KeepTargetPct: 1}).TriggerLevel(40960); got != 1228 {
@@ -49,14 +57,23 @@ func TestBudgetIsTheDifferenceNotAReservation(t *testing.T) {
 	}
 }
 
-// TestThresholdNotAboveKeepTargetBudgetsZero pins the arithmetic of a configuration the settings
-// dialog lets a user reach. A zero budget does NOT mean "never compact": it means the only cut
-// that fits replaces every recorded message (spec §2.1), and select_test.go pins what stops it.
-func TestThresholdNotAboveKeepTargetBudgetsZero(t *testing.T) {
-	for _, p := range []Params{{ThresholdPct: 50, KeepTargetPct: 50}, {ThresholdPct: 40, KeepTargetPct: 50}} {
+// TestKeepBudgetZeroIsTheAnswerNotABrokenValue pins the pointer semantics: an explicit 0 asks for
+// the compact-everything tail (head + summary only) and survives Normalise, while a negative —
+// which no configuration means — clamps to the same 0. A zero budget does NOT mean "never
+// compact": it means the only cut that fits replaces every recorded message (spec §2.1), and
+// select_test.go pins what stops it.
+func TestKeepBudgetZeroIsTheAnswerNotABrokenValue(t *testing.T) {
+	for _, v := range []*int{intp(0), intp(-5)} {
+		p := Params{ThresholdPct: 70, KeepTargetPct: 50, KeepBudgetPct: v}
 		if got := p.Budget(40960); got != 0 {
-			t.Errorf("threshold %d <= keepTarget %d: budget = %d, want 0", p.ThresholdPct, p.KeepTargetPct, got)
+			t.Errorf("keepBudget %d: budget = %d, want 0", *v, got)
 		}
+		if got := *p.Normalise().KeepBudgetPct; got != 0 {
+			t.Errorf("keepBudget %d must survive Normalise as 0, got %d", *v, got)
+		}
+	}
+	if got := *(Params{ThresholdPct: 70, KeepTargetPct: 50}).Normalise().KeepBudgetPct; got != 20 {
+		t.Fatalf("an absent keepBudget must normalise to the default 20, got %d", got)
 	}
 }
 
@@ -126,7 +143,7 @@ func TestDefaultsMatchTheDocumentedTable(t *testing.T) {
 		t.Fatal("spec §1.1: in-loop compaction is on by default")
 	}
 	if d.ThresholdPct != 70 || d.KeepTargetPct != 50 || d.MinKeptUserTurns != 4 || d.MinSummarizeTokens != 2000 ||
-		d.SummaryMaxPct != 70 || d.MaxAttempts != 3 {
+		d.SummaryMaxPct != 70 || d.MaxAttempts != 3 || d.KeepBudgetPct == nil || *d.KeepBudgetPct != 20 {
 		t.Fatalf("defaults drifted: %+v", d)
 	}
 	if d.Marker != DefaultMarker || DefaultMarker == "" {
@@ -149,15 +166,16 @@ func TestNormaliseFillsBlanksAndKeepsChoices(t *testing.T) {
 	if n.MinKeptMessages != 0 {
 		t.Fatalf("minKeptMessages default must stay 0 (compact everything allowed), got %d", n.MinKeptMessages)
 	}
-	// why its own case: the two floors are the only fields where 0 is a real answer, so a negative has to
-	// land on 0 — landing on the default would enforce a floor the config never asked for.
-	neg := Params{MinKeptUserTurns: -3, MinKeptMessages: -3}.Normalise()
-	if neg.MinKeptUserTurns != 0 || neg.MinKeptMessages != 0 {
-		t.Fatalf("negative floors must clamp to 0 (no floor), got %+v", neg)
+	// why its own case: the two floors and keepBudget are the only fields where 0 is a real answer, so a
+	// negative has to land on 0 — landing on the default would enforce an answer the config never asked for.
+	neg := Params{MinKeptUserTurns: -3, MinKeptMessages: -3, KeepBudgetPct: intp(-3)}.Normalise()
+	if neg.MinKeptUserTurns != 0 || neg.MinKeptMessages != 0 || *neg.KeepBudgetPct != 0 {
+		t.Fatalf("negative floors and keepBudget must clamp to 0, got %+v", neg)
 	}
-	kept := Params{ThresholdPct: 90, KeepTargetPct: 10, MinKeptUserTurns: 0, MinKeptMessages: 6,
+	kept := Params{ThresholdPct: 90, KeepTargetPct: 10, KeepBudgetPct: intp(33), MinKeptUserTurns: 0, MinKeptMessages: 6,
 		MinSummarizeTokens: 1, SummaryMaxPct: 30, MaxAttempts: 1, SummaryMode: ModeTranscript, Marker: "X"}.Normalise()
-	if kept.ThresholdPct != 90 || kept.KeepTargetPct != 10 || kept.MinKeptMessages != 6 || kept.MinSummarizeTokens != 1 ||
+	if kept.ThresholdPct != 90 || kept.KeepTargetPct != 10 || kept.KeepBudgetPct == nil || *kept.KeepBudgetPct != 33 ||
+		kept.MinKeptMessages != 6 || kept.MinSummarizeTokens != 1 ||
 		kept.SummaryMaxPct != 30 || kept.MaxAttempts != 1 || kept.SummaryMode != ModeTranscript || kept.Marker != "X" {
 		t.Fatalf("explicit values were overwritten: %+v", kept)
 	}

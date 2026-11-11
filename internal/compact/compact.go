@@ -47,10 +47,20 @@ type Params struct {
 	Mode string `json:"mode"`
 	// SummaryMode selects the summary request shape (§3.1).
 	SummaryMode string `json:"summaryMode"`
-	// ThresholdPct is the trigger point and the cap on the total size after compaction.
+	// ThresholdPct is the trigger point: real context usage above it asks for a compaction.
+	// (It used to double as the ceiling on what a compaction leaves behind, because the kept
+	// tail was this minus keepTarget; the tail now sizes itself by KeepBudgetPct, and each
+	// percentage answers exactly one question.)
 	ThresholdPct int `json:"threshold"`
 	// KeepTargetPct is the cap on the summary itself (acceptance check).
 	KeepTargetPct int `json:"keepTarget"`
+	// KeepBudgetPct is the cap on the kept tail as a share of n_ctx. It stands apart from
+	// keepTarget on purpose: how short the summariser must write and how much raw history the
+	// session keeps are two questions, and while the tail was (threshold − keepTarget) moving
+	// one moved the other. 0 is a real answer (a compaction then keeps head + summary and
+	// nothing else, unless minKeptMessages floors the tail), which is why this is a pointer:
+	// absent means the default, an explicit 0 means the answer nobody should have to spell out.
+	KeepBudgetPct *int `json:"keepBudget,omitempty"`
 	// MinKeptUserTurns is a floor on boundary cuts (phase 1) and MinKeptMessages is a floor on the
 	// kept tail itself, raising the cap when the two contradict each other (§2.1). Both mean "no floor"
 	// at 0 and clamp negatives to 0 (see Normalise); the fresh-session default of 4 turns belongs to
@@ -73,6 +83,13 @@ type Params struct {
 	SplitInstruction string `json:"splitInstruction"`
 }
 
+// defaultKeepBudgetPct is the kept tail's share of the window when the config says nothing —
+// the number the tied design used to compute as 70 − 50, kept so an untuned config behaves
+// exactly as it did before the two halves were set apart.
+const defaultKeepBudgetPct = 20
+
+func intp(v int) *int { return &v }
+
 // DefaultParams returns the documented defaults (§7): auto compaction off, in-loop compaction
 // on (InLoop stays nil, which means "on unless explicitly disabled").
 func DefaultParams() Params {
@@ -82,6 +99,7 @@ func DefaultParams() Params {
 		SummaryMode:        ModePrefixStable,
 		ThresholdPct:       70,
 		KeepTargetPct:      50,
+		KeepBudgetPct:      intp(defaultKeepBudgetPct),
 		MinKeptUserTurns:   4,
 		MinKeptMessages:    0,
 		MinSummarizeTokens: 2000,
@@ -98,8 +116,9 @@ func (p Params) UseInLoop() bool { return p.InLoop == nil || *p.InLoop }
 // Normalise fills in blanks and clamps nonsense, by one rule with two halves. A field whose 0 would
 // be destructive (threshold, keepTarget, summaryMax, minSummarizeTokens) or is not a real answer
 // (maxAttempts) falls back to its default at 0 and below. A field whose 0 IS the answer — the two
-// floors minKeptUserTurns and minKeptMessages — keeps 0 as "no floor" and clamps only negatives to
-// it, because promoting a negative to the shipped default would enforce a floor nobody asked for.
+// floors minKeptUserTurns and minKeptMessages, and the keepBudget percentage — keeps 0 as its
+// meaning ("no floor", "keep nothing but the summary") and clamps only negatives to
+// it, because promoting a negative to the shipped default would enforce an answer nobody asked for.
 // The one documented exception is maxAttempts, where a negative means "retry forever" and survives.
 func (p Params) Normalise() Params {
 	d := DefaultParams()
@@ -109,6 +128,17 @@ func (p Params) Normalise() Params {
 	if p.KeepTargetPct <= 0 {
 		p.KeepTargetPct = d.KeepTargetPct
 	}
+	// keepBudget follows the floor rule, not the percentage rule: 0 is an answer (keep nothing
+	// but the summary), so only "no answer at all" — absent, or a negative — falls back, and it
+	// falls back to the default difference the tied design used to compute.
+	kb := *d.KeepBudgetPct
+	if p.KeepBudgetPct != nil {
+		kb = *p.KeepBudgetPct
+		if kb < 0 {
+			kb = 0
+		}
+	}
+	p.KeepBudgetPct = &kb
 	if p.MinKeptUserTurns < 0 {
 		p.MinKeptUserTurns = 0
 	}
@@ -142,9 +172,10 @@ func (p Params) Normalise() Params {
 	return p
 }
 
-// Budget is the cap on the kept suffix: (threshold% − keepTarget%) × n_ctx (§2.1). The
-// budget is the difference of two numbers the user understands — no extra "clever
-// reservation" on top.
+// Budget is the cap on the kept suffix: keepBudget% × n_ctx (§2.1). The number is the user's
+// own and no one else's — the summary's acceptance cap (keepTarget) and the tail's budget are
+// two settings answering two questions, and the tail stopped shrinking every time someone
+// tightened the summariser.
 //
 // 0 is a legal value, not a broken one: it asks for every recorded message to be replaced by the
 // summary, and only the brake parameters hold that back (§2.1).
@@ -152,14 +183,17 @@ func (p Params) Budget(nctx int) int {
 	if nctx <= 0 {
 		return 0
 	}
-	d := p.ThresholdPct - p.KeepTargetPct
-	if d <= 0 {
-		// why clamp to 0 instead of passing the difference through: Select compares the kept suffix
+	pct := defaultKeepBudgetPct
+	if p.KeepBudgetPct != nil {
+		pct = *p.KeepBudgetPct
+	}
+	if pct <= 0 {
+		// why clamp to 0 instead of passing the number through: Select compares the kept suffix
 		// against the budget, so a negative budget would reject even an empty tail and turn "compact
 		// everything" — a legal configuration (§2.1) — back into "never compact".
 		return 0
 	}
-	return nctx * d / 100
+	return nctx * pct / 100
 }
 
 // SummaryCap is the acceptance limit for the summary itself: keepTarget% × n_ctx.
@@ -287,9 +321,10 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 	}
 
 	// budget caps the kept tail while MinKeptMessages floors it, and the two can contradict each other:
-	// threshold ≤ keepTarget sets the cap to 0 while the floor says "keep N raw messages". The floor
-	// wins, and only outward — allowed is raised to the cost of the deepest legal cut that still leaves
-	// N entries, never lowered, because a floor can only ever demand more (§2.1). Every entry is at
+	// threshold ≤ keepTarget used to set the cap to 0 while the floor said "keep N raw messages"; keepBudget 0
+	// now says the same thing directly. The floor wins, and only outward — allowed is raised to the cost of the
+	// deepest legal cut that still leaves N entries, never lowered, because a floor can only ever demand more
+	// (§2.1). Every entry is at
 	// least one token, so suffix[] is strictly decreasing and the search below lands exactly on that
 	// cut: no shallower tail fits the raised cap and no deeper one survives the floor.
 	//

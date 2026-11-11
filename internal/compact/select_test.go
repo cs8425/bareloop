@@ -1,7 +1,7 @@
 package compact
 
-// The kept tail is max(budget, the newest MinKeptMessages) — spec §2.1. budget comes from
-// threshold − keepTarget and MinKeptMessages is a floor, so the two can demand opposite things from
+// The kept tail is max(budget, the newest MinKeptMessages) — spec §2.1. budget is keepBudget%
+// of the window and MinKeptMessages is a floor, so the two can demand opposite things from
 // the same tail, and these cases pin who wins: the floor, rounded outward to a legal boundary, with
 // the plan still reporting the budget it exceeded.
 //
@@ -92,8 +92,15 @@ func TestSelectTailIsTheGreaterOfCapAndFloor(t *testing.T) {
 		// Where the floor cut is not a legal boundary it moves outward — selToolPath covers that below.
 	}
 	for _, c := range cases {
+		// The rows were written while the tail's budget was (threshold − keepTarget); keepBudget now
+		// owns that number, so each row injects its own former difference and pins the geometry the
+		// decoupling is supposed to leave alone.
+		kb := c.threshold - c.keepTarget
+		if kb < 0 {
+			kb = 0
+		}
 		p := Params{
-			ThresholdPct: c.threshold, KeepTargetPct: c.keepTarget,
+			ThresholdPct: c.threshold, KeepTargetPct: c.keepTarget, KeepBudgetPct: intp(kb),
 			MinSummarizeTokens: c.minSummarize, MinKeptUserTurns: c.minUserTurns,
 			MinKeptMessages: c.minKeptMsgs,
 		}
@@ -146,7 +153,7 @@ func TestSelectTailIsTheGreaterOfCapAndFloor(t *testing.T) {
 // a legal boundary: it must move outward (keeping more than N) or refuse — moving inward would keep
 // fewer than the floor asked for, and inventing a boundary inside a tool span is not on the table.
 func TestSelectFloorCutsAroundToolSpans(t *testing.T) {
-	p := Params{ThresholdPct: 50, KeepTargetPct: 50, MinSummarizeTokens: 50, MinKeptMessages: 3}
+	p := Params{ThresholdPct: 50, KeepTargetPct: 50, KeepBudgetPct: intp(0), MinSummarizeTokens: 50, MinKeptMessages: 3}
 
 	// [user user tool user user]: keeping 3 would cut before a tool result, so 4 stay.
 	path := selToolPath()

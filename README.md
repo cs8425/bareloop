@@ -242,6 +242,7 @@ default:
 | `compact.summaryMode` | absent = `prefix-stable` (one summary request; falls back to the serial chain when the region cannot fit one request) | `"iterative"` always uses the chain; `"map-reduce"` is reserved and currently runs the chain |
 | `compact.threshold` `keepTarget` `summaryMax` `minSummarizeTokens` | `0`, negative or absent = the default (70 / 50 / 70 / 2000) — 0 here would be a budget of nothing, which is not an answer anyone means | `> 0`: percentages of `n_ctx`, and a token count for `minSummarizeTokens` |
 | `compact.minKeptUserTurns` `minKeptMessages` | **`0` is a real answer = no floor**, and an omitted key decodes to that 0 — so the 4 that a *new* session starts with is not reachable by leaving the key out | `> 0` is the floor; a negative clamps to 0, never to the shipped default |
+| `compact.keepBudget` | absent = 20 (the tail's share of `n_ctx` — set apart from `keepTarget` so tightening the summary no longer resizes the tail); **an explicit `0` is a real answer = keep nothing but the summary**, the same floor rule as the two above | `> 0`: the percentage of `n_ctx` the kept tail may occupy; a negative clamps to 0 |
 | `compact.maxAttempts` | `0` or absent = 3 tries for one summary | `> 0` tries; **a negative keeps trying until the summary fits** |
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
 | `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
@@ -594,7 +595,7 @@ handful of tokens.
 ### Compaction, in short
 
 A turn is folded away when `contextUsed > n_ctx × threshold%`: everything before the earliest boundary
-that fits `(threshold% - keepTarget%)` of the window becomes one summary message. The kept tail is that
+that fits `keepBudget%` of the window becomes one summary message. The kept tail is that
 budget or the newest `minKeptMessages` messages, whichever is greater, rounded outward so the cut never
 lands inside a tool span, and `minKeptUserTurns` — how many whole user turns it should prefer to hold —
 is held when a boundary can hold it and given up by moving the cut inside a turn when none can. The old

@@ -49,6 +49,7 @@
       "summaryMode": "prefix-stable",
       "threshold": 70,
       "keepTarget": 50,
+      "keepBudget": 20,
       "minKeptUserTurns": 4,
       "minKeptMessages": 0,
       "minSummarizeTokens": 2000,

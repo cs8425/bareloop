@@ -69,6 +69,9 @@ export async function openSettings() {
   fld(f, 'nCtx').value = cfg.llm?.nCtx || '';
   fld(f, 'threshold').value = cfg.compact?.threshold ?? 70;
   fld(f, 'keepTarget').value = cfg.compact?.keepTarget ?? 50;
+  // The server normalises an absent keepBudget to 20 on every read, so this field arrives filled; the ?? 20
+  // only covers a config written before the field existed. 0 is a real value (compact-everything tail).
+  fld(f, 'keepBudget').value = cfg.compact?.keepBudget ?? 20;
   fld(f, 'summaryMax').value = cfg.compact?.summaryMax ?? 70;
   fld(f, 'maxAttempts').value = cfg.compact?.maxAttempts ?? 3;
   // 0 is what the server runs on when the key is absent (DefaultParams/Normalise), so showing 0 for a session
@@ -152,7 +155,8 @@ const pct = (nctx, p) => Math.trunc((nctx * p) / 100);
 // The formulas and both failure sentences are the server's (TriggerLevel, SummaryCap, Budget, ReasonNCTXUnknown,
 // ReasonNoBoundary), re-derived here so the answer is there while the fields are still being edited.
 //
-// The coercion is saveSettings' own (|| 70, || 50, || 0): an empty box is stored as the default, so the line
+// The coercion is saveSettings' own (|| 70, || 50, || 0) — except keepBudget, whose 0 is an answer and
+// therefore reads through a trim check instead of ||. An empty box is stored as the default, so the line
 // previews what pressing save does instead of the empty field. It is written a second time rather than
 // extracted because the PATCH body reads better with each default beside its own field, and the two places
 // are ten lines apart.
@@ -164,6 +168,10 @@ function compactMath(f) {
   const nctx = Number(fld(f, 'nCtx').value) || 0;
   const trigger = Number(fld(f, 'threshold').value) || 70;
   const cap = Number(fld(f, 'keepTarget').value) || 50;
+  // keepBudget reads differently from every number above: its 0 is the compact-everything tail, so an
+  // explicit 0 must preview as 0 while an empty box still means "the default the save will store".
+  const kbRaw = fld(f, 'keepBudget').value.trim();
+  const kb = kbRaw === '' ? 20 : (Number(kbRaw) || 0);
   // minKeptMessages is the floor under the tail, so the line cannot be written without it: with 0 the tail is
   // whatever the budget leaves, with N the tail is at least the newest N raw messages. Same coercion as
   // saveSettings.
@@ -177,7 +185,7 @@ function compactMath(f) {
     out.textContent = 'n_ctx 0 asks the server for the window: until it answers there is no budget and nothing compacts, manual included';
     return;
   }
-  const tail = trigger > cap ? pct(nctx, trigger - cap) : 0;
+  const tail = pct(nctx, kb);
   // why: a tail of 0 tokens is a legal answer, not a broken configuration, and the server makes the same cut for
   // every trigger (compact.Select has no manual argument any more). With nothing left to keep, the cut that fits
   // is "after the last entry" — head + summary and nothing else — unless minKeptMessages floors the tail, in
@@ -189,7 +197,7 @@ function compactMath(f) {
   // pretending to compute it.
   if (tail === 0) {
     out.textContent =
-      `trigger ${trigger}% is not above the summary cap ${cap}%: the tail budget is 0, so ` +
+      `kept budget ${kb}% leaves the tail nothing: ` +
       (kept > 0
         ? `min kept messages ${kept} decides the tail — the newest ${kept} raw messages stay whatever they cost (inspect shows the number) and everything older is summarised. `
         : 'a compaction keeps head + summary only. ') +
@@ -198,7 +206,7 @@ function compactMath(f) {
   }
   out.textContent =
     `fires above ${tok(pct(nctx, trigger))} tokens · the summary must fit ${tok(pct(nctx, cap))} · ` +
-    `the tail you keep gets ${tok(tail)} (${trigger}% − ${cap}% of n_ctx ${tok(nctx)})` +
+    `the tail you keep gets ${tok(tail)} (${kb}% of n_ctx ${tok(nctx)})` +
     // why "gets" becomes "at least": the floor is in messages and the browser has no per-message sizes, so the
     // percentage is a lower bound the moment a floor exists — stating it as exact would be inventing a number.
     (kept > 0 ? `, never fewer than the newest ${kept} raw messages` : '');
@@ -232,6 +240,9 @@ export async function saveSettings() {
       inLoop: fld(f, 'inLoop').checked,
       threshold: Number(fld(f, 'threshold').value) || 70,
       keepTarget: Number(fld(f, 'keepTarget').value) || 50,
+      // 0 is an answer here too (the compact-everything tail), so unlike the `||` coercions above an empty box
+      // falls back to the default while a typed 0 travels — quietly storing 20 would veto the veto.
+      keepBudget: fld(f, 'keepBudget').value.trim() === '' ? 20 : Number(fld(f, 'keepBudget').value),
       summaryMax: Number(fld(f, 'summaryMax').value) || 70,
       maxAttempts: Number(fld(f, 'maxAttempts').value) || 3,
       // `|| 0`, not a safer default: an empty box has to land on 0 (empty kept allowed, the server's own
@@ -418,7 +429,7 @@ export function wireSettings() {
   // The arithmetic line has to answer while the fields are being edited, so it hangs off every field that sets
   // it — and off `input` rather than `change`, because "4096" typed one digit at a time is worth reading as
   // 4096 before the field is ever blurred.
-  for (const name of ['nCtx', 'threshold', 'keepTarget', 'minKeptMessages']) {
+  for (const name of ['nCtx', 'threshold', 'keepTarget', 'keepBudget', 'minKeptMessages']) {
     fld($('#settings-form'), name).oninput = () => compactMath($('#settings-form'));
   }
   // One save path per way of leaving the dialog: the button, and Enter inside a field. The form has no action,

@@ -171,12 +171,12 @@ parts queue on the same GPU instead of helping.
 The arithmetic is deliberately unfashionable: one part gets
 
 ```
-summaryCap = n_ctx × keepTarget% / 100
-fit        = n_ctx - summaryCap - summaryCap/2 - 1200    // output room, growth room, instruction
+summaryCap = n_ctx × keepTarget% / 100      // what the running summary itself may be
+chunkFit   = n_ctx × threshold% / 100       // what each summary call may carry, summary included
 ```
 
 so a part plus its own reply can never overflow the window the way a single request holding the whole
-conversation did (observed on a 40960 window with `keepTarget: 20`: `summaryCap` 8192, `fit` 27472, a
+conversation did (observed on a 40960 window: a
 194,359-token region folded in three serial parts). Every cut lands on a legal boundary (a `user` or
 `assistant` message, never a tool call or a tool result), and the part boundaries are chosen from the
 measured per-message sizes, not from a character count. Which mode actually ran is written into the
@@ -187,10 +187,12 @@ compaction entry's meta, because the log line is not the durable record.
 The path is the truth and exactly one assembler decides what leaves the process. A trigger is
 `contextUsed > n_ctx × threshold%`, where `contextUsed` is the reported usage of the last completed turn
 plus a token count of everything appended since. Two percentages of the window decide the cut:
-the kept tail has to fit `(threshold% - keepTarget%)` and the summary itself has to fit
-`keepTarget%` — they are two halves of one budget, not two independent settings. A tail of 0 is a legal
+the kept tail has to fit `keepBudget%` and the summary itself has to fit
+`keepTarget%` — two independent settings answering two questions, how much raw history to keep and
+how short the summariser must write. (The tail used to be `(threshold% - keepTarget%)`, and tightening
+the summary silently resized it.) A tail of 0 is a legal
 answer, and `minKeptMessages` is the floor under it: the tail is `max(budget, the newest N messages)`,
-rounded outward to a legal boundary, so `threshold <= keepTarget` means "keep the newest N raw messages
+rounded outward to a legal boundary, so `keepBudget: 0` means "keep the newest N raw messages
 and summarise everything older" — with N = 0 that is head + summary only, and it happens automatically,
 not just on demand. `minKeptUserTurns` cannot veto such a cut (it constrains turn boundaries, and a
 cut floored by `minKeptMessages` has no turn boundary to constrain). A cut is reported as split when
@@ -200,7 +202,8 @@ it. The two ways a compaction can refuse are kept apart because they point at di
 whole path smaller than `minSummarizeTokens` names that parameter, while a path that is large enough
 but has no boundary satisfying the floors says that instead. One rule covers every parameter: a 0 or a
 negative on a percentage or on `minSummarizeTokens` falls back to its default, while 0 on either floor
-(`minKeptMessages`, `minKeptUserTurns`) means "no floor" and only negatives clamp to it. The cut never
+(`minKeptMessages`, `minKeptUserTurns`) means "no floor", 0 on `keepBudget` means "keep nothing but
+the summary", and only negatives clamp to that 0. The cut never
 lands inside a tool span or before a tool result. Everything above it is summarised by a request
 whose prefix is
 byte-identical to the last payload actually sent, so the provider's prompt cache survives. The commit

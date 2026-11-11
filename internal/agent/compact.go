@@ -302,8 +302,8 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 	res.SummaryCap = p.SummaryCap(nctx)
 	if plan.KeptTokens > plan.Budget {
 		// The kept tail is bigger than the budget the user configured, and minKeptMessages is the only
-		// thing that can do that (§2.1). Say it out loud: a reader who compares this tail with threshold
-		// and keepTarget finds no configuration that explains it, and starts doubting the arithmetic
+		// thing that can do that (§2.1). Say it out loud: a reader who compares this tail with keepBudget
+		// finds no configuration that explains it, and starts doubting the arithmetic
 		// instead of the floor they set.
 		s.logf("compaction (%s): kept tail %d tokens over its %d-token budget (minKeptMessages %d wins over the cap)",
 			trig, plan.KeptTokens, plan.Budget, p.MinKeptMessages)
