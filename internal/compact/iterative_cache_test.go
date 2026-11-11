@@ -26,7 +26,7 @@ import (
 )
 
 func chainParams() Params {
-	return Params{ThresholdPct: 70, KeepTargetPct: 20, SummaryMaxPct: 70, Temperature: 0.2, Marker: DefaultMarker}
+	return Params{ThresholdPct: 70, SummaryCapPct: 20, Temperature: 0.2, Marker: DefaultMarker}
 }
 
 func testHead() []asm.Message {

@@ -171,7 +171,7 @@ parts queue on the same GPU instead of helping.
 The arithmetic is deliberately unfashionable: one part gets
 
 ```
-summaryCap = n_ctx × keepTarget% / 100      // what the running summary itself may be
+summaryCap = n_ctx × summaryCap% / 100      // the summary's max_tokens, and what the finished summary may be
 chunkFit   = n_ctx × threshold% / 100       // what each summary call may carry, summary included
 ```
 
@@ -188,8 +188,9 @@ The path is the truth and exactly one assembler decides what leaves the process.
 `contextUsed > n_ctx × threshold%`, where `contextUsed` is the reported usage of the last completed turn
 plus a token count of everything appended since. Two percentages of the window decide the cut:
 the kept tail has to fit `keepBudget%` and the summary itself has to fit
-`keepTarget%` — two independent settings answering two questions, how much raw history to keep and
-how short the summariser must write. (The tail used to be `(threshold% - keepTarget%)`, and tightening
+`summaryCap%` — which is also `max_tokens` of the request that writes it, one number doing both
+jobs — two independent settings answering two questions, how much raw history to keep and
+how short the summariser must write. (The tail used to be `(threshold% - the summary cap%)`, and tightening
 the summary silently resized it.) A tail of 0 is a legal
 answer, and `minKeptMessages` is the floor under it: the tail is `max(budget, the newest N messages)`,
 rounded outward to a legal boundary, so `keepBudget: 0` means "keep the newest N raw messages

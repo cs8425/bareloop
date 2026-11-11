@@ -48,12 +48,11 @@
       "mode": "threshold-target",
       "summaryMode": "prefix-stable",
       "threshold": 70,
-      "keepTarget": 50,
+      "summaryCap": 70,
       "keepBudget": 20,
       "minKeptUserTurns": 4,
       "minKeptMessages": 0,
       "minSummarizeTokens": 2000,
-      "summaryMax": 70,
       "maxAttempts": 3,
       "temperature": 0.2
     },

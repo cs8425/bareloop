@@ -57,7 +57,7 @@ func selSizes(path []*ir.Entry) *asm.Sizes {
 
 func TestSelectTailIsTheGreaterOfCapAndFloor(t *testing.T) {
 	cases := []struct {
-		threshold, keepTarget, minSummarize, minUserTurns, minKeptMsgs int
+		threshold, keepBudget, minSummarize, minUserTurns, minKeptMsgs int
 		ok                                                             bool
 		cut, kept, summarised, replaced, budget, keptUsers             int
 		empty, split                                                   bool
@@ -65,42 +65,35 @@ func TestSelectTailIsTheGreaterOfCapAndFloor(t *testing.T) {
 		reason                                                         Reason
 		what                                                           string
 	}{
-		// 50/50 ⇒ a tail budget of 0. Every case below lives on that contradiction.
-		{50, 50, 50, 2, 0, true, 4, 0, 400, 4, 0, 0, true, true, "", ReasonOK,
+		// A keepBudget of 0 caps the tail at nothing. Every case below lives on that contradiction.
+		{50, 0, 50, 2, 0, true, 4, 0, 400, 4, 0, 0, true, true, "", ReasonOK,
 			"floor 0: nothing demands a tail, so the budget gets an empty one (compact everything)"},
-		{50, 50, 50, 0, 1, true, 3, 100, 300, 3, 0, 1, false, false, "m3", ReasonOK,
+		{50, 0, 50, 0, 1, true, 3, 100, 300, 3, 0, 1, false, false, "m3", ReasonOK,
 			"floor 1 beats the 0 budget: tail 100 tokens over a budget of 0, reported as such"},
-		{50, 50, 50, 2, 1, true, 3, 100, 300, 3, 0, 1, false, false, "m3", ReasonOK,
+		{50, 0, 50, 2, 1, true, 3, 100, 300, 3, 0, 1, false, false, "m3", ReasonOK,
 			"minKeptUserTurns pushes the cut into phase 2 without calling it a split: m3 is still a user boundary"},
-		{50, 50, 50, 0, 2, true, 2, 200, 200, 2, 0, 2, false, false, "m2", ReasonOK,
+		{50, 0, 50, 0, 2, true, 2, 200, 200, 2, 0, 2, false, false, "m2", ReasonOK,
 			"floor 2: the budget is raised to the cost of exactly two messages"},
-		{50, 50, 50, 0, 4, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonNoBoundary,
+		{50, 0, 50, 0, 4, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonNoBoundary,
 			"floor == the whole path means summarise nothing, so nothing runs"},
-		{50, 50, 50, 0, 9, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonNoBoundary,
+		{50, 0, 50, 0, 9, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonNoBoundary,
 			"floor beyond the path is the same refusal, not a panic and not a full keep"},
-		{50, 50, 350, 0, 1, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonNoBoundary,
+		{50, 0, 350, 0, 1, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonNoBoundary,
 			"the floor raises the tail cap, it does not lower minSummarizeTokens: a region worth 300 of 400 still refuses at 350"},
-		{50, 50, 401, 2, 0, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonTooSmall,
+		{50, 0, 401, 2, 0, false, 0, 0, 0, 0, 0, 0, false, false, "", ReasonTooSmall,
 			"the whole path is below minSummarizeTokens: the reason names the knob to lower, not a boundary"},
 		// The 350/401 pair is the boundary between the two refusals: 350 still leaves one cut worth having
 		// (so the floors and the boundaries are what refuse), 401 leaves none (so it is the knob to change).
 		// A budget that already fits more than the floor must keep the budget's answer, not shrink to N.
-		{65, 40, 50, 2, 0, true, 2, 200, 200, 2, 250, 2, false, false, "m2", ReasonOK,
+		{65, 25, 50, 2, 0, true, 2, 200, 200, 2, 250, 2, false, false, "m2", ReasonOK,
 			"control: a real budget cuts on a turn boundary (unchanged behaviour)"},
-		{65, 40, 50, 2, 1, true, 2, 200, 200, 2, 250, 2, false, false, "m2", ReasonOK,
+		{65, 25, 50, 2, 1, true, 2, 200, 200, 2, 250, 2, false, false, "m2", ReasonOK,
 			"floor 1 under a 250-token budget changes nothing: the floor is a floor, not a target"},
 		// Where the floor cut is not a legal boundary it moves outward — selToolPath covers that below.
 	}
 	for _, c := range cases {
-		// The rows were written while the tail's budget was (threshold − keepTarget); keepBudget now
-		// owns that number, so each row injects its own former difference and pins the geometry the
-		// decoupling is supposed to leave alone.
-		kb := c.threshold - c.keepTarget
-		if kb < 0 {
-			kb = 0
-		}
 		p := Params{
-			ThresholdPct: c.threshold, KeepTargetPct: c.keepTarget, KeepBudgetPct: intp(kb),
+			ThresholdPct: c.threshold, KeepBudgetPct: intp(c.keepBudget),
 			MinSummarizeTokens: c.minSummarize, MinKeptUserTurns: c.minUserTurns,
 			MinKeptMessages: c.minKeptMsgs,
 		}
@@ -153,7 +146,7 @@ func TestSelectTailIsTheGreaterOfCapAndFloor(t *testing.T) {
 // a legal boundary: it must move outward (keeping more than N) or refuse — moving inward would keep
 // fewer than the floor asked for, and inventing a boundary inside a tool span is not on the table.
 func TestSelectFloorCutsAroundToolSpans(t *testing.T) {
-	p := Params{ThresholdPct: 50, KeepTargetPct: 50, KeepBudgetPct: intp(0), MinSummarizeTokens: 50, MinKeptMessages: 3}
+	p := Params{ThresholdPct: 50, KeepBudgetPct: intp(0), MinSummarizeTokens: 50, MinKeptMessages: 3}
 
 	// [user user tool user user]: keeping 3 would cut before a tool result, so 4 stay.
 	path := selToolPath()
@@ -190,7 +183,7 @@ func TestSelectFloorCutsAroundToolSpans(t *testing.T) {
 // TestSelectRefusesWithoutAWindowOrAPath pins the two refusals that no floor can rescue: they are
 // the only cases where nothing can run at all, manual included (spec §3.10).
 func TestSelectRefusesWithoutAWindowOrAPath(t *testing.T) {
-	p := Params{ThresholdPct: 50, KeepTargetPct: 50, MinSummarizeTokens: 50}
+	p := Params{ThresholdPct: 50, MinSummarizeTokens: 50}
 	path := selPath()
 
 	if plan, ok := Select(path, selSizes(path), 0, p); ok || plan.Reason != ReasonNCTXUnknown {

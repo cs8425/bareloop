@@ -17,7 +17,7 @@ package compact
 // Each call is bounded by the window: instruction + previous partial + chunk + max_tokens <= n_ctx
 // (that budget is ChunkFit). Only the region the plan already chose to replace is cut into parts;
 // the kept suffix is never touched. Acceptance is unchanged: the final summary must satisfy
-// Accepts (<= keepTarget% of n_ctx), so the chain cannot quietly grow.
+// Accepts (<= summaryCap% of n_ctx), so the chain cannot quietly grow.
 //
 // Serial on purpose. This is a local-first tool: the same GPU answers every call, so K parallel
 // summary calls do not finish K times faster - they queue, and each one competes for the KV cache
@@ -52,17 +52,17 @@ const (
 	InstructionAllowance = 1200
 )
 
-// ChunkMaxTokens is max_tokens for one call of the chain — the SAME number the single summary call
-// uses, because a chain is that question asked about one part of the conversation at a time, and the
-// spec asks nothing more of it. A summary written over parts is therefore not allowed to be thinner
-// than the one a single call would have written, and it is not allowed to be thicker either: the cap
-// that decides whether the summary is worth keeping is SummaryCap, applied to the final answer, never
-// to an intermediate one — the two used to be conflated here, and the quarter of the window this
-// clamped to before that charged the window for its own answer twice. On an 8k window the clamp landed
-// below one honest round of thinking: the model spent all 2048 completion tokens reasoning and
-// returned no summary text at all.
+// ChunkMaxTokens is max_tokens for one call of the chain — SummaryCap itself, the one number
+// that sizes the single summary call too: a chain is that question asked about one part of the
+// conversation at a time, and the spec asks nothing more of it. A summary written over parts is
+// therefore not allowed to be thinner than the one a single call would have written, and it is not
+// allowed to be thicker either: the cap that decides whether the summary is worth keeping is the
+// same number applied to the final answer, never to an intermediate one — the two used to be
+// conflated here, and the quarter of the window this clamped to before that charged the window for
+// its own answer twice. On an 8k window the clamp landed below one honest round of thinking: the
+// model spent all 2048 completion tokens reasoning and returned no summary text at all.
 func (p Params) ChunkMaxTokens(nctx int) int {
-	return p.SummaryMaxTokens(nctx)
+	return p.SummaryCap(nctx)
 }
 
 // ChunkFit is where a part of the chain stops: the threshold position, threshold% × n_ctx — the same

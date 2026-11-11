@@ -42,13 +42,14 @@ func region(n int) []*ir.Entry {
 // parts far smaller than the window offered and an answer budget the model could not think inside.
 func TestAPartIsFilledToTheThresholdPosition(t *testing.T) {
 	for _, nctx := range []int{2048, 8192, 40960, 262144} {
-		p := Params{ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70}
+		p := Params{ThresholdPct: 70, SummaryCapPct: 70}
 		if got, want := p.ChunkFit(nctx), p.TriggerLevel(nctx); got != want {
 			t.Fatalf("nctx %d: a part fills to %d, want the threshold position %d", nctx, got, want)
 		}
-		// The cap on the answer belongs to summaryMax, not to the acceptance cap of the final summary:
-		// a summary written over three parts must not be thinner than the one call would have written.
-		if got, want := p.ChunkMaxTokens(nctx), p.SummaryMaxTokens(nctx); got != want {
+		// The cap on the answer is the summary's own number — one key now, acceptance and
+		// max_tokens together: a summary written over three parts must be neither thinner nor
+		// thicker than the one call would have written.
+		if got, want := p.ChunkMaxTokens(nctx), p.SummaryCap(nctx); got != want {
 			t.Fatalf("nctx %d: a part may answer with %d tokens, the single call may use %d", nctx, got, want)
 		}
 	}
@@ -79,7 +80,7 @@ func TestNeedsIterativeOnlyWhenTheRequestDoesNotFit(t *testing.T) {
 // TestPlanChunksCoversTheRegionInOrder guards the expensive failure: a chunk plan that silently
 // drops entries would summarise part of the conversation and forget the rest.
 func TestPlanChunksCoversTheRegionInOrder(t *testing.T) {
-	p := Params{ThresholdPct: 70, KeepTargetPct: 20, SummaryMaxPct: 70}
+	p := Params{ThresholdPct: 70, SummaryCapPct: 20}
 	const nctx = 40960
 	fit := p.ChunkFit(nctx)
 	r := region(300)
@@ -116,7 +117,7 @@ func TestPlanChunksCoversTheRegionInOrder(t *testing.T) {
 // TestPlanChunksNeverAbandonsOneOversizedEntry: a single pasted file is the case that bricks a
 // session, so the planner clips it instead of giving up on it.
 func TestPlanChunksNeverAbandonsOneOversizedEntry(t *testing.T) {
-	p := Params{ThresholdPct: 70, KeepTargetPct: 20, SummaryMaxPct: 70}
+	p := Params{ThresholdPct: 70, SummaryCapPct: 20}
 	const nctx = 40960
 	fit := p.ChunkFit(nctx)
 	huge := txt("huge", "user", fit*8)

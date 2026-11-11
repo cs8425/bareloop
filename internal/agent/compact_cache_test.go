@@ -334,8 +334,8 @@ func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message
 	cfg := s.Config()
 	nctx := s.nctxLocked()
 	p := compact.Params{
-		SummaryMode: compact.ModeIterative, ThresholdPct: 70, KeepTargetPct: 50,
-		SummaryMaxPct: 70, Temperature: 0.2, Marker: compact.DefaultMarker,
+		SummaryMode: compact.ModeIterative, ThresholdPct: 70,
+		SummaryCapPct: 50, Temperature: 0.2, Marker: compact.DefaultMarker,
 	}
 	if p.ChunkFit(nctx) <= 0 {
 		t.Fatalf("no window means no fit: nctx = %d", nctx)
@@ -512,7 +512,7 @@ func TestTheChainNeverSummarisesNothing(t *testing.T) {
 	if refs.msgs != nil {
 		t.Fatal("the fixture was supposed to produce a payload that cannot be sliced")
 	}
-	p := compact.Params{SummaryMode: compact.ModeIterative, ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70, Marker: compact.DefaultMarker}
+	p := compact.Params{SummaryMode: compact.ModeIterative, ThresholdPct: 70, SummaryCapPct: 50, Marker: compact.DefaultMarker}
 	ruler := compact.NewRuler(built.StructuredCap)
 	text, _, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1, func(ir.SummaryAttempt) {})
 	if err != nil {

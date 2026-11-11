@@ -73,7 +73,7 @@ func TestPrefixStableRequestIsTheSentPayloadPlusTheInstruction(t *testing.T) {
 		t.Fatalf("tools = %s, want the loop's own %s: the template renders them before the first message, so a missing array forks at token 0",
 			names(call.Tools), names(tools))
 	}
-	if call.MaxTokens != p.SummaryMaxTokens(40960) {
+	if call.MaxTokens != p.SummaryCap(40960) {
 		t.Fatalf("max_tokens = %d, want the summary cap for the window", call.MaxTokens)
 	}
 

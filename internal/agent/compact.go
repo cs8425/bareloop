@@ -374,12 +374,11 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 			if p.Accepts(nctx, size) {
 				return s.commitCompaction(ctx, cfg, p, plan, text, size, summaryModel, res)
 			}
-			// The cap is SummaryCap, i.e. keepTarget% of n_ctx, so the percentage printed beside it has
-			// to be KeepTargetPct. Printing SummaryMaxPct here (max_tokens of the summary call, a
-			// different number and a different setting) told a reader that an 8 192-token cap was "70% of
-			// n_ctx" on a session whose config says keepTarget 20.
-			s.logf("compaction (%s): attempt %d produced %d tokens, cap is %d (keepTarget %d%% of n_ctx)",
-				trig, attempt, size, res.SummaryCap, p.KeepTargetPct)
+			// The percentage printed beside the cap is the config's own summaryCap — the number
+			// that sized this very request and now grades its answer; there is no second number
+			// left to misprint.
+			s.logf("compaction (%s): attempt %d produced %d tokens, cap is %d (summaryCap %d%% of n_ctx)",
+				trig, attempt, size, res.SummaryCap, p.SummaryCapPct)
 			extra = fmt.Sprintf("your previous attempt was %d tokens and the cap is %d: compress further, drop detail instead of structure",
 				size, res.SummaryCap)
 		}
@@ -743,7 +742,7 @@ func summaryRequest(cfg Config, call compact.SummaryCall) llm.Request {
 //
 // Attachments ride along at asm's reference cost (an image is 1000) because RegionTokens asks asm.
 // It is compared against n_ctx and nothing else: the question is whether the call can be sent at all,
-// not how long the answer may be (that is compact.Params.SummaryMaxTokens).
+// not how long the answer may be (that is compact.Params.SummaryCap).
 func (s *Session) summaryRequestSize(refs payloadRefs, sumRegion []*ir.Entry, extra string, split bool, p compact.Params) int {
 	size := 0
 	if used, ok := s.usedNow(); ok && refs.warm {

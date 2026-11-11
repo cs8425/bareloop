@@ -251,12 +251,10 @@
           </label>
           <label title="the share of n_ctx above which automatic compaction fires. It no longer decides what is left afterwards: the kept tail has its own budget below, and the summary its own cap.">compact above %
             <input name="threshold" type="number" min="1" max="100" /></label>
-          <label title="the ceiling on the summary itself: longer is retried, and after max attempts the session is asked what to do. It says nothing about the tail — that is the kept budget's answer.">summary cap %
-            <input name="keepTarget" type="number" min="1" max="99" /></label>
+          <label title="the summary's one number, doing both jobs: max_tokens of the summary request (how much the summariser may write, thinking included — the default leaves room for it), and the ceiling the finished summary is graded against (longer is retried, and after max attempts the session is asked what to do). It says nothing about the tail — that is the kept budget's answer.">summary cap %
+            <input name="summaryCap" type="number" min="1" max="99" /></label>
           <label title="the share of n_ctx the kept tail gets after a compaction — set apart from the summary cap on purpose, because how short the summariser must write and how much raw history you keep are two questions. 0 is a number that means something: a compaction then keeps head plus summary and nothing else, unless min kept messages floors the tail and makes the budget pay for the newest messages.">kept budget %
             <input name="keepBudget" type="number" min="0" max="99" /></label>
-          <label title="max_tokens of the summary request itself, as a share of n_ctx: how much the summariser may write, not what it may leave behind">max_tokens %
-            <input name="summaryMax" type="number" min="1" max="99" /></label>
           <label title="how many times the summary is asked again when it comes back over the cap; after that the session is asked whether to accept, retry, or keep the full history">summary attempts
             <input name="maxAttempts" type="number" min="1" max="9" /></label>
           <!-- This one is the floor under the tail above it: with the kept budget at 0 the tail is 0 tokens, and

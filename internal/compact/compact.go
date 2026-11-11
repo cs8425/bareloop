@@ -48,16 +48,18 @@ type Params struct {
 	// SummaryMode selects the summary request shape (§3.1).
 	SummaryMode string `json:"summaryMode"`
 	// ThresholdPct is the trigger point: real context usage above it asks for a compaction.
-	// (It used to double as the ceiling on what a compaction leaves behind, because the kept
-	// tail was this minus keepTarget; the tail now sizes itself by KeepBudgetPct, and each
-	// percentage answers exactly one question.)
 	ThresholdPct int `json:"threshold"`
-	// KeepTargetPct is the cap on the summary itself (acceptance check).
-	KeepTargetPct int `json:"keepTarget"`
+	// SummaryCapPct is the summary's one number, answering both of its questions: the
+	// acceptance limit for the finished summary, and max_tokens of the call that writes it.
+	// They were two config keys (keepTarget 50 / summaryMax 70) until one proved enough: a
+	// request may not be graded against a limit other than the one it was sized with, and on a
+	// reasoning model the answer's share is whatever the thinking leaves — so the default (70)
+	// sizes the call for the thinking too.
+	SummaryCapPct int `json:"summaryCap"`
 	// KeepBudgetPct is the cap on the kept tail as a share of n_ctx. It stands apart from
-	// keepTarget on purpose: how short the summariser must write and how much raw history the
-	// session keeps are two questions, and while the tail was (threshold − keepTarget) moving
-	// one moved the other. 0 is a real answer (a compaction then keeps head + summary and
+	// summaryCap on purpose: how short the summariser must write and how much raw history the
+	// session keeps are two questions, and while the tail was the trigger minus the summary
+	// cap, moving one moved the other. 0 is a real answer (a compaction then keeps head + summary and
 	// nothing else, unless minKeptMessages floors the tail), which is why this is a pointer:
 	// absent means the default, an explicit 0 means the answer nobody should have to spell out.
 	KeepBudgetPct *int `json:"keepBudget,omitempty"`
@@ -69,8 +71,6 @@ type Params struct {
 	MinKeptMessages  int `json:"minKeptMessages"`
 	// MinSummarizeTokens: below this, a summary call is not worth it.
 	MinSummarizeTokens int `json:"minSummarizeTokens"`
-	// SummaryMaxPct is max_tokens of the summary call as a share of n_ctx.
-	SummaryMaxPct int `json:"summaryMax"`
 	// MaxAttempts counts total tries for the summary call (1 = single call, <=0 = forever).
 	MaxAttempts int `json:"maxAttempts"`
 	// Temperature of the summary call.
@@ -98,12 +98,11 @@ func DefaultParams() Params {
 		Mode:               "threshold-target",
 		SummaryMode:        ModePrefixStable,
 		ThresholdPct:       70,
-		KeepTargetPct:      50,
+		SummaryCapPct:      70,
 		KeepBudgetPct:      intp(defaultKeepBudgetPct),
 		MinKeptUserTurns:   4,
 		MinKeptMessages:    0,
 		MinSummarizeTokens: 2000,
-		SummaryMaxPct:      70,
 		MaxAttempts:        3,
 		Temperature:        0.2,
 		Marker:             DefaultMarker,
@@ -114,7 +113,7 @@ func DefaultParams() Params {
 func (p Params) UseInLoop() bool { return p.InLoop == nil || *p.InLoop }
 
 // Normalise fills in blanks and clamps nonsense, by one rule with two halves. A field whose 0 would
-// be destructive (threshold, keepTarget, summaryMax, minSummarizeTokens) or is not a real answer
+// be destructive (threshold, summaryCap, minSummarizeTokens) or is not a real answer
 // (maxAttempts) falls back to its default at 0 and below. A field whose 0 IS the answer — the two
 // floors minKeptUserTurns and minKeptMessages, and the keepBudget percentage — keeps 0 as its
 // meaning ("no floor", "keep nothing but the summary") and clamps only negatives to
@@ -125,8 +124,8 @@ func (p Params) Normalise() Params {
 	if p.ThresholdPct <= 0 {
 		p.ThresholdPct = d.ThresholdPct
 	}
-	if p.KeepTargetPct <= 0 {
-		p.KeepTargetPct = d.KeepTargetPct
+	if p.SummaryCapPct <= 0 {
+		p.SummaryCapPct = d.SummaryCapPct
 	}
 	// keepBudget follows the floor rule, not the percentage rule: 0 is an answer (keep nothing
 	// but the summary), so only "no answer at all" — absent, or a negative — falls back, and it
@@ -147,9 +146,6 @@ func (p Params) Normalise() Params {
 	}
 	if p.MinSummarizeTokens <= 0 {
 		p.MinSummarizeTokens = d.MinSummarizeTokens
-	}
-	if p.SummaryMaxPct <= 0 {
-		p.SummaryMaxPct = d.SummaryMaxPct
 	}
 	if p.MaxAttempts == 0 {
 		p.MaxAttempts = d.MaxAttempts
@@ -173,9 +169,8 @@ func (p Params) Normalise() Params {
 }
 
 // Budget is the cap on the kept suffix: keepBudget% × n_ctx (§2.1). The number is the user's
-// own and no one else's — the summary's acceptance cap (keepTarget) and the tail's budget are
-// two settings answering two questions, and the tail stopped shrinking every time someone
-// tightened the summariser.
+// own and no one else's — the summary's cap and the tail's budget are two settings answering
+// two questions, and the tail stopped shrinking every time someone tightened the summariser.
 //
 // 0 is a legal value, not a broken one: it asks for every recorded message to be replaced by the
 // summary, and only the brake parameters hold that back (§2.1).
@@ -196,12 +191,16 @@ func (p Params) Budget(nctx int) int {
 	return nctx * pct / 100
 }
 
-// SummaryCap is the acceptance limit for the summary itself: keepTarget% × n_ctx.
+// SummaryCap is the summary's number: summaryCap% × n_ctx. It is both the acceptance limit
+// for the finished summary (§3.4) and max_tokens of the call that writes it (§3.5) — one
+// number, because a request should not be graded against a limit other than the one it was
+// sized with. It scales with the model; a fixed value would brutally truncate long
+// conversations.
 func (p Params) SummaryCap(nctx int) int {
 	if nctx <= 0 {
 		return 0
 	}
-	return nctx * p.KeepTargetPct / 100
+	return nctx * p.SummaryCapPct / 100
 }
 
 // TriggerLevel is contextUsed above which compaction is considered: threshold% × n_ctx.
@@ -210,15 +209,6 @@ func (p Params) TriggerLevel(nctx int) int {
 		return 0
 	}
 	return nctx * p.ThresholdPct / 100
-}
-
-// SummaryMaxTokens is max_tokens for the summary call: summaryMax% × n_ctx (§3.5). It
-// scales with the model; a fixed value would brutally truncate long conversations.
-func (p Params) SummaryMaxTokens(nctx int) int {
-	if nctx <= 0 {
-		return 0
-	}
-	return nctx * p.SummaryMaxPct / 100
 }
 
 // ShouldTrigger implements §1.3. contextUsed must be the REAL value; when it is not
@@ -321,9 +311,9 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 	}
 
 	// budget caps the kept tail while MinKeptMessages floors it, and the two can contradict each other:
-	// threshold ≤ keepTarget used to set the cap to 0 while the floor said "keep N raw messages"; keepBudget 0
-	// now says the same thing directly. The floor wins, and only outward — allowed is raised to the cost of the
-	// deepest legal cut that still leaves N entries, never lowered, because a floor can only ever demand more
+	// keepBudget 0 caps the tail at nothing while the floor says "keep N raw messages". The floor wins, and only
+	// outward — allowed is raised to the cost of the deepest legal cut that still leaves N entries, never lowered,
+	// because a floor can only ever demand more
 	// (§2.1). Every entry is at
 	// least one token, so suffix[] is strictly decreasing and the search below lands exactly on that
 	// cut: no shallower tail fits the raised cap and no deeper one survives the floor.
@@ -539,7 +529,7 @@ type SummaryCall struct {
 // tools must be exactly the tool array the loop sent: the chat template renders tool
 // definitions at the start of the prompt, so a missing or reordered array forks at token 0.
 func (p Params) BuildRequest(nctx int, lastMessages []asm.Message, tools []llm.Tool, split bool, userInstruction string) SummaryCall {
-	call := SummaryCall{Temperature: p.Temperature, MaxTokens: p.SummaryMaxTokens(nctx)}
+	call := SummaryCall{Temperature: p.Temperature, MaxTokens: p.SummaryCap(nctx)}
 	instr := p.SummaryInstruction(split)
 	if strings.TrimSpace(userInstruction) != "" {
 		instr += "\n\nAdditional instruction from the user: " + strings.TrimSpace(userInstruction)

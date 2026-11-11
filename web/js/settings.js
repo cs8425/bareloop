@@ -68,11 +68,11 @@ export async function openSettings() {
   fld(f, 'apiKey').value = ''; // there is nothing to show, and empty means "keep the stored key"
   fld(f, 'nCtx').value = cfg.llm?.nCtx || '';
   fld(f, 'threshold').value = cfg.compact?.threshold ?? 70;
-  fld(f, 'keepTarget').value = cfg.compact?.keepTarget ?? 50;
+  // The summary's one number: it sizes the summary request and grades its answer.
+  fld(f, 'summaryCap').value = cfg.compact?.summaryCap ?? 70;
   // The server normalises an absent keepBudget to 20 on every read, so this field arrives filled; the ?? 20
   // only covers a config written before the field existed. 0 is a real value (compact-everything tail).
   fld(f, 'keepBudget').value = cfg.compact?.keepBudget ?? 20;
-  fld(f, 'summaryMax').value = cfg.compact?.summaryMax ?? 70;
   fld(f, 'maxAttempts').value = cfg.compact?.maxAttempts ?? 3;
   // 0 is what the server runs on when the key is absent (DefaultParams/Normalise), so showing 0 for a session
   // that never set it is not a guess — and saving that 0 back changes nothing.
@@ -148,14 +148,15 @@ const pct = (nctx, p) => Math.trunc((nctx * p) / 100);
 // compactMath says out loud, in tokens, what the three percentages of the compaction block add up to — and what
 // the kept-tail floor does when they leave no room at all.
 //
-// They are each other's arithmetic and three columns of labels cannot say so: the trigger is also the ceiling
-// afterwards, the summary cap caps the summary ALONE, and the kept tail gets the difference — which is why the
-// tail has no field of its own, except for minKeptMessages: that is a floor under the tail, and a floor is what
-// the tail is made of when it disagrees with the budget (internal/compact/compact.go: Select, floorCut).
+// They answer three separate questions, and reading them together is the whole point: the trigger says when a
+// compaction fires, the summary cap is the summary's one number — max_tokens of its request and the limit its
+// answer is graded against — and the kept budget says what the session keeps afterwards. minKeptMessages is a
+// floor under the tail, and a floor is what the tail is made of when it disagrees with the budget
+// (internal/compact/compact.go: Select, floorCut).
 // The formulas and both failure sentences are the server's (TriggerLevel, SummaryCap, Budget, ReasonNCTXUnknown,
 // ReasonNoBoundary), re-derived here so the answer is there while the fields are still being edited.
 //
-// The coercion is saveSettings' own (|| 70, || 50, || 0) — except keepBudget, whose 0 is an answer and
+// The coercion is saveSettings' own (|| 70, || 70, || 0) — except keepBudget, whose 0 is an answer and
 // therefore reads through a trim check instead of ||. An empty box is stored as the default, so the line
 // previews what pressing save does instead of the empty field. It is written a second time rather than
 // extracted because the PATCH body reads better with each default beside its own field, and the two places
@@ -167,7 +168,7 @@ function compactMath(f) {
   if (!out) return;
   const nctx = Number(fld(f, 'nCtx').value) || 0;
   const trigger = Number(fld(f, 'threshold').value) || 70;
-  const cap = Number(fld(f, 'keepTarget').value) || 50;
+  const cap = Number(fld(f, 'summaryCap').value) || 70;
   // keepBudget reads differently from every number above: its 0 is the compact-everything tail, so an
   // explicit 0 must preview as 0 while an empty box still means "the default the save will store".
   const kbRaw = fld(f, 'keepBudget').value.trim();
@@ -205,7 +206,7 @@ function compactMath(f) {
     return;
   }
   out.textContent =
-    `fires above ${tok(pct(nctx, trigger))} tokens · the summary must fit ${tok(pct(nctx, cap))} · ` +
+    `fires above ${tok(pct(nctx, trigger))} tokens · the summary writes into and must fit ${tok(pct(nctx, cap))} · ` +
     `the tail you keep gets ${tok(tail)} (${kb}% of n_ctx ${tok(nctx)})` +
     // why "gets" becomes "at least": the floor is in messages and the browser has no per-message sizes, so the
     // percentage is a lower bound the moment a floor exists — stating it as exact would be inventing a number.
@@ -239,11 +240,10 @@ export async function saveSettings() {
       auto: fld(f, 'auto').checked,
       inLoop: fld(f, 'inLoop').checked,
       threshold: Number(fld(f, 'threshold').value) || 70,
-      keepTarget: Number(fld(f, 'keepTarget').value) || 50,
+      summaryCap: Number(fld(f, 'summaryCap').value) || 70,
       // 0 is an answer here too (the compact-everything tail), so unlike the `||` coercions above an empty box
       // falls back to the default while a typed 0 travels — quietly storing 20 would veto the veto.
       keepBudget: fld(f, 'keepBudget').value.trim() === '' ? 20 : Number(fld(f, 'keepBudget').value),
-      summaryMax: Number(fld(f, 'summaryMax').value) || 70,
       maxAttempts: Number(fld(f, 'maxAttempts').value) || 3,
       // `|| 0`, not a safer default: an empty box has to land on 0 (empty kept allowed, the server's own
       // default), because quietly storing 1 here would switch the brake on in a session the person never asked
@@ -429,7 +429,7 @@ export function wireSettings() {
   // The arithmetic line has to answer while the fields are being edited, so it hangs off every field that sets
   // it — and off `input` rather than `change`, because "4096" typed one digit at a time is worth reading as
   // 4096 before the field is ever blurred.
-  for (const name of ['nCtx', 'threshold', 'keepTarget', 'keepBudget', 'minKeptMessages']) {
+  for (const name of ['nCtx', 'threshold', 'summaryCap', 'keepBudget', 'minKeptMessages']) {
     fld($('#settings-form'), name).oninput = () => compactMath($('#settings-form'));
   }
   // One save path per way of leaving the dialog: the button, and Enter inside a field. The form has no action,

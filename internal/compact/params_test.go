@@ -8,15 +8,15 @@ package compact
 import "testing"
 
 func TestBudgetSummaryCapTriggerLevelArePercentagesOfNCtx(t *testing.T) {
-	p := Params{ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70}
+	p := Params{ThresholdPct: 70, SummaryCapPct: 70}
 	cases := []struct {
-		nctx                     int
-		trigger, cap, budget, mx int
-		what                     string
+		nctx                 int
+		trigger, cap, budget int
+		what                 string
 	}{
-		{40960, 28672, 20480, 8192, 28672, "the current server window"},
-		{262144, 183500, 131072, 52428, 183500, "a 256k window"},
-		{1000, 700, 500, 200, 700, "a tiny window (integer division rounds down)"},
+		{40960, 28672, 28672, 8192, "the current server window"},
+		{262144, 183500, 183500, 52428, "a 256k window"},
+		{1000, 700, 700, 200, "a tiny window (integer division rounds down)"},
 	}
 	for _, c := range cases {
 		if got := p.TriggerLevel(c.nctx); got != c.trigger {
@@ -28,31 +28,32 @@ func TestBudgetSummaryCapTriggerLevelArePercentagesOfNCtx(t *testing.T) {
 		if got := p.Budget(c.nctx); got != c.budget {
 			t.Errorf("%s: Budget(%d) = %d, want %d (keepBudget, defaulted)", c.what, c.nctx, got, c.budget)
 		}
-		if got := p.SummaryMaxTokens(c.nctx); got != c.mx {
-			t.Errorf("%s: SummaryMaxTokens(%d) = %d, want %d", c.what, c.nctx, got, c.mx)
-		}
 	}
 }
 
 // TestBudgetIsKeepBudgetNotADerivation locks the decoupled §2.1: the tail's budget is keepBudget%
-// of the window, the user's own number. It used to be (threshold − keepTarget), which meant
-// tightening the summary's acceptance cap silently resized the tail — the two settings answer
+// of the window, the user's own number. It used to be the trigger minus the summary cap, which
+// meant tightening the summary's cap silently resized the tail — the two settings answer
 // different questions and the test pins that they no longer share arithmetic.
 func TestBudgetIsKeepBudgetNotADerivation(t *testing.T) {
-	if got := (Params{ThresholdPct: 70, KeepTargetPct: 20}).Budget(40960); got != 8192 {
+	if got := (Params{ThresholdPct: 70}).Budget(40960); got != 8192 {
 		t.Fatalf("an absent keepBudget must land on the default 20%%, got %d", got)
 	}
-	// Same threshold, same keepTarget, different keepBudget: only the budget moves.
-	a := Params{ThresholdPct: 70, KeepTargetPct: 20, KeepBudgetPct: intp(30)}
-	b := Params{ThresholdPct: 70, KeepTargetPct: 20, KeepBudgetPct: intp(10)}
-	if a.Budget(40960) != 12288 || b.Budget(40960) != 4096 {
-		t.Fatalf("keepBudget must set the budget: %d %d", a.Budget(40960), b.Budget(40960))
+	// Same keepBudget, different summaryCap: the budget does not move. And keepBudget moves it
+	// alone — the summary's number and the tail's budget answer two questions and share no arithmetic.
+	a := Params{ThresholdPct: 70, SummaryCapPct: 50, KeepBudgetPct: intp(30)}
+	b := Params{ThresholdPct: 70, SummaryCapPct: 90, KeepBudgetPct: intp(30)}
+	if a.Budget(40960) != 12288 || b.Budget(40960) != 12288 {
+		t.Fatalf("summaryCap must not move the budget: %d %d", a.Budget(40960), b.Budget(40960))
 	}
-	// And the summary cap keeps answering only to keepTarget.
-	if got := (Params{ThresholdPct: 70, KeepTargetPct: 20, KeepBudgetPct: intp(30)}).SummaryCap(40960); got != 8192 {
-		t.Fatalf("70/20 summary cap = %d, want 8192", got)
+	if got := (Params{ThresholdPct: 70, SummaryCapPct: 50, KeepBudgetPct: intp(10)}).Budget(40960); got != 4096 {
+		t.Fatalf("keepBudget 10 must set the budget to 4096, got %d", got)
 	}
-	if got := (Params{ThresholdPct: 3, KeepTargetPct: 1}).TriggerLevel(40960); got != 1228 {
+	// And the summary's one number answers only to summaryCap — acceptance and max_tokens alike.
+	if got := a.SummaryCap(40960); got != 20480 {
+		t.Fatalf("summaryCap 50 must cap at 20480, got %d", got)
+	}
+	if got := (Params{ThresholdPct: 3}).TriggerLevel(40960); got != 1228 {
 		t.Fatalf("3%% of 40960 = %d, want 1228", got)
 	}
 }
@@ -64,7 +65,7 @@ func TestBudgetIsKeepBudgetNotADerivation(t *testing.T) {
 // select_test.go pins what stops it.
 func TestKeepBudgetZeroIsTheAnswerNotABrokenValue(t *testing.T) {
 	for _, v := range []*int{intp(0), intp(-5)} {
-		p := Params{ThresholdPct: 70, KeepTargetPct: 50, KeepBudgetPct: v}
+		p := Params{ThresholdPct: 70, KeepBudgetPct: v}
 		if got := p.Budget(40960); got != 0 {
 			t.Errorf("keepBudget %d: budget = %d, want 0", *v, got)
 		}
@@ -72,16 +73,16 @@ func TestKeepBudgetZeroIsTheAnswerNotABrokenValue(t *testing.T) {
 			t.Errorf("keepBudget %d must survive Normalise as 0, got %d", *v, got)
 		}
 	}
-	if got := *(Params{ThresholdPct: 70, KeepTargetPct: 50}).Normalise().KeepBudgetPct; got != 20 {
+	if got := *(Params{ThresholdPct: 70}).Normalise().KeepBudgetPct; got != 20 {
 		t.Fatalf("an absent keepBudget must normalise to the default 20, got %d", got)
 	}
 }
 
 // TestNothingIsInventedWithoutAnNCtx: no window means no budget, no cap, no trigger level.
 func TestNothingIsInventedWithoutAnNCtx(t *testing.T) {
-	p := Params{ThresholdPct: 70, KeepTargetPct: 50, SummaryMaxPct: 70}
+	p := Params{ThresholdPct: 70, SummaryCapPct: 70}
 	for _, nctx := range []int{0, -1} {
-		if p.TriggerLevel(nctx) != 0 || p.SummaryCap(nctx) != 0 || p.Budget(nctx) != 0 || p.SummaryMaxTokens(nctx) != 0 {
+		if p.TriggerLevel(nctx) != 0 || p.SummaryCap(nctx) != 0 || p.Budget(nctx) != 0 {
 			t.Fatalf("n_ctx %d must produce no numbers at all", nctx)
 		}
 	}
@@ -89,7 +90,7 @@ func TestNothingIsInventedWithoutAnNCtx(t *testing.T) {
 
 // TestShouldTriggerIsStrictAndNeverGuesses covers spec §1.3.
 func TestShouldTriggerIsStrictAndNeverGuesses(t *testing.T) {
-	p := Params{Auto: true, ThresholdPct: 70, KeepTargetPct: 50}
+	p := Params{Auto: true, ThresholdPct: 70}
 	const nctx = 40960
 	level := p.TriggerLevel(nctx) // 28672
 	cases := []struct {
@@ -142,8 +143,8 @@ func TestDefaultsMatchTheDocumentedTable(t *testing.T) {
 	if !d.UseInLoop() {
 		t.Fatal("spec §1.1: in-loop compaction is on by default")
 	}
-	if d.ThresholdPct != 70 || d.KeepTargetPct != 50 || d.MinKeptUserTurns != 4 || d.MinSummarizeTokens != 2000 ||
-		d.SummaryMaxPct != 70 || d.MaxAttempts != 3 || d.KeepBudgetPct == nil || *d.KeepBudgetPct != 20 {
+	if d.ThresholdPct != 70 || d.SummaryCapPct != 70 || d.MinKeptUserTurns != 4 || d.MinSummarizeTokens != 2000 ||
+		d.MaxAttempts != 3 || d.KeepBudgetPct == nil || *d.KeepBudgetPct != 20 {
 		t.Fatalf("defaults drifted: %+v", d)
 	}
 	if d.Marker != DefaultMarker || DefaultMarker == "" {
@@ -159,7 +160,7 @@ func TestDefaultsMatchTheDocumentedTable(t *testing.T) {
 // it, and a negative on those clamps to 0 rather than to the shipped default.
 func TestNormaliseFillsBlanksAndKeepsChoices(t *testing.T) {
 	n := Params{}.Normalise()
-	if n.ThresholdPct != 70 || n.KeepTargetPct != 50 || n.MinSummarizeTokens != 2000 || n.SummaryMaxPct != 70 ||
+	if n.ThresholdPct != 70 || n.SummaryCapPct != 70 || n.MinSummarizeTokens != 2000 ||
 		n.MaxAttempts != 3 || n.Marker != DefaultMarker || n.Mode != "threshold-target" || n.SummaryMode != ModePrefixStable {
 		t.Fatalf("zero value did not normalise to the defaults: %+v", n)
 	}
@@ -172,11 +173,11 @@ func TestNormaliseFillsBlanksAndKeepsChoices(t *testing.T) {
 	if neg.MinKeptUserTurns != 0 || neg.MinKeptMessages != 0 || *neg.KeepBudgetPct != 0 {
 		t.Fatalf("negative floors and keepBudget must clamp to 0, got %+v", neg)
 	}
-	kept := Params{ThresholdPct: 90, KeepTargetPct: 10, KeepBudgetPct: intp(33), MinKeptUserTurns: 0, MinKeptMessages: 6,
-		MinSummarizeTokens: 1, SummaryMaxPct: 30, MaxAttempts: 1, SummaryMode: ModeTranscript, Marker: "X"}.Normalise()
-	if kept.ThresholdPct != 90 || kept.KeepTargetPct != 10 || kept.KeepBudgetPct == nil || *kept.KeepBudgetPct != 33 ||
+	kept := Params{ThresholdPct: 90, SummaryCapPct: 30, KeepBudgetPct: intp(33), MinKeptUserTurns: 0, MinKeptMessages: 6,
+		MinSummarizeTokens: 1, MaxAttempts: 1, SummaryMode: ModeTranscript, Marker: "X"}.Normalise()
+	if kept.ThresholdPct != 90 || kept.SummaryCapPct != 30 || kept.KeepBudgetPct == nil || *kept.KeepBudgetPct != 33 ||
 		kept.MinKeptMessages != 6 || kept.MinSummarizeTokens != 1 ||
-		kept.SummaryMaxPct != 30 || kept.MaxAttempts != 1 || kept.SummaryMode != ModeTranscript || kept.Marker != "X" {
+		kept.MaxAttempts != 1 || kept.SummaryMode != ModeTranscript || kept.Marker != "X" {
 		t.Fatalf("explicit values were overwritten: %+v", kept)
 	}
 	if got := (Params{SummaryMode: "gibberish"}).Normalise().SummaryMode; got != ModePrefixStable {
