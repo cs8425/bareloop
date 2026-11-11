@@ -67,6 +67,11 @@ go build ./...
 
 Go 1.27 or newer is what `go.mod` asks for ([why](docs/design.md#go-version)).
 
+The daemon takes no memory flags of its own — it is a Go program, so the runtime's
+`GOMEMLIMIT` and `GOGC` apply as they do everywhere else; on a small machine, a
+`GOMEMLIMIT` of a few hundred MB turns a transient peak into a GC hurry-up instead
+of a resident high-water mark.
+
 ## Run it against mocks
 
 ```sh
