@@ -556,6 +556,23 @@ func TestBlobBytesMoveBetweenStores(t *testing.T) {
 	}
 }
 
+// TestBlobSize is the read behind the assembler's text-only note: the byte count of
+// one blob, answered from the size column without the bytes column being touched.
+func TestBlobSize(t *testing.T) {
+	l := openTest(t)
+	img := bytes.Repeat([]byte{0x00, 0xff, 0x7f}, 5001) // 15003 raw bytes, no base64 in sight
+	if err := l.AppendEntry(imgEntry("sized", img), true); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	size, found, err := l.BlobSize(shaOfBytes(img))
+	if err != nil || !found || size != len(img) {
+		t.Fatalf("BlobSize = %d,%v,%v, want %d,true,nil", size, found, err, len(img))
+	}
+	if _, found, err := l.BlobSize("deadbeef"); err != nil || found {
+		t.Errorf("BlobSize of an unknown sha = %v,%v, want not-found without error", found, err)
+	}
+}
+
 func TestDeleteReparentsAndRewritesPayload(t *testing.T) {
 	l := openTest(t)
 	root := user("root")

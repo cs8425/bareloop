@@ -18,6 +18,12 @@ const (
 	PartImage = "image"
 )
 
+// RefPrefix marks an image part's data as a reference into the blob table
+// ("blob:<sha>") instead of the base64 bytes themselves. One constant for the
+// whole village: the store writes it, the assembler keeps it as a placeholder
+// and expands it only where bytes are owed (asm.ExpandMessages).
+const RefPrefix = "blob:"
+
 // Part is one piece of a multi-part message (text or image attachment).
 //
 // Parts always travel in a fixed order ([images..., text]) and images always use the

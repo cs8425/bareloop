@@ -67,8 +67,9 @@ const (
 
 // BlobPrefix marks a payload's image data as a reference into the blob table. Exported
 // because a copier that moves entries between stores reads references without
-// inflating them (agent.Fork) and must recognise the shape it is moving.
-const BlobPrefix = "blob:"
+// inflating them (agent.Fork) and must recognise the shape it is moving. The one
+// string lives in ir, which is where both sides of the reference already meet.
+const BlobPrefix = ir.RefPrefix
 
 // ddl runs one statement per Exec: the ncruces driver takes a single statement per call.
 var ddl = []string{
@@ -593,6 +594,26 @@ func (l *Log) BlobBytes(sha string) (b []byte, mime string, found bool, err erro
 		return nil, "", false, err
 	}
 	return b, mime, true, nil
+}
+
+// BlobSize is one blob's byte count, answered from the size column the write path
+// keeps beside the bytes — no bytes move. It exists so an assembler can price an
+// image note (asm's text-only view says "~N KB") over a reference, where the
+// base64 the note was always counted from is not in hand.
+func (l *Log) BlobSize(sha string) (size int, found bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return 0, false, ErrClosed
+	}
+	err = l.db.QueryRow("SELECT size FROM blob WHERE sha256 = ?", sha).Scan(&size)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return size, true, nil
 }
 
 // PutBlob lands one blob's bytes without touching any refcount: references are owned

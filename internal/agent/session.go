@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -369,7 +370,12 @@ func (s *Session) window() (kept []*ir.Entry, cmp *ir.Entry, err error) {
 	for _, m := range keptM {
 		ids = append(ids, m.ID)
 	}
-	found, err := s.log.Contents(ids, true)
+	// The references, not the bytes: an image keeps its base64 in the blob table and
+	// this window holds only "blob:<sha>" per picture. A window of screenshots costs
+	// its text and a handful of hashes, not megabytes per turn; the base64 is fetched
+	// at the two moments that owe it — the wire (asm.ExpandMessages before sending)
+	// and a text-only note's "~N KB" (asm.Blobs, an indexed size query).
+	found, err := s.log.Contents(ids, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -523,7 +529,37 @@ func (s *Session) cfgOptions() asm.Options {
 	t := structuredTargets(s.cfg)
 	o.Structured = &t
 	o.StructuredMaxBytes = s.cfg.StructuredMaxBytes
+	o.Blobs = logBlobs{log: s.log}
 	return o
+}
+
+// logBlobs is a session's blob table through the assembler's interface: a size from
+// the column that keeps it, the base64 from the row that holds it — each asked per
+// image at the moment it is needed, and nothing is ever held.
+type logBlobs struct {
+	log *store.Log
+}
+
+func (b logBlobs) Size(sha string) (int, error) {
+	size, found, err := b.log.BlobSize(sha)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("blob %s is not in the store", sha)
+	}
+	return size, nil
+}
+
+func (b logBlobs) Get(sha string) (string, string, error) {
+	raw, mime, found, err := b.log.BlobBytes(sha)
+	if err != nil {
+		return "", "", err
+	}
+	if !found {
+		return "", "", fmt.Errorf("blob %s is not in the store", sha)
+	}
+	return base64.StdEncoding.EncodeToString(raw), mime, nil
 }
 
 // structuredTargets resolves how every server's structuredContent is sent: the server's own value
@@ -884,7 +920,10 @@ func (s *Session) DeleteEntry(id string) error {
 
 // PatchEntry rewrites one entry's content (used by the UI's edit).
 func (s *Session) PatchEntry(id, content string) error {
-	found, err := s.log.Contents([]string{id}, true)
+	// The reference shape for the rewrite: editing one entry's text must not re-key
+	// its images through sha256 — the payload arrives naming them again, and the
+	// store lets a reference pass without moving the bytes it points at.
+	found, err := s.log.Contents([]string{id}, false)
 	if err != nil {
 		return err
 	}
@@ -897,7 +936,16 @@ func (s *Session) PatchEntry(id, content string) error {
 		return err
 	}
 	s.reload()
-	s.emit(Event{Type: EvtEntry, Entry: e})
+	// The bytes for the watchers: an EvtEntry is what a bubble re-renders from, and a
+	// bubble shows its picture, so the copy emitted carries it.
+	full, err := s.log.Inflate(id, nil)
+	if err != nil {
+		return err
+	}
+	if full == nil {
+		full = e // deleted between the patch and the read: the reference shape still says where
+	}
+	s.emit(Event{Type: EvtEntry, Entry: full})
 	return nil
 }
 
@@ -1555,14 +1603,22 @@ func (s *Session) Inspect() *Inspection {
 // Payload is the exact request body the next request would carry: system head, messages (system
 // first) and tool definitions. Inspect sizes them, this shows them; nothing about the prompt is
 // hidden behind a byte count.
+//
+// The messages are expanded before they are shown: the ruler measures what would go on the wire,
+// and what would go on the wire carries base64, not references. The expansion lives and dies
+// here — the session keeps holding references.
 func (s *Session) Payload() (map[string]any, error) {
 	built, _, tools, err := s.build()
 	if err != nil {
 		return nil, err
 	}
+	msgs, err := asm.ExpandMessages(built.All(), logBlobs{log: s.log})
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"system":   built.System,
-		"messages": built.All(),
+		"messages": msgs,
 		"tools":    tools,
 	}, nil
 }

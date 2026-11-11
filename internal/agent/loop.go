@@ -709,7 +709,30 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	// bytes, and this request is the prefix every later call of this conversation wants to reuse — the
 	// first part of a summary chain above all. Stream is not part of that identity, so it stays here.
 	req := requestIdentity(cfg)
-	req.Messages = built.All()
+	// The one moment a run asks for an image's bytes: the payload built over this
+	// session's window holds references into the blob table, and the wire is where
+	// those references are owed their base64. The expanded copy lives and dies with
+	// this request — what the session keeps holding are the references. A reference
+	// that cannot be expanded refuses the send: dropping the picture would silently
+	// change the conversation the cached prefix was measured over.
+	msgs, expandErr := asm.ExpandMessages(built.All(), logBlobs{log: s.log})
+	if expandErr != nil {
+		s.logf("turn %d: payload cannot be sent: %v", turn, expandErr)
+		s.emit(Event{Type: EvtError, Info: "payload: " + expandErr.Error()})
+		// The same entry a terminal provider failure writes: the turn gets an
+		// (honest) answer, the loop moves on, and no request carries half a
+		// conversation.
+		return &ir.Entry{
+			Kind:    ir.KindAssistant,
+			Role:    "assistant",
+			Content: "[generation failed: " + clip(expandErr.Error(), 600) + "]",
+			Model:   cfg.LLM.Model,
+			Finish:  "error",
+			Label:   "llm error",
+			Ms:      time.Since(start).Milliseconds(),
+		}, streamID, false
+	}
+	req.Messages = msgs
 	req.Tools = tools
 	req.Stream = true
 	// Ask the provider, retrying only what a retry can fix. Two extra attempts cover a busy

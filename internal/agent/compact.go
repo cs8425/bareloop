@@ -481,6 +481,17 @@ func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.
 		}
 		call := p.ChunkRequest(nctx, in)
 		req := summaryRequest(cfg, call)
+		// The prefix rides as references (this process remembers what it sent, not
+		// what it would cost to re-encode); the wire gets the bytes, fetched per
+		// image now and dropped when this request is done.
+		wireMsgs, err := asm.ExpandMessages(req.Messages, logBlobs{log: s.log})
+		if err != nil {
+			// A blob that cannot be read is no retry's business: record the part as
+			// what stopped and end the attempt.
+			record(ir.SummaryAttempt{Attempt: attempt, Part: i + 1, Parts: len(chunks), Failed: err.Error()})
+			return "", 0, fmt.Errorf("part %d/%d: %w", i+1, len(chunks), err)
+		}
+		req.Messages = wireMsgs
 		s.emit(Event{Type: EvtCompact, Data: map[string]any{
 			"stage": "summarizing", "attempt": attempt, "part": i + 1, "parts": len(chunks)}})
 		started := time.Now()
@@ -803,6 +814,15 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 		})
 	}
 	req := summaryRequest(cfg, call)
+	// The summary's prefix arrives as references — what this process remembers
+	// sending — and owes the same expansion the main send does: byte-identical
+	// pixels, or a refusal that says which blob is gone.
+	wireMsgs, err := asm.ExpandMessages(req.Messages, logBlobs{log: s.log})
+	if err != nil {
+		record(ir.SummaryAttempt{Attempt: attempt, Failed: err.Error()})
+		return "", 0, err
+	}
+	req.Messages = wireMsgs
 	s.emit(Event{Type: EvtCompact, Data: map[string]any{"stage": "summarizing", "attempt": attempt}})
 	started := time.Now()
 	res, err := s.provider.Complete(ctx, req)

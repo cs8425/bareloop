@@ -14,6 +14,7 @@ package asm
 import (
 	"encoding/json"
 	"encoding/json/jsontext"
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -161,6 +162,21 @@ type Message struct {
 	Name             string        `json:"name,omitempty"`
 }
 
+// Blobs resolves the image references a session's entries carry: an image part whose
+// data is "blob:<sha>" (ir.RefPrefix) names bytes that live in the store's blob table,
+// not in the entry. The session injects an implementation over its log so the resident
+// window can hold references and pay for the bytes only at the two moments that need
+// them — pricing a text-only note (Size) and putting pixels on the wire (Get).
+type Blobs interface {
+	// Size is one blob's raw byte count. The text-only note quotes the attachment's
+	// KB from the base64 it was always counted out of, and this answers without
+	// moving any bytes.
+	Size(sha string) (int, error)
+	// Get is one blob's base64 (standard encoding, the one inflate has always
+	// emitted) and the mime it was stored under ("" when the part carried none).
+	Get(sha string) (b64, mime string, err error)
+}
+
 // Options controls the assembler. It is derived from session config and is identical for
 // every consumer (main send, summary call, inspector, rebuild). A nil pointer means
 // "not set in config.json", i.e. the documented default.
@@ -193,6 +209,13 @@ type Options struct {
 	// one of them a lie about which one is in force. ValidateStructuredMax is what refuses a
 	// nonsensical value before it is ever stored.
 	StructuredMaxBytes int `json:"-"`
+	// Blobs resolves image references while assembling (see imageNote). It is injected
+	// by the session, never spelled in config.json — which is also why it is an
+	// interface and not a store: the assembler stays a pure function of (Payload,
+	// Options) over the village's types. A nil Blobs assembles b64-carrying parts
+	// exactly as it always did; a reference appearing without one says so in its own
+	// note rather than inventing a size.
+	Blobs Blobs `json:"-"`
 }
 
 // structuredFor is the mode of the server that produced an entry ("" = the session default).
@@ -339,13 +362,13 @@ func messageFor(e *ir.Entry, opts Options) Message {
 	case "tool":
 		// The structuredContent fold happens here and nowhere else: it is a tool-result field, so an
 		// entry of another role that carries one is left alone rather than guessed at.
-		m.Content = content(foldStructured(e, opts.structuredFor(e.Server), opts.structuredMax()), opts.SendImagesOn())
+		m.Content = content(foldStructured(e, opts.structuredFor(e.Server), opts.structuredMax()), opts)
 		m.ToolCallID = e.ToolCallID
 		if !opts.OmitToolResultName && e.Server != "" {
 			m.Name = e.Server
 		}
 	case "assistant":
-		if c := content(e, opts.SendImagesOn()); c != nil {
+		if c := content(e, opts); c != nil {
 			m.Content = c
 		}
 		for _, tc := range e.ToolCalls {
@@ -363,7 +386,7 @@ func messageFor(e *ir.Entry, opts Options) Message {
 			m.ReasoningContent = e.Reasoning
 		}
 	default: // user
-		m.Content = content(e, opts.SendImagesOn())
+		m.Content = content(e, opts)
 	}
 	return m
 }
@@ -381,16 +404,16 @@ func messageFor(e *ir.Entry, opts Options) Message {
 //     information anyway.
 //   - when images are switched off the bytes are not sent at all, but the model is told an image
 //     is there — otherwise it answers a question about a picture it was never given, silently.
-func content(e *ir.Entry, sendImages bool) any {
+func content(e *ir.Entry, opts Options) any {
 	var imgs []ContentPart
 	var texts []string
 	for _, pt := range e.Parts {
 		switch {
-		case pt.Type == ir.PartImage && sendImages:
+		case pt.Type == ir.PartImage && opts.SendImagesOn():
 			imgs = append(imgs, ContentPart{Type: PartTypeImage,
-				ImageURL: &ImageURL{URL: DataURL(pt)}})
+				ImageURL: &ImageURL{URL: imageURL(pt, opts)}})
 		case pt.Type == ir.PartImage:
-			texts = append(texts, imageNote(pt))
+			texts = append(texts, imageNote(pt, opts.Blobs))
 		default:
 			if pt.Text != "" {
 				texts = append(texts, pt.Text)
@@ -424,7 +447,13 @@ func content(e *ir.Entry, sendImages bool) any {
 // with an invention — a chatty model would rather describe an image than admit it cannot see one,
 // which is exactly what happened in a real session: it produced a confident four-point description
 // of pixels that were never sent, while its own reasoning noticed the note and overruled it.
-func imageNote(p ir.Part) string {
+//
+// The quoted KB is counted out of the base64, and a reference part does not carry it: the size is
+// asked of the resolver and worked back through the standard encoding's exact length, so the note
+// says the same number byte for byte whether the entry travels with bytes or with a reference —
+// the KV prefix cannot tell the two shapes apart. A size nobody can answer (no resolver, a blob
+// that is not there) is said as "?", never as a number that was never measured.
+func imageNote(p ir.Part, blobs Blobs) string {
 	name := p.Name
 	if name == "" {
 		name = "image"
@@ -433,20 +462,108 @@ func imageNote(p ir.Part) string {
 	if mt == "" {
 		mt = "unknown type"
 	}
-	kb := len(p.Data) * 3 / 4 / 1024 // base64 → real bytes → KB
-	return "[attached " + name + " (" + mt + ", ~" + strconv.Itoa(kb) + " KB) is in this conversation " +
+	return "[attached " + name + " (" + mt + ", ~" + kbWord(p, blobs) + " KB) is in this conversation " +
 		"but its pixels were NOT sent to you: this session sends text only. You cannot see it, so do " +
 		"not describe it and do not guess what it shows — say that you cannot see the image and ask " +
 		"the user to describe it or to turn image sending on.]"
 }
 
+// kbWord is the "~N KB" number of the note: the base64's length run through the
+// formula this file has always used, whether the part carries that base64 or names
+// it in the blob table. Standard base64 of n bytes is exactly 4*((n+2)/3) long, so
+// the reference path arrives at the identical digits — the length is what the old
+// formula divided, and this hands it the same number.
+func kbWord(p ir.Part, blobs Blobs) string {
+	if sha, isRef := strings.CutPrefix(p.Data, ir.RefPrefix); isRef {
+		if blobs == nil {
+			return "?"
+		}
+		size, err := blobs.Size(sha)
+		if err != nil {
+			return "?"
+		}
+		b64Len := 4 * ((size + 2) / 3)
+		return strconv.Itoa(b64Len * 3 / 4 / 1024)
+	}
+	return strconv.Itoa(len(p.Data) * 3 / 4 / 1024) // base64 → real bytes → KB
+}
+
+// imageURL is an image part's wire spelling while the payload is being assembled: the
+// data URL its bytes always travelled as, or — for a reference part — the reference
+// itself, kept verbatim as a placeholder. Assembling over references therefore reads
+// no blob at all; the bytes are fetched at the one moment they are owed,
+// by ExpandMessages, which swaps the placeholder for the identical data URL.
+func imageURL(p ir.Part, opts Options) string {
+	if _, isRef := strings.CutPrefix(p.Data, ir.RefPrefix); isRef {
+		return p.Data
+	}
+	return DataURL(p)
+}
+
+// dataURL is the one formula an image's wire spelling takes.
+func dataURL(mime, b64 string) string {
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return "data:" + mime + ";base64," + b64
+}
+
 // DataURL renders an image part as a data URL (one encoding, everywhere).
 func DataURL(p ir.Part) string {
-	mt := p.MimeType
-	if mt == "" {
-		mt = "application/octet-stream"
+	return dataURL(p.MimeType, p.Data)
+}
+
+// ExpandMessages returns the wire-ready copy of msgs: every image URL that is still a
+// blob reference (ir.RefPrefix) is replaced by the data URL its bytes spell — the very
+// string DataURL produced when the bytes were carried in hand, byte for byte, so a
+// session's KV prefix cannot tell a reference-built payload from a bytes-built one.
+// Messages without references are returned as they stand, and nothing is copied until
+// the first reference appears.
+//
+// A reference whose blob cannot be read is an error, never a silent drop: a payload
+// that quietly lost a picture is a different conversation than the one the cached
+// prefix was measured over, and sending one would spend the cache to ask about the
+// wrong pixels.
+func ExpandMessages(msgs []Message, res Blobs) ([]Message, error) {
+	expanded := make([]Message, len(msgs))
+	copy(expanded, msgs)
+	for i := range expanded {
+		parts, ok := expanded[i].Content.([]ContentPart)
+		if !ok {
+			continue // a plain string (or nothing) carries no image URL to expand
+		}
+		hasRef := false
+		for _, p := range parts {
+			if p.ImageURL != nil && strings.HasPrefix(p.ImageURL.URL, ir.RefPrefix) {
+				hasRef = true
+				break
+			}
+		}
+		if !hasRef {
+			continue
+		}
+		parts = append([]ContentPart(nil), parts...) // this message's parts are ours to rewrite
+		for j := range parts {
+			p := &parts[j]
+			if p.ImageURL == nil {
+				continue
+			}
+			sha, isRef := strings.CutPrefix(p.ImageURL.URL, ir.RefPrefix)
+			if !isRef {
+				continue
+			}
+			if res == nil {
+				return nil, fmt.Errorf("asm: image reference %.20s… with no resolver to expand it", sha)
+			}
+			b64, mime, err := res.Get(sha)
+			if err != nil {
+				return nil, fmt.Errorf("asm: image blob %s cannot be sent: %w", sha, err)
+			}
+			p.ImageURL = &ImageURL{URL: dataURL(mime, b64)}
+		}
+		expanded[i].Content = parts
 	}
-	return "data:" + mt + ";base64," + p.Data
+	return expanded, nil
 }
 
 // repair makes the payload always sendable, deterministically:
