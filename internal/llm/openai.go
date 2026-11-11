@@ -121,18 +121,52 @@ func (p *openai) encodeBody(req Request, stream bool) ([]byte, error) {
 	if len(extra) == 0 {
 		return jsonv2.Marshal(body)
 	}
-	// Merge provider-specific fields.
+	// Merge provider-specific fields in a single pass over the envelope.
 	//
-	// All three steps run v2-native on purpose. The final map pass is where a stray v1
-	// json.Marshal would sneak the escaping regime back — the compat layer re-escapes the
-	// strings it parsed (this build measures HTML trio plus JS pair), silently un-writing
-	// the wire's "no escaping beyond JSON's own rules". The body golden test is the fence.
+	// Only the top level is ever parsed: pass 2 decodes raw into map[string]json.RawMessage,
+	// which hands back each top-level value as untouched bytes, and pass 3 re-emits those
+	// bytes without a second encode. Nothing nested is decoded, re-escaped, or re-sorted,
+	// which is what makes this cheap on a full window — and it moved the bytes once. Until
+	// here the merge round-tripped the whole body through map[string]any, so the final
+	// Deterministic pass canonicalized EVERY nested object to sorted key order: a message
+	// went out as {"content":…,"role":…} rather than in struct order, and a tool schema's
+	// member order was rewritten too. That canonicalization is gone: nested objects now
+	// keep the bytes pass 1 wrote — struct declaration order for our own types, as-stored
+	// member order for RawMessage schemas — which is also exactly the shape the no-Extra
+	// path has always emitted, so one request shape now has one byte shape. A session with
+	// Extra set therefore re-prefills once after this upgrade (its KV prefix was written in
+	// canonical order) and is byte-stable every turn after; Extra comes from fixed config,
+	// so which path a session rides never changes mid-flight.
 	//
-	// Deterministic(true) is load-bearing, not decorative: v1 always sorted map keys, v2
-	// deliberately does NOT (map order is random without it — measured here as a scrambled
-	// body). Every turn re-sends this body as the KV prefix, so "same input, same bytes"
-	// is a wire property, not a nicety; the old comment claiming "encoding/json sorts map
-	// keys" died with the v1 engine.
+	// Deterministic(true) remains load-bearing for what pass 3 does encode: top-level map
+	// order and the keys inside each Extra value (both are real maps, and v2 deliberately
+	// does not sort without it). Every turn re-sends this body as the KV prefix, so "same
+	// input, same bytes" is still a wire property, not a nicety.
+	raw, err := jsonv2.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	top := make(map[string]json.RawMessage, 12+len(extra))
+	if err := jsonv2.Unmarshal(raw, &top); err != nil {
+		return nil, err
+	}
+	for k, v := range extra {
+		b, err := jsonv2.Marshal(v, jsonv2.Deterministic(true))
+		if err != nil {
+			return nil, err
+		}
+		top[k] = b // an Extra key wins over the field it names, as the map merge always did
+	}
+	return jsonv2.Marshal(top, jsonv2.Deterministic(true))
+}
+
+// mergeExtraTriplePass is the Extra merge this file shipped before the single-pass
+// rewrite: marshal, decode everything to map[string]any, merge, encode with the sort.
+// It survives only as the test oracle for the drift surface — TestEncodeBodyExtraMerge
+// asserts against it which bytes moved (nested key order, schema member order) and
+// which provably did not (strings, numbers, Extra values). Nothing on a wire path
+// may call it again.
+func mergeExtraTriplePass(body chatRequest, extra map[string]any) ([]byte, error) {
 	raw, err := jsonv2.Marshal(body)
 	if err != nil {
 		return nil, err
