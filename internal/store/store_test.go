@@ -441,6 +441,46 @@ func TestContentsWithImagesIsNotDeadlockedByOneConn(t *testing.T) {
 	}
 }
 
+// TestInflateSingleRow is the export cursor's one-row shape: one call answers
+// one entry with its pictures attached, and a vanished id answers by absence
+// rather than error. The cache is the caller's to own: hand nil and every
+// reference reads the blob table for itself — the trade a stream that passes
+// each row once makes against holding a session's distinct pictures resident;
+// hand one in and the shared shape holds, two references one ask.
+func TestInflateSingleRow(t *testing.T) {
+	l := openTest(t)
+	img := []byte("png-bytes")
+	b64 := base64.StdEncoding.EncodeToString(img)
+	withImg := imgEntry("screenshot", img)
+	if err := l.AppendEntry(withImg, true); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	got, err := l.Inflate(withImg.ID, nil)
+	if err != nil || got == nil {
+		t.Fatalf("Inflate = %v, %v", got, err)
+	}
+	if got.Parts[0].Data != b64 {
+		t.Error("Inflate did not re-attach the image bytes")
+	}
+	before := l.blobLookups
+	cache := map[string]string{}
+	repeat := imgEntry("again", img)
+	if err := l.AppendEntry(repeat, true); err != nil {
+		t.Fatalf("AppendEntry repeat: %v", err)
+	}
+	for _, id := range []string{withImg.ID, repeat.ID} {
+		if _, err := l.Inflate(id, cache); err != nil {
+			t.Fatalf("Inflate %s: %v", id, err)
+		}
+	}
+	if got := l.blobLookups - before; got != 1 {
+		t.Errorf("blob lookups through the caller's cache = %d, want 1", got)
+	}
+	if e, err := l.Inflate("9999999", nil); err != nil || e != nil {
+		t.Errorf("Inflate of a ghost = %v, %v, want absence without error", e, err)
+	}
+}
+
 // TestBlobBytesMoveBetweenStores is the fork pipeline's byte movement without the
 // fork: bytes leave one store by sha, land in another untouched, and the payload
 // that names them arrives as a reference — never re-encoded, never re-hashed. The

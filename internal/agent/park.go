@@ -600,7 +600,11 @@ func (s *Session) parkTailLocked() []*ir.Entry {
 	if !foundAssistant {
 		return nil
 	}
-	content, err := s.log.Contents(ids, true)
+	// Reference shape on purpose: the tail is read for its calls and timestamps
+	// only (tailCalls, tail[0].Ts), and nothing here consumes a picture's bytes —
+	// the resumed run re-reads its window through the ordinary path, where images
+	// inflate for the wire. Same rule park.go already applies to the parked question.
+	content, err := s.log.Contents(ids, false)
 	if err != nil {
 		s.logf("park tail: %v", err)
 		return nil

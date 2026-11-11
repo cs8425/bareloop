@@ -98,38 +98,28 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rowCursor reads the named ids through the store a page at a time: each page is
-// read, written, and forgotten before the next is asked for, and the export itself
-// holds nothing larger than the id list. A row that is not there when its page
-// arrives (deleted mid-stream) stops the stream — a silently missing line would be
-// a file whose parent walks no importer will take, and a dead stream logs.
+// rowCursor reads the named ids through the store one row at a time: a row is
+// read (its pictures expanded), written, and forgotten before the next is
+// asked for, so the export itself holds nothing larger than the id list plus
+// one entry's images. No sha cache rides the stream: an export passes every
+// row exactly once, and a point query plus an encoding per picture is the
+// trade a one-pass stream makes against holding every distinct image resident.
+// A row that is not there when it is asked for (deleted mid-stream) stops the
+// stream — a silently missing line would be a file whose parent walks no
+// importer will take, and a dead stream logs.
 func rowCursor(log *store.Log, ids []string, rw func(int, *ir.Entry) *ir.Entry) func() (*ir.Entry, error) {
-	const pageSize = 100
-	pos, at, out := 0, 0, 0
-	var order []string
-	var page map[string]*ir.Entry
+	at, out := 0, 0
 	return func() (*ir.Entry, error) {
-		for at >= len(order) {
-			if pos >= len(ids) {
-				return nil, io.EOF
-			}
-			end := pos + pageSize
-			if end > len(ids) {
-				end = len(ids)
-			}
-			order = ids[pos:end]
-			pos = end
-			at = 0
-			var err error
-			page, err = log.Contents(order, true)
-			if err != nil {
-				return nil, err
-			}
+		if at >= len(ids) {
+			return nil, io.EOF
 		}
-		id := order[at]
+		id := ids[at]
 		at++
-		e, ok := page[id]
-		if !ok {
+		e, err := log.Inflate(id, nil)
+		if err != nil {
+			return nil, err
+		}
+		if e == nil {
 			return nil, fmt.Errorf("entry %s is not in the store while the export read it", id)
 		}
 		if rw != nil {

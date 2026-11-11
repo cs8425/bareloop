@@ -1340,6 +1340,28 @@ func (l *Log) Contents(ids []string, expandBlobs bool) (map[string]*ir.Entry, er
 	return out, nil
 }
 
+// Inflate reads one entry by id with its image parts expanded. A caller that
+// walks rows one at a time — an export, which must not hold a page of pictures
+// at once — gets one row's bytes live between this call and the next, and no
+// larger residency than that. The cache is the caller's to own (see Contents
+// for its one-call rule); nil means every image reference pays its own point
+// query and encoding, which a one-pass stream happily trades for memory.
+func (l *Log) Inflate(id string, cache map[string]string) (*ir.Entry, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, ErrClosed
+	}
+	var p string
+	if err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", id).Scan(&p); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil // absence is answered, not errored, as Contents answers it
+		}
+		return nil, err
+	}
+	return l.inflateWith(p, true, cache)
+}
+
 // SkeletonRow is one row of the cost panel's view of the path: what a request
 // cost, not what it said. Content, reasoning, tool calls and images are absent
 // by construction — the panel's entire vocabulary, and nothing the transcript
