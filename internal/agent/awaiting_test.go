@@ -796,7 +796,7 @@ func TestASummaryStoppedOnTheWayToTheCommitWritesNothing(t *testing.T) {
 	cancel()
 
 	res := s.commitCompaction(ctx, s.Config(), compact.Params{}, &compact.Plan{},
-		"the summary nobody is waiting for", 12, "fake", CompactResult{Trigger: compact.TriggerManual})
+		"the summary nobody is waiting for", 12, "fake", CompactResult{Trigger: compact.TriggerManual}, nil)
 
 	if res.Skipped == "" {
 		t.Errorf("a summary committed on an ended context reported no reason: %+v", res)

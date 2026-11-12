@@ -52,6 +52,10 @@ type CompactResult struct {
 	After  int `json:"after"`
 	// Gate records what the user decided when the summary stayed oversized.
 	Gate string `json:"gate,omitempty"`
+	// Rounds is the replay round this result committed through: 1 for an ordinary compaction, N
+	// when the catch-up replays (each round commits its own entry; this reports the last one).
+	// Absent when nothing committed.
+	Rounds int `json:"rounds,omitempty"`
 }
 
 // compactHere is the entry point used by the loop (T1/T2) and by the pre-send guard.
@@ -246,44 +250,91 @@ func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual bo
 	return s.runCompact(ctx, trig, manual, instruction)
 }
 
-// runCompact is the whole compaction run: plan, summarise, gate, commit. manual decides only
-// whether real usage is required (§1.1); compact.Select chooses the same cut either way.
+// runCompact is the whole compaction run: plan, summarise, gate, commit — replayed until the
+// context is back inside the line. manual decides only whether real usage is required (§1.1);
+// compact.Select chooses the same cut either way.
+//
+// Replay is what "the conversation grew past the window" was always specced to mean: pretend the
+// messages are still being appended one at a time and run the normal compaction at the message that
+// tipped the context over — once per tipping point, in one breath. Round 1 summarises
+// [cmp0?, ...msgX] into cmp1; round 2 plans against [cmp1, kept..., ...msgY] exactly like the next
+// turn would have, and so on until the estimate of the whole real path (sizes.Total, the number
+// every trigger reads) is back under threshold% of n_ctx. An ordinary compaction — a path that
+// tipped once — runs exactly one round and behaves exactly as it always did: the loop is invisible,
+// there is no new switch, and every rule (floors, acceptance, attempts, the gate) binds each round
+// as if it were the only one. A gate skip aborts the whole replay: the rounds already committed are
+// real compactions and stay, which is what a stop mid-catch-up meant in the one-message-at-a-time
+// world this replays.
 func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string) CompactResult {
+	res := CompactResult{Trigger: trig, Manual: manual}
+	for round := 1; ; round++ {
+		var more bool
+		res, more = s.compactOnce(ctx, trig, manual, instruction, round, res)
+		if !more {
+			return res
+		}
+	}
+}
+
+// maxReplayRounds guards the replay against a world gone wrong — not against a long conversation:
+// every round commits a region of at least one entry (Select's floors), so the path shrinks
+// monotonically and honest rounds run out long before the guard can be reached.
+const maxReplayRounds = 100
+
+// compactOnce runs one round of the replay: one normal compaction of this round's virtual path,
+// committing at most one entry. It reports whether another round follows (a commit whose estimate
+// is still over the line, commitRound). res carries across rounds and the report aggregates: the
+// per-round fields describe the last round, SummaryUsage is every round's bill — while each
+// committed entry carries only what its own round spent, never the run's running total.
+func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual bool, instruction string, round int, res CompactResult) (CompactResult, bool) {
 	cfg := s.Config()
 	p := cfg.Compact
-	res := CompactResult{Trigger: trig, Manual: manual}
 
 	// Planning input = assembler input: both come out of the single choke point (§3.2).
 	built, sizes, tools, err := s.build()
 	if err != nil {
 		// The window could not be read: there is no planning input, and a compaction without one
-		// is exactly the thing §1.1 refuses to guess its way through.
+		// is exactly the thing §1.1 refuses to guess its way through. Mid-replay the earlier rounds
+		// keep — what committed is a real compaction, and nothing here guesses a second one.
 		res.Skipped = "window read failed: " + err.Error()
 		s.logf("compaction (%s): skipped: %v", trig, err)
-		return res
+		return res, false
 	}
 	region := built.Entries
 	nctx := s.nctxLocked()
 	res.Model = cfg.LLM.Model
-
-	before, available := s.usedNow()
-	res.Before = before
-	// Cutting a region into serial parts prices one entry at a time, which is not what the boundary
-	// table is for (§2.4). The ruler reads each entry's own measured cost — the difference between two
-	// of the server's prompt counts, which asm.Stamp worked out from the log and keeps on the entry —
-	// so a part is planned against what a server counted, and only an entry no request ever carried
-	// falls back to an estimate (§0).
-	ruler := compact.NewRuler(built.StructuredCap)
 	if nctx <= 0 {
 		// Without n_ctx there is no basis for a budget, so refuse and keep everything (§3.10).
 		res.Skipped = string(compact.ReasonNCTXUnknown)
-		return res
+		return res, false
 	}
-	if !manual && !available {
+	before, available := s.usedNow()
+	// A replay round has no "now" to measure: usedNow() was zeroed by the first commit (spec 1.5)
+	// and is restored by the next completion, while usedNow's real subject — the payload before the
+	// first commit — no longer exists. Its before is the estimate of what the path is.
+	replay := round > 1
+	if !manual && !available && !replay {
 		res.Skipped = string(compact.ReasonNoUsage)
-		return res
+		return res, false
 	}
-	plan, ok := compact.Select(region, sizes, nctx, p)
+	if replay {
+		res.Before = sizes.Total()
+	} else {
+		res.Before = before
+	}
+
+	// This round plans against a virtual path: the real one cut at the entry whose estimate first
+	// tips it past the trigger line (compact.Tipping). A path that never tips past the line by more
+	// than one message — every ordinary compaction — is planned whole, exactly as it always was;
+	// past that point each round is asked only about the bytes up to the tipping message, and the
+	// entries behind it do not exist for this round's plan, request, or bill.
+	level := p.TriggerLevel(nctx)
+	virt, vsizes := compact.Tipping(region, sizes, level)
+	if replay {
+		s.logf("compaction (%s): replay round %d: %d of %d entries, the virtual path is ~%d tokens against the %d-token line",
+			trig, round, len(virt), len(region), vsizes.Total(), level)
+	}
+	plan, ok := compact.Select(virt, vsizes, nctx, p)
 	if plan != nil {
 		res.Replaced = plan.Replaced
 		res.Summarized = plan.SummarizeTokens
@@ -297,7 +348,7 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 	if !ok {
 		res.Skipped = string(plan.Reason)
 		s.logf("compaction (%s): skipped: %s", trig, plan.Reason)
-		return res
+		return res, false
 	}
 	res.SummaryCap = p.SummaryCap(nctx)
 	if plan.KeptTokens > plan.Budget {
@@ -308,18 +359,6 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		s.logf("compaction (%s): kept tail %d tokens over its %d-token budget (minKeptMessages %d wins over the cap)",
 			trig, plan.KeptTokens, plan.Budget, p.MinKeptMessages)
 	}
-
-	// Decide the summary shape once, here, where the parameters are owned: the entry then records
-	// the mode that actually ran. Recording "prefix-stable" while the serial chain folded a
-	// 194k-token region is the kind of contradiction that costs an hour later, because the entry meta
-	// is the durable record and the log line is not. summarize() keeps its own check as a net.
-	sumRegion := region
-	if plan.Cut < len(region) {
-		sumRegion = region[:plan.Cut]
-	}
-	// Whether this summary is one request or a serial chain is decided below, next to `refs`: the
-	// question is "can the request I am about to send be sent", and the bytes it is made of — the
-	// payload, the instruction, the entries that were never sent — are only all visible there.
 
 	// The summary request is cut from the last payload actually sent (§5.2), because that is the byte
 	// sequence the provider's KV cache holds: a first call that starts anywhere else is a new
@@ -335,21 +374,18 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 		s.logf("compaction (%s): the payload this process sent is not a prefix of the path, so the summary is cut from the one assembled now: expect a full prefill", trig)
 	}
 
-	// The shape is decided here, not above, because it is a question about these bytes.
-	if p.SummaryMode != compact.ModeIterative && p.SummaryMode != compact.ModeMapReduce {
-		if one := s.summaryRequestSize(refs, sumRegion, strings.TrimSpace(instruction), plan.Split, p); compact.NeedsIterative(one, nctx) {
-			s.logf("compaction (%s): one summary request would be %d tokens against a %d-token window, summarising serially",
-				trig, one, nctx)
-			p.SummaryMode = compact.ModeIterative
-		}
-	}
-
 	summaryModel := cfg.LLM.Model
 	tries := p.MaxAttempts
 	if tries < 1 {
 		tries = 1
 	}
 	extra := strings.TrimSpace(instruction)
+	// This round's bill starts here: every call record appends from this line to the commit belongs
+	// to the entry this round commits — a gate retry's extra attempts included, because those calls
+	// were this entry's money spent — while res keeps the same calls as the run's running total for
+	// the report. Round 2 must not be billed for round 1's requests, and the entry written in round
+	// 2 must not claim them either.
+	start := len(res.SummaryUsage)
 
 	for {
 		var (
@@ -357,13 +393,23 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 			size int
 			err  error
 		)
+		// roundText/roundSize are the attempts of THIS round and only this round. res is the
+		// run's carry-over across the replay — and its SummaryText/SummaryTokens still hold the
+		// PREVIOUS round's committed summary when this round's every attempt fails. The oversized
+		// gate reads res, so without this the gate would offer — and an Accept would commit —
+		// a stale summary at a boundary that never produced it (live-fire 2026-11-12: round 3's
+		// three failed attempts opened the gate quoting round 2's 3405 tokens).
+		var (
+			roundText string
+			roundSize int
+		)
 		// One line per call the summariser actually made, into the result that carries every
 		// outcome — committed, gated or skipped — because a summariser call costs what it costs
 		// whether or not its text was kept.
 		record := func(a ir.SummaryAttempt) { res.SummaryUsage = append(res.SummaryUsage, a) }
 		for attempt := 1; attempt <= tries; attempt++ {
 			res.Attempts = attempt
-			text, size, err = s.summarize(ctx, cfg, p, plan, region, ruler, refs, extra, attempt, record)
+			text, size, err = s.summarize(ctx, cfg, p, plan, virt, vsizes, refs, extra, attempt, round, record)
 			if err != nil {
 				s.logf("compaction (%s): attempt %d failed: %v", trig, attempt, err)
 				extra = ""
@@ -371,8 +417,9 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 			}
 			res.SummaryTokens = size
 			res.SummaryText = text
+			roundText, roundSize = text, size
 			if p.Accepts(nctx, size) {
-				return s.commitCompaction(ctx, cfg, p, plan, text, size, summaryModel, res)
+				return s.commitRound(ctx, cfg, p, plan, text, size, summaryModel, res, res.SummaryUsage[start:], level, round)
 			}
 			// The percentage printed beside the cap is the config's own summaryCap — the number
 			// that sized this very request and now grades its answer; there is no second number
@@ -382,194 +429,48 @@ func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual b
 			extra = fmt.Sprintf("your previous attempt was %d tokens and the cap is %d: compress further, drop detail instead of structure",
 				size, res.SummaryCap)
 		}
-		if res.SummaryText == "" {
-			// Every attempt failed on the provider: fail open, keep everything (§1.1).
+		// the attempt of a later replay round must not be measured against an earlier
+		// round's kept summary, which res still carries when this round produced nothing
+		if roundText == "" {
+			// Every attempt failed on the provider: fail open, keep everything (§1.1). Mid-replay the
+			// earlier rounds keep — res still reports the entry they committed.
 			res.Skipped = "summary generation failed"
 			if err != nil {
 				res.Skipped += ": " + err.Error()
 			}
-			return res
+			return res, false
 		}
 		// Oversized after maxAttempts: the three-option gate (§3.4). The compaction lock is
 		// still held while waiting, so nothing else can write during the wait.
+		s.logf("compaction (%s): oversized after %d attempt(s): the summary is %d tokens and the cap is %d",
+			trig, p.MaxAttempts, roundSize, res.SummaryCap)
 		decision := s.askGate(ctx, &res)
 		switch decision {
 		case GateAccept:
 			res.Gate = string(GateAccept)
-			return s.commitCompaction(ctx, cfg, p, plan, res.SummaryText, res.SummaryTokens, summaryModel, res)
+			return s.commitRound(ctx, cfg, p, plan, roundText, roundSize, summaryModel, res, res.SummaryUsage[start:], level, round)
 		case GateRetry:
 			tries = p.MaxAttempts
 			if tries < 1 {
 				tries = 1
 			}
-			extra = fmt.Sprintf("the earlier attempts were %d tokens and the cap is %d: this must fit", res.SummaryTokens, res.SummaryCap)
+			extra = fmt.Sprintf("the earlier attempts were %d tokens and the cap is %d: this must fit", roundSize, res.SummaryCap)
 			continue
-		default: // skip / aborted: history is left exactly as it was (§3.4)
+		default: // skip / aborted: history is left exactly as it was (§3.4) — the whole replay ends,
+			// committed rounds included; a person said stop, not "stop after the next entry fits"
 			res.Gate = string(GateSkip)
 			res.Skipped = "user chose to keep the full history"
-			return res
+			return res, false
 		}
 	}
 }
 
-// summarizeIterative runs the serial rolling summary (compact.ModeIterative, and the automatic
-// fallback whenever the region is bigger than one summariser call can carry). Serial on purpose:
-// this is a local model, so parallel parts would queue on the same GPU instead of helping.
-//
-// Every part is asked in the shape of §3.1 (see compact.ChunkRequest): the first part IS the prefix
-// the loop already put in the provider's cache, and the parts after it are the payload's own
-// messages behind the running summary. Cutting the region into parts is a decision about bytes, so
-// it is made against the ruler and reported next to what the server counted.
-func (s *Session) summarizeIterative(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
-	cut []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int, record func(ir.SummaryAttempt)) (string, int, error) {
-
-	nctx := s.nctxLocked()
-	chunks := compact.PlanChunks(cut, ruler, nctx, p)
-	if len(chunks) == 0 {
-		return "", 0, errors.New("nothing to summarise")
-	}
-	if p.SummaryMode == compact.ModeMapReduce {
-		s.logf("compaction: summaryMode %q is not implemented yet, running the serial chain instead", compact.ModeMapReduce)
-	}
-	clipped := false
-	for _, c := range chunks {
-		if c.Clipped {
-			clipped = true
-		}
-	}
-	if note := compact.ChunkInstructionNote(len(chunks), clipped); note != "" {
-		s.logf("compaction: %s (%d tokens to read, %d tokens fit one request)", note,
-			compact.RegionTokens(cut, ruler), p.ChunkFit(nctx))
-	}
-
-	prev, reported, reasoned := "", 0, 0
-	for i, c := range chunks {
-		if err := ctx.Err(); err != nil {
-			return "", 0, err
-		}
-		in := compact.ChunkInput{
-			Head:  refs.head,
-			Tools: refs.tools,
-			Prev:  prev,
-			Index: i + 1, Total: len(chunks),
-			Split: plan.Split,
-			Extra: extra,
-		}
-		// Entry number k of the region is message number k after the system head: the assembler builds
-		// the two lists in step (§2.1), so a part boundary is an offset rather than a lookup.
-		//
-		// Part 1 takes the payload from its first message through the end of the part — that slice is
-		// the cache hit, and the request that starts anywhere else pays for the conversation again.
-		// It is also the whole part, so it carries no Chunk of its own.
-		if i == 0 {
-			in.Prefix, _ = refs.through(c.Start + len(c.Entries))
-		}
-		if len(in.Prefix) == 0 {
-			if msgs, ok := refs.messages(c.Start, c.Start+len(c.Entries)); ok {
-				in.Chunk = msgs
-			} else {
-				// The part is outside anything this process sent: a time travel, a deleted entry, or a
-				// path rebuilt after a restart. Flattening it is worse for the cache and it loses a
-				// structuredContent document the model would otherwise have been given, so it says so —
-				// silently summarising less than the log claims is how this whole investigation started.
-				s.logf("compaction: part %d/%d is outside the payload this process sent; its %d entries go as a flat transcript",
-					i+1, len(chunks), len(c.Entries))
-				in.Chunk = []asm.Message{{Role: "user",
-					Content: "Conversation to compress:\n\n" + compact.Transcript(c.Entries)}}
-			}
-		}
-		call := p.ChunkRequest(nctx, in)
-		req := summaryRequest(cfg, call)
-		// The prefix rides as references (this process remembers what it sent, not
-		// what it would cost to re-encode); the wire gets the bytes, fetched per
-		// image now and dropped when this request is done.
-		wireMsgs, err := asm.ExpandMessages(req.Messages, logBlobs{log: s.log})
-		if err != nil {
-			// A blob that cannot be read is no retry's business: record the part as
-			// what stopped and end the attempt.
-			record(ir.SummaryAttempt{Attempt: attempt, Part: i + 1, Parts: len(chunks), Failed: err.Error()})
-			return "", 0, fmt.Errorf("part %d/%d: %w", i+1, len(chunks), err)
-		}
-		req.Messages = wireMsgs
-		s.emit(Event{Type: EvtCompact, Data: map[string]any{
-			"stage": "summarizing", "attempt": attempt, "part": i + 1, "parts": len(chunks)}})
-		started := time.Now()
-		res, err := s.provider.Complete(ctx, req)
-		att := ir.SummaryAttempt{Attempt: attempt, Part: i + 1, Parts: len(chunks), Ms: time.Since(started).Milliseconds()}
-		if err != nil {
-			// The Result of a failed call is nil unless the provider read one before it died —
-			// usage rides whichever the provider actually returned, and nothing here may
-			// dereference the one it did not.
-			if res != nil && res.Usage != nil {
-				att.Usage = res.Usage
-			}
-			att.Failed = err.Error()
-			record(att)
-			return "", 0, fmt.Errorf("part %d/%d: %w", i+1, len(chunks), err)
-		}
-		att.Usage = res.Usage
-		text := strings.TrimSpace(res.Content)
-		if res.Usage != nil {
-			reported = res.Usage.CompletionTokens
-			// The reasoning that belongs to this part's completion: SummarySize shares the completion out
-			// between the reasoning and the text, and a later part's numbers must not be blamed on an
-			// earlier part's chain of thought.
-			reasoned = len(res.Reasoning)
-		}
-		// What the part was supposed to carry and what the server counted are the same number for any
-		// request that carried its part, so a large gap names a part that never made it into the request.
-		// It is said out loud rather than returned as an error, because the gap has an honest cause too: a
-		// part whose entries are mostly structuredContent is priced at the assembler's ceiling and handed
-		// over at its beginning, and a session that could never compact would be worse than one whose log
-		// says something alarming — which is how this line caught the off-by-one in the first place.
-		if res.Usage != nil && res.Usage.HasPrompt && c.Tokens > 200 && res.Usage.PromptTokens < c.Tokens/2 {
-			s.logf("compaction: WARNING part %d/%d was planned at %d tokens but the server counted %d in the prompt — the part may not be in the request it was sent in",
-				i+1, len(chunks), c.Tokens, res.Usage.PromptTokens)
-		}
-		// The three numbers that used to live in three different places and could therefore disagree
-		// forever: what the ruler said this part would cost, what the server counted, and what the
-		// server could reuse. On one line they either agree or they name the bug.
-		prompt, reused, answer := "n/a", "n/a", "n/a"
-		if res.Usage != nil {
-			answer = fmt.Sprint(res.Usage.CompletionTokens)
-			if res.Usage.HasPrompt {
-				prompt, reused = fmt.Sprint(res.Usage.PromptTokens), fmt.Sprint(res.Usage.CacheTokens)
-			}
-		}
-		s.logf("compaction: part %d/%d read %s ≈%d tokens → prompt %s, reused %s (%s), answer %s",
-			i+1, len(chunks), entriesUnit(len(c.Entries)), c.Tokens, prompt, reused,
-			map[bool]string{true: "prefix of the last request", false: "payload rebuilt"}[refs.warm], answer)
-		// Said after the numbers, never before them: "empty summary" on its own is not a fact anybody can
-		// act on, and the two ways it happens want opposite fixes — a model that spent the whole completion
-		// reasoning ends a request exactly like a model that refused to answer.
-		if text == "" {
-			reason, tokens := "unknown", "n/a"
-			if res.FinishReason != "" {
-				reason = res.FinishReason
-			}
-			if res.Usage != nil {
-				tokens = fmt.Sprint(res.Usage.CompletionTokens)
-			}
-			att.Failed = fmt.Sprintf("empty summary (finish_reason %s, %s completion tokens, %d characters of reasoning)",
-				reason, tokens, len(res.Reasoning))
-			record(att)
-			return "", 0, fmt.Errorf("part %d/%d: %s", i+1, len(chunks), att.Failed)
-		}
-		record(att)
-		prev = text
-	}
-	if strings.TrimSpace(prev) == "" {
-		return "", 0, errors.New("empty summary")
-	}
-	return prev, compact.SummarySize(reported, reasoned, prev), nil
-}
-
-// ─── what a summary is cut from ─────────────────────────────────────────
+// ─── what a summary is cut from ─────────────────────────────────
 //
 // A summary is not asked about the conversation in the abstract; it is asked about a particular
 // sequence of bytes, and the cheaper candidate is always the one already sitting in the provider's KV
 // cache. Which one that is a fact about what this process has sent, so it is worked out once, here,
-// and the answer is carried to every part of the chain.
+// and the answer is carried to the round's request.
 type payloadRefs struct {
 	// msgs is the payload a summary is cut from: the messages that went on the wire, or the ones
 	// assembled now when nothing matches them.
@@ -579,16 +480,13 @@ type payloadRefs struct {
 	// off is the number of messages before the first entry: 1 with a system prompt, 0 without. The
 	// assembler builds the two lists in step (§2.1), so a region index is a message index plus this.
 	off int
-	// head is msgs[:off] alone: what every part of a chain repeats byte for byte, which for parts 2..N
-	// is the only prefix there is.
-	head []asm.Message
 	// tools is the tool array of that same request. A chat template renders the definitions before the
 	// messages, so a summary asked without them can reuse nothing — and is asked about a conversation
 	// in which the assistant had no tools either.
 	tools []llm.Tool
 	// warm says the payload was sent by this process, so a prefix of it is a prefix of what the
-	// provider has cached. When it is false the chain still runs — a summary is worth eight minutes of
-	// prefill — but the log says what it cost, and nothing here may claim a cache it does not have.
+	// provider has cached. When it is false the summary still runs — a summary is worth eight minutes
+	// of prefill — but the log says what it costs, and nothing here may claim a cache it does not have.
 	warm bool
 }
 
@@ -621,7 +519,7 @@ func summaryPayload(sent []asm.Message, sentIDs []string,
 	// An id list of nothing but empty strings says the payload came from a caller that never named its
 	// entries, which is a payload no claim can be checked against: no ids means no claim.
 	warm := len(sent) > 0 && named(sentIDs) && samePrefix(sentIDs, curIDs) && sameBytes(sent, cur)
-	return payloadRefs{msgs: cur, ids: curIDs, off: off, head: cur[:off], tools: curTools, warm: warm}
+	return payloadRefs{msgs: cur, ids: curIDs, off: off, tools: curTools, warm: warm}
 }
 
 // sameBytes reports whether sent is still the front of cur, message for message. Deep equality is the
@@ -637,14 +535,6 @@ func sameBytes(sent, cur []asm.Message) bool {
 		}
 	}
 	return true
-}
-
-// entriesUnit writes the count of a part's entries the way the line is read: "1 entry", "12 entries".
-func entriesUnit(n int) string {
-	if n == 1 {
-		return "1 entry"
-	}
-	return fmt.Sprintf("%d entries", n)
 }
 
 // samePrefix reports whether a is the front of b. A payload longer than the path is never a prefix of
@@ -677,17 +567,10 @@ func named(ids []string) bool {
 	return true
 }
 
-// messages is the payload messages of region entries [lo:hi), and whether the payload describes them.
-func (r payloadRefs) messages(lo, hi int) ([]asm.Message, bool) {
-	if r.msgs == nil || lo < 0 || hi <= lo || r.off+hi > len(r.msgs) {
-		return nil, false
-	}
-	return r.msgs[r.off+lo : r.off+hi], true
-}
-
-// through is part 1's prefix: the payload from its first message through the end of entry hi-1 — the
-// whole of what the provider already holds that this part covers, which is what turns the first call
-// of a chain into a cache hit instead of a new conversation of the same size.
+// through is a round's prefix: the payload from its first message through the end of entry hi-1 —
+// the planning path up to the cut, in the bytes the provider already holds wherever they are warm.
+// It is the conversation the summary is asked about and the cache boundary in the same slice: what
+// follows it on the path is, for this round, not there yet.
 func (r payloadRefs) through(hi int) ([]asm.Message, bool) {
 	if r.msgs == nil || hi <= 0 || r.off+hi > len(r.msgs) {
 		return nil, false
@@ -735,81 +618,51 @@ func summaryRequest(cfg Config, call compact.SummaryCall) llm.Request {
 	return req
 }
 
-// summaryRequestSize is the size of the one request the single-call shape would put on the wire: the
-// prompt the provider counted for the payload this summary is cut from (the same bytes, so the same
-// count), or — when this process never sent those bytes — the region priced with the reference ruler;
-// plus the instruction that gets appended; plus the entries the payload does not carry yet.
-//
-// Attachments ride along at asm's reference cost (an image is 1000) because RegionTokens asks asm.
-// It is compared against n_ctx and nothing else: the question is whether the call can be sent at all,
-// not how long the answer may be (that is compact.Params.SummaryCap).
-func (s *Session) summaryRequestSize(refs payloadRefs, sumRegion []*ir.Entry, extra string, split bool, p compact.Params) int {
-	size := 0
-	if used, ok := s.usedNow(); ok && refs.warm {
-		size = used
-	} else {
-		size = compact.RegionTokens(sumRegion, nil)
-	}
-	// The payload carries the conversation up to some point of the region; whatever the path holds past
-	// that point is going on the wire for the first time in this request. Only a warm payload says
-	// where that point is — a rebuilt one has no ids worth counting against.
-	if refs.warm {
-		carried := 0
-		for _, id := range refs.ids {
-			if id != "" {
-				carried++
-			}
-		}
-		if carried < len(sumRegion) {
-			size += compact.RegionTokens(sumRegion[carried:], nil)
-		}
-	}
-	return size + compact.TextTokens(p.SummaryInstruction(split)) + compact.TextTokens(extra)
-}
-
-// summarize performs one summary attempt with the complete (non-streaming) call of §3.5.
-// record sees every summariser call this attempt made — kept, refused or broken — for the
-// same reason the serial chain takes it: the money was spent per call, not per kept text.
+// summarize performs one summary attempt of the replay round with the complete (non-streaming)
+// call of §3.5. The request is cut from the round's virtual path: the payload bytes up to the
+// plan's cut — [head?][cmp0?][...msgX][instruction] — so the model is asked about exactly what the
+// round chose to replace, in the bytes the provider has cached where they are warm, and the entries
+// behind the cut are neither sent nor paid for twice. Where those bytes cannot carry the question
+// the region goes as a flat transcript instead, which is lossy but honest. record sees every
+// summariser call this attempt made — kept, refused or broken — because the money was spent per
+// call, not per kept text.
 func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
-	region []*ir.Entry, ruler *compact.Ruler, refs payloadRefs, extra string, attempt int, record func(ir.SummaryAttempt)) (string, int, error) {
+	virt []*ir.Entry, vsizes *asm.Sizes, refs payloadRefs, extra string, attempt int, round int, record func(ir.SummaryAttempt)) (string, int, error) {
 
-	// The summary request is itself bound by n_ctx. When the region does not fit one call there is
-	// no way to summarise it in one piece, and the session is stuck too big to send and too big to
-	// summarise - so fall back to the serial chain, which never asks for more than one fit.
-	sumRegion := region
-	if plan.Cut < len(region) {
-		sumRegion = region[:plan.Cut]
-	}
-	switch p.SummaryMode {
-	case compact.ModeIterative, compact.ModeMapReduce:
-		return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt, record)
-	default:
-		if one := s.summaryRequestSize(refs, sumRegion, extra, plan.Split, p); compact.NeedsIterative(one, s.nctxLocked()) {
-			s.logf("compaction: one summary request would be %d tokens against a %d-token window, summarising serially",
-				one, s.nctxLocked())
-			return s.summarizeIterative(ctx, cfg, p, plan, sumRegion, ruler, refs, extra, attempt, record)
-		}
-	}
+	nctx := s.nctxLocked()
+	sumRegion := virt[:plan.Cut]
+	instrTok := compact.TextTokens(p.SummaryInstruction(plan.Split)) + compact.TextTokens(extra)
 
-	call := p.BuildRequest(s.nctxLocked(), refs.msgs, refs.tools, plan.Split, extra)
-	if p.SummaryMode != compact.ModePrefixStable || len(refs.msgs) == 0 {
-		// Shape B asks with no cache affinity, so the flat transcript of the region is the payload
-		// (spec §3.1). The second half of the condition is the case shape B cannot be reached without:
-		// a payload whose ids did not describe its messages, so there is nothing to send as a prefix.
-		// Left alone that is a request of two messages — a system prompt and "compress the conversation
-		// above" — over a conversation the model was never given, and the answer would pass acceptance
-		// and replace the path with a fiction. The transcript is lossy (structuredContent is not in it);
-		// a summary of nothing is not lossy, it is wrong.
-		var cut []*ir.Entry
-		if plan.Cut <= len(region) {
-			cut = region[:plan.Cut]
-		}
-		if len(refs.msgs) == 0 {
-			s.logf("compaction: the payload could not be sliced, so %d entries go to the summariser as a flat transcript", len(cut))
+	// The round's conversation is the planning path's own byte prefix, ending at the cut.
+	prefix, sliced := refs.through(plan.Cut)
+	call := p.BuildRequest(nctx, prefix, refs.tools, plan.Split, extra)
+	if p.SummaryMode != compact.ModePrefixStable || !sliced || vsizes.Total()+instrTok > nctx {
+		// Three roads to the flat transcript, all of them "these bytes cannot carry this question".
+		// Shape B (mode "transcript") asks with no cache affinity, so the region itself is the payload
+		// (spec §3.1). A payload whose ids did not describe its messages has nothing that may be
+		// sliced at any boundary. And a planning path that still overfits the window when cut from
+		// bytes — one pasted document larger than the window is enough — can only be asked about
+		// flattened. Left alone, the last two are a request of two messages — a system prompt and
+		// "compress the conversation above" — over a conversation the model was never given, and the
+		// answer would pass acceptance and replace the path with a fiction. The transcript is lossy
+		// (structuredContent is not in it); a summary of nothing is not lossy, it is wrong.
+		call = p.BuildRequest(nctx, nil, refs.tools, plan.Split, extra)
+		src := sumRegion
+		if sliced && vsizes.Total()+instrTok > nctx {
+			// Every entry bigger than what one request could read is clipped to its beginning and end;
+			// a path that overfits without any single oversized entry can only hope the flattening
+			// itself saved enough — the structuredContent a transcript drops is all it has to give.
+			free := (nctx - instrTok) / 2
+			var clipped int
+			src, clipped = compact.ClipOversized(sumRegion, free)
+			s.logf("compaction: the request cut from the payload bytes would be ~%d tokens against a %d-token window; %d entries go as a flat transcript (%d oversized messages read only at their beginning and end)",
+				vsizes.Total()+instrTok, nctx, len(src), clipped)
+		} else if !sliced {
+			s.logf("compaction: the payload could not be sliced, so %d entries go to the summariser as a flat transcript", len(src))
 		}
 		call.Messages = append(call.Messages, asm.Message{
 			Role:    "user",
-			Content: "Conversation to compress:\n\n" + compact.Transcript(cut),
+			Content: "Conversation to compress:\n\n" + compact.Transcript(src),
 		})
 	}
 	req := summaryRequest(cfg, call)
@@ -822,7 +675,7 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 		return "", 0, err
 	}
 	req.Messages = wireMsgs
-	s.emit(Event{Type: EvtCompact, Data: map[string]any{"stage": "summarizing", "attempt": attempt}})
+	s.emit(Event{Type: EvtCompact, Data: map[string]any{"stage": "summarizing", "attempt": attempt, "round": round}})
 	started := time.Now()
 	res, err := s.provider.Complete(ctx, req)
 	att := ir.SummaryAttempt{Attempt: attempt, Ms: time.Since(started).Milliseconds()}
@@ -859,7 +712,34 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	return text, compact.SummarySize(reported, reasoned, text), nil
 }
 
+// commitRound commits one replay round and decides whether another one follows.
+//
+// The entry carries only the summariser calls this round made — res has been accumulating every
+// round's since the run began, and writing that running list onto the second entry would bill
+// round 1's requests a second time (the total of a catch-up must stay the sum of its entries, not
+// grow into a triangle). The next round exists when the post-commit estimate is still over the line
+// that started the replay; an estimate of 0 means the post-commit rebuild failed, and a round with
+// no number to plan against stops rather than spins in the dark.
+func (s *Session) commitRound(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
+	text string, size int, model string, res CompactResult, roundAtts []ir.SummaryAttempt, level int, round int) (CompactResult, bool) {
+	res = s.commitCompaction(ctx, cfg, p, plan, text, size, model, res, roundAtts)
+	res.Rounds = round
+	if !res.Committed || res.After == 0 || res.After <= level {
+		return res, false
+	}
+	if round >= maxReplayRounds {
+		s.logf("compaction (%s): replay stopped at the round cap with the context still ~%d tokens against the %d-token line — something is wrong with the sizing, not with the conversation",
+			res.Trigger, res.After, level)
+		return res, false
+	}
+	return res, true
+}
+
 // commitCompaction writes the entry and advances the path tip in one storage write (§3.8).
+//
+// roundAtts is the bill of the round that is committing: every summariser call it made, and only
+// its own — the run's running total lives in res for the report, while the entry tells exactly what
+// this compaction cost (§2.4's honest accounting: a compaction entry cost what its own calls cost).
 //
 // It checks the context first because a summary is one entry written at the end or nothing at all, and the
 // gap between the last token and this line is a moment somebody could have spent stopping it: a boundary
@@ -867,13 +747,13 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 // nothing to a session that stopped asking. This is what makes "nothing is written until it finishes" true
 // even for a stop that lands on the final turn of the summary - which is the promise the composer's square
 // and the summary row of the API both make.
-func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan, text string, size int, model string, res CompactResult) CompactResult {
+func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan, text string, size int, model string, res CompactResult, roundAtts []ir.SummaryAttempt) CompactResult {
 	if err := ctx.Err(); err != nil {
 		res.Skipped = "nothing was written: the summary was ended before it could be committed"
 		return res
 	}
 	meta := compact.MetaOf(p, plan, model, res.Before, size)
-	meta.Summary = res.SummaryUsage
+	meta.Summary = roundAtts
 	content := p.Prefix(text)
 	entry, err := s.appendEntry(&ir.Entry{
 		Kind:    ir.KindCompaction,
@@ -881,8 +761,10 @@ func (s *Session) commitCompaction(ctx context.Context, cfg Config, p compact.Pa
 		Content: content,
 		// The entry's own usage is the total of the summariser calls that wrote it, refused
 		// retries included: those requests are exactly what this entry cost, and the cost bill
-		// can then count a compaction like any other request without learning about meta.
-		Usage:      summaryTotal(res.SummaryUsage),
+		// can then count a compaction like any other request without learning about meta. Under
+		// replay this holds per entry — summing a catch-up's entries is its true total, never a
+		// re-count of an earlier round.
+		Usage:      summaryTotal(roundAtts),
 		Compaction: &meta,
 		Model:      model,
 		Label:      fmt.Sprintf("compaction (%s)", res.Trigger),
@@ -974,16 +856,20 @@ func (s *Session) askGate(ctx context.Context, res *CompactResult) GateAnswer {
 	s.logf("compaction needs a decision: summary %d tokens, cap %d, %d attempts", res.SummaryTokens, res.SummaryCap, res.Attempts)
 
 	decision := GateSkip
+	why := ""
 	select {
 	case d := <-ch:
 		decision = d.answer
 	case <-ctx.Done():
-		decision = GateSkip
+		// Not a person's skip: the summary's own context died (Stop, an interrupt, or the
+		// gate opening over an already-cancelled run). Say so — "gate decision: skip" after
+		// a stop reads like someone clicked the button (live-fire 2026-11-12).
+		decision, why = GateSkip, " (nothing waited: the summary was ended)"
 	case <-time.After(30 * time.Minute):
-		decision = GateSkip
+		decision, why = GateSkip, " (nobody answered within 30 minutes)"
 	}
 	s.emit(Event{Type: EvtRequestDone, Info: id})
-	s.logf("gate decision: %s", decision)
+	s.logf("gate decision: %s%s", decision, why)
 	return decision
 }
 

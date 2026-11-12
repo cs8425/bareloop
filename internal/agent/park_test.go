@@ -161,20 +161,21 @@ func TestAWakeDueWhileTheDaemonWasDownIsAnsweredLate(t *testing.T) {
 }
 
 func TestAScheduledWakeDoesNotExplainItself(t *testing.T) {
-	// Due three seconds from now, and this number has two ends that pull against each other, which is why it
-	// is neither smaller nor bigger. Below, it is the moment `recoverPark` asks about: pass it and the
-	// honest answer is to answer the wait at once, so a fixture that is slow to create its session and write
-	// its log reports a lost race ("the session did not pick the wait up") instead of the wake it came to
-	// ask about. Above, it is the rest of the wait the wake still sleeps before it may answer — the clock
-	// the tick below hands in says only whether it is due, not that the answer may skip the wait — so the
-	// number also sets how long the path may take, and the wait for it is a finite one.
-	s := parkFixture(t, "ontime", "wait", time.Now().Add(3*time.Second-6*time.Hour), `{"duration":"6h"}`)
-	s.recoverPark()
+	// All the clocks here are handed in, which is what the scan and the tick now ask of: the deadline
+	// is exactly the moment the entry promises — the ask plus six hours — and the scan is asked a
+	// minute before it, the tick a second after. While this test bet the 3 seconds between a fixture's
+	// `time.Now()` and `recoverPark`'s, a session slow to create answered the wait before the scan ran
+	// and reported a lost race ("the session did not pick the wait up") instead of the wake it came to
+	// ask about; with moments chosen here, there is no race left to lose, and no sleep either.
+	asked := time.Now().Add(-6 * time.Hour)
+	s := parkFixture(t, "ontime", "wait", asked, `{"duration":"6h"}`)
+	due := asked.Add(6 * time.Hour)
+	s.recoverParkAt(due.Add(-time.Minute))
 	if !s.isParked() {
 		t.Fatal("the session did not pick the wait up")
 	}
 
-	s.parkTickAt(time.Now().Add(time.Minute))
+	s.parkTickAt(due.Add(time.Second))
 	got, note := toolResult(t, waitForPath(t, s, 2)[1])
 	if got["status"] != "completed" {
 		t.Errorf("status = %v, want completed: a wake that came on time is not an interruption", got["status"])

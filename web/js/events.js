@@ -282,15 +282,16 @@ export function onCompaction(r) {
       el(
         'div',
         '',
-        `context ${fmtN(r.before)} \u2192 ${fmtN(r.after)} · replaced ${r.replaced ?? 0} entries · summarised ${fmtN(r.summarizeTokens)} \u2192 kept ${fmtN(r.keptTokens)} · attempts ${r.attempts ?? 0}${r.empty ? ' · context emptied' : ''}${r.split ? ' · split turn' : ''}`,
+        `context ${fmtN(r.before)} \u2192 ${fmtN(r.after)} · replaced ${r.replaced ?? 0} entries · summarised ${fmtN(r.summarizeTokens)} \u2192 kept ${fmtN(r.keptTokens)} · attempts ${r.attempts ?? 0}${r.rounds > 1 ? ` · ${r.rounds} catch-up rounds` : ''}${r.empty ? ' · context emptied' : ''}${r.split ? ' · split turn' : ''}`,
       ),
     );
   } else {
     box.appendChild(el('div', '', `nothing was written — the history still holds ${fmtN(r.before)} tokens of context`));
-    // A round that wrote nothing still spent tokens — every refused retry, and every call of a chain a
+    // A round that wrote nothing still spent tokens — every refused retry, and every call of a replay a
     // stop interrupted. A committed compaction bills those on its entry, which the cost panel counts;
     // an aborted one has no entry at all, so the banner is the only place that bill is ever seen, and
-    // it says so instead of letting the round look free.
+    // it says so instead of letting the round look free. When rounds did commit, this banner shows only
+    // the last round's failure — the committed rounds are billed on their own entries.
     const atts = r.summaryUsage || [];
     if (atts.length) {
       const spent = atts.reduce((a, x) => a + ((x.usage && x.usage.prompt) || 0) + ((x.usage && x.usage.completion) || 0), 0);

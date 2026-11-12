@@ -157,9 +157,12 @@ func (p Params) Normalise() Params {
 		p.Marker = d.Marker
 	}
 	switch p.SummaryMode {
-	case ModeTranscript, ModeIterative, ModeMapReduce:
-		// legal values, kept as written (map-reduce runs the serial chain until it is implemented)
+	case ModeTranscript:
+		// legal value, kept as written
 	default:
+		// "iterative" and "map-reduce" lived here once: the serial chain that read them is gone,
+		// replaced by replay (the compactor now re-runs the normal compaction until the path fits
+		// again), so an old config asking for them gets the default and nothing else.
 		p.SummaryMode = ModePrefixStable
 	}
 	if p.Mode == "" {
@@ -404,6 +407,37 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 		return pl, true
 	}
 	return &Plan{Reason: ReasonNoBoundary}, false
+}
+
+// Tipping returns the PLANNING PATH of one replay round and the size table to plan it with: the
+// shortest prefix of path whose estimated cost (head plus entries) first crosses level, or the whole
+// path when nothing crosses it.
+//
+// Why a virtual path at all: a compaction is specced against the conversation as it would have been
+// sent, and when one such event is over the window the answer is not a different compaction — it is
+// the normal one run again from an earlier message (round 1 plans against [cmp0?, ...msgX], its
+// summary becomes round 2's cmp0, and so on until the estimate is back under the line). Replaying against the full path every round would plan every round's cut against
+// bytes the round never asks about, so a round is planned, summarised and judged exactly like a
+// normal compaction of the prefix it was given — same floors, same boundary rules, same Select.
+//
+// The estimate is sizes', which is the estimate the loop's own accounting runs on: a prefix that
+// does not tip on it is a path the trigger would not have fired on, and the caller plans it whole.
+func Tipping(path []*ir.Entry, sizes *asm.Sizes, level int) ([]*ir.Entry, *asm.Sizes) {
+	if sizes == nil || level <= 0 || len(path) == 0 {
+		return path, sizes
+	}
+	n := sizes.Head()
+	for i, e := range path {
+		if e == nil {
+			continue
+		}
+		n += sizes.Tokens(e.ID)
+		if n > level {
+			v := path[:i+1]
+			return v, sizes.View(v)
+		}
+	}
+	return path, sizes
 }
 
 // floorCut is the deepest cut index that still leaves keep entries at a legal boundary, or -1 when

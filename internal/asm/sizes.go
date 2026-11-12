@@ -7,8 +7,8 @@ package asm
 // the conversation that happened to precede it. That is what makes the number worth keeping:
 // Stamp measures each entry once, along the path in the order the requests were made, and writes
 // the result on the entry (ir.Entry.Tokens). Anything reading sizes afterwards — the boundary
-// walk, a compaction's "after", a chunk plan — takes the number that was counted instead of
-// re-deriving it from a payload that may since have been rewritten by another compaction.
+// walk, a compaction's "after", a replay round's plan — takes the number that was counted instead
+// of re-deriving it from a payload that may since have been rewritten by another compaction.
 //
 // One piece is never counted as itself: the system prompt and the tool schemas sit in front of
 // every request, so the first request's prompt contains them and no subtraction can separate them
@@ -66,6 +66,23 @@ func (s *Sizes) Get(id string) (Size, bool) {
 
 // Head is the estimated floor in front of every payload.
 func (s *Sizes) Head() int { return s.floor }
+
+// View is the same price table read through a shorter payload: the same per-entry numbers and the
+// same head, ordered by path instead of by the payload this table was derived from. It exists for
+// planning against a virtual path — the prefix a replay round pretends the conversation is made of
+// (compact.Tipping) — where walking the boundary on the full path's totals would plan a cut that
+// never happens. The two tables share one map and never write it; an id that is not in the table
+// prices to 0 exactly as it does on the full view.
+func (s *Sizes) View(path []*ir.Entry) *Sizes {
+	v := &Sizes{per: s.per, floor: s.floor}
+	v.order = make([]string, 0, len(path))
+	for _, e := range path {
+		if e != nil {
+			v.order = append(v.order, e.ID)
+		}
+	}
+	return v
+}
 
 // Order returns the payload entry ids in send order.
 func (s *Sizes) Order() []string { return s.order }

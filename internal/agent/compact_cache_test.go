@@ -9,9 +9,9 @@ package agent
 // and leaving out of the summary the one field that switches the model's thinking on — which changes
 // every byte of the prompt.
 //
-// The tests below are the three claims that fix it: a part begins with bytes the provider already has;
-// a size the server reported outranks an estimate; and every call of a session is cut from one thinking
-// level.
+// The tests below are the three claims that fix it: a summary request begins with bytes the provider
+// already has; a size the server reported outranks an estimate; and every call of a session is cut from
+// one thinking level.
 
 import (
 	"context"
@@ -59,30 +59,26 @@ func TestSummaryPayloadIsWarmWhileTheSentPayloadIsStillTheFront(t *testing.T) {
 		t.Fatal("a payload that is still the front of the path is exactly the prefix worth sending")
 	}
 	if len(refs.msgs) != len(cur) {
-		t.Fatalf("the chain is cut from the payload that describes the whole path: %d messages, want %d — the two entries nobody has sent are still entries that have to be summarised",
+		t.Fatalf("a summary is cut from the payload that describes the whole path: %d messages, want %d — the two entries nobody has sent are still entries that have to be summarised",
 			len(refs.msgs), len(cur))
 	}
-	if len(refs.head) != 1 || refs.head[0].Role != "system" {
-		t.Fatalf("every part after the first opens with the system message, so it has to be separable: %+v", refs.head)
-	}
-	// Part 1 wants everything from the top through its last entry; a later part wants only its own.
+	// A round wants everything from the top through its cut, and nothing behind it. The offset
+	// between a message index and an entry index is the whole danger: one system message in front
+	// shifts every slice, and the summary lands over the wrong conversation.
 	if pre, ok := refs.through(1); !ok || len(pre) != 2 || !reflect.DeepEqual(pre, cur[:2]) {
-		t.Fatalf("part 1's prefix = %v, want the system head and entry 0", pre)
+		t.Fatalf("a round cut after entry 0 = %v, want the system head and entry 0", pre)
 	}
-	if got, ok := refs.messages(0, 1); !ok || !reflect.DeepEqual(got, cur[1:2]) {
-		t.Fatalf("entry 0 = message 1 behind a system head, got %v (%v)", got, ok)
-	}
-	if got, ok := refs.messages(1, 2); !ok || !reflect.DeepEqual(got, cur[2:3]) {
-		t.Fatalf("entry 1 = message 2, got %v (%v)", got, ok)
+	if pre, ok := refs.through(2); !ok || !reflect.DeepEqual(pre, cur[:3]) {
+		t.Fatalf("entry 1 sits at message 2 behind a system head, got %v (%v)", pre, ok)
 	}
 	// An entry past the sent prefix is cold, not unknowable: it is on the path, the payload assembled
 	// now carries it, and flattening it into a transcript would lose every tool result whose answer
 	// travels in structuredContent.
-	if got, ok := refs.messages(2, 3); !ok || !reflect.DeepEqual(got, cur[3:4]) {
-		t.Fatalf("entry 2 arrived after the last request and still has to reach the summariser, got %v (%v)", got, ok)
+	if pre, ok := refs.through(3); !ok || !reflect.DeepEqual(pre, cur[:4]) {
+		t.Fatalf("entry 2 arrived after the last request and still has to reach the summariser, got %v (%v)", pre, ok)
 	}
 	if pre, ok := refs.through(4); !ok || len(pre) != len(cur) {
-		t.Fatalf("a part reaching the end of the path wants the whole payload, got %d messages (%v)", len(pre), ok)
+		t.Fatalf("a round reaching the end of the path wants the whole payload, got %d messages (%v)", len(pre), ok)
 	}
 }
 
@@ -139,14 +135,11 @@ func TestSummaryPayloadDropsTheSentPayloadTheMomentThePathMoves(t *testing.T) {
 func TestSummaryPayloadWithoutASystemPrompt(t *testing.T) {
 	cur := []asm.Message{{Role: "user", Content: "one"}, {Role: "assistant", Content: "two"}}
 	r := summaryPayload(nil, nil, cur, []string{"e1", "e2"}, nil, 2)
-	if len(r.head) != 0 {
-		t.Fatalf("no system prompt means no head, got %+v", r.head)
-	}
-	if got, ok := r.messages(0, 1); !ok || got[0].Content != "one" {
+	if got, ok := r.through(1); !ok || len(got) != 1 || got[0].Content != "one" {
 		t.Fatalf("entry 0 is message 0 when nothing precedes it: %+v (%v)", got, ok)
 	}
 	if got, ok := r.through(2); !ok || len(got) != 2 {
-		t.Fatalf("part 1 wants both messages, got %d (%v)", len(got), ok)
+		t.Fatalf("a round cut at the end of the path wants both messages, got %d (%v)", len(got), ok)
 	}
 }
 
@@ -161,7 +154,7 @@ func TestSummaryPayloadRefusesToSliceAPayloadItCannotRead(t *testing.T) {
 		t.Fatal("three entries cannot be cut out of one message")
 	}
 	if _, ok := r.through(1); ok {
-		t.Fatal("and no part can be sliced out of it either")
+		t.Fatal("and nothing can be sliced out of it either")
 	}
 }
 
@@ -221,11 +214,11 @@ func TestSummaryRequestKeepsTheThinkingLevelOfTheTurn(t *testing.T) {
 	}
 }
 
-// ─── the chain, end to end ───────────────────────────────────────────────────
+// ─── the replay, end to end ───────────────────────────────────────────────────
 
 // chainProvider records every summary call and answers it. The usage is part of the fixture rather than
-// decoration: the ruler and the log line are built on the numbers the server reports, so a provider that
-// reported nothing would let a regression in either pass.
+// decoration: the planning numbers and the log lines are built on the numbers the server reports, so a
+// provider that reported nothing would let a regression in either pass.
 type chainProvider struct {
 	mu   sync.Mutex
 	asks []llm.Request
@@ -326,209 +319,8 @@ func fillChainPath(t *testing.T, s *Session, n, chars int) {
 	}
 }
 
-// chainRun drives the real serial chain with the arguments runCompact computes, and hands back what went
-// out beside the payload the assembler produced. Keeping it in one place is what lets the warm case and
-// the rebuilt case below say the same thing about the shape.
-func chainRun(t *testing.T, s *Session, warm bool) ([]llm.Request, []asm.Message, []llm.Tool) {
-	t.Helper()
-	cfg := s.Config()
-	nctx := s.nctxLocked()
-	p := compact.Params{
-		SummaryMode: compact.ModeIterative, ThresholdPct: 70,
-		SummaryCapPct: 50, Temperature: 0.2, Marker: compact.DefaultMarker,
-	}
-	if p.ChunkFit(nctx) <= 0 {
-		t.Fatalf("no window means no fit: nctx = %d", nctx)
-	}
-	built, _, tools, err := s.build()
-	if err != nil {
-		t.Fatalf("the fixture's window could not be read: %v", err)
-	}
-	if len(tools) == 0 {
-		t.Logf("the fixture produced no tools; the tool assertions below compare two empties")
-	}
-	sent, sentIDs := built.All(), asm.EntryIDs(built)
-	if warm {
-		// The loop sent this payload. That is what makes it worth its bytes.
-		s.rememberSent(sent, sentIDs, tools)
-	}
-	sentMsgs, sentIDsAgain, _ := s.lastSentPayload()
-	refs := summaryPayload(sentMsgs, sentIDsAgain, built.All(), asm.EntryIDs(built), tools, len(built.Entries))
-	if refs.warm != warm {
-		t.Fatalf("warm = %v, want %v", refs.warm, warm)
-	}
-	ruler := compact.NewRuler(built.StructuredCap)
-	var atts []ir.SummaryAttempt
-	text, size, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1, func(a ir.SummaryAttempt) {
-		atts = append(atts, a)
-	})
-	if err != nil {
-		t.Fatalf("the chain failed: %v", err)
-	}
-	if strings.TrimSpace(text) == "" || size <= 0 {
-		t.Fatalf("the chain answered %q (%d tokens)", text, size)
-	}
-	// The size of the answer is the completion the provider reported, not an estimate of it (§0).
-	if size != 40 {
-		t.Fatalf("summary size = %d, want the 40 completion tokens the provider reported", size)
-	}
-	asks := s.provider.(*chainProvider).all()
-	if len(asks) < 2 {
-		t.Fatalf("the chain ran %d call(s) over a region that does not fit one request", len(asks))
-	}
-	// Every call the chain made owes the bill a line, and a successful chain bills no failures.
-	if len(atts) != len(asks) {
-		t.Fatalf("the chain made %d summariser call(s) and recorded %d: every call costs tokens whether its text was kept or not", len(asks), len(atts))
-	}
-	for i, a := range atts {
-		if a.Failed != "" {
-			t.Fatalf("call %d of a successful chain is marked failed: %s", i+1, a.Failed)
-		}
-		if a.Usage == nil {
-			t.Fatalf("call %d of the chain carries no usage although the fixture reports one", i+1)
-		}
-	}
-	return asks, sent, tools
-}
-
-// wantPartOnePrefix fails unless the first call is a prefix of the payload the assembler produced — the
-// messages themselves, in order, with the instruction last. That is the whole of the spec's first
-// request: [cmp0?, ...msgX, summary_prompt] => cmp1, and it is a cache hit only while it is true.
-func wantPartOnePrefix(t *testing.T, req llm.Request, sent []asm.Message) {
-	t.Helper()
-	if len(req.Messages) < 2 {
-		t.Fatalf("part 1 carries no instruction:%s", dumpForTest(req.Messages))
-	}
-	body := req.Messages[:len(req.Messages)-1]
-	if len(body) >= len(sent) {
-		t.Fatalf("part 1 carries %d of the payload's %d messages: a part is a part, or the chain asks for the conversation twice over%s",
-			len(body), len(sent), dumpForTest(req.Messages))
-	}
-	for i, m := range body {
-		if !reflect.DeepEqual(m, sent[i]) {
-			t.Fatalf("message %d of part 1 is not the message the loop sent (%q vs %q): a byte inserted ahead of the prefix is a prompt the provider never cached:%s",
-				i, msgText(m), msgText(sent[i]), dumpForTest(req.Messages))
-		}
-	}
-	if got := msgText(req.Messages[len(req.Messages)-1]); !strings.Contains(got, "part 1 of ") {
-		t.Fatalf("the instruction must be the last message of the prefix: %s", clipForTest(got, 120))
-	}
-}
-
-// TestTheSummaryChainBeginsWithThePayloadTheLoopSent is the spec, end to end:
-//
-//	[cmp0?, ...msgX, summary_prompt] => cmp1
-//	[cmp1, ...msgY, summary_prompt] => cmp2
-//
-// Part 1 is not a request about the conversation; it is the request the loop already made, with the
-// instruction added — the only way it is a cache hit rather than a new conversation of the same size.
-// Part 2 cannot reuse the conversation, so it reuses the one thing it can (the system message, byte for
-// byte) and carries the previous answer where the spec puts cmp1.
-func TestTheSummaryChainBeginsWithThePayloadTheLoopSent(t *testing.T) {
-	s, _ := chainFixture(t, "chain-warm", 4096)
-	fillChainPath(t, s, 6, 3000)
-	asks, sent, tools := chainRun(t, s, true)
-
-	wantPartOnePrefix(t, asks[0], sent)
-	if len(asks[0].Tools) != len(tools) {
-		t.Fatalf("part 1 carries %d tools, want the loop's %d: the template renders the definitions before the first message, so a missing array forks the prompt at token 0",
-			len(asks[0].Tools), len(tools))
-	}
-
-	// Every part of the chain is cut from the session's one identity.
-	for i, req := range asks {
-		if req.ReasoningEffort != "high" {
-			t.Fatalf("part %d was asked with reasoning_effort %q: the turn was asked with %q, and a thinking level that differs is a different prompt",
-				i+1, req.ReasoningEffort, "high")
-		}
-		if req.Extra["enable_thinking"] != true {
-			t.Fatalf("part %d lost the session's thinking switch: %v", i+1, req.Extra)
-		}
-		if req.Model != "a-reasoning-model" || req.Stream {
-			t.Fatalf("part %d asks a different model, or as a stream: %s %v", i+1, req.Model, req.Stream)
-		}
-		if len(req.Tools) != len(tools) {
-			t.Fatalf("part %d carries %d tools, want %d", i+1, len(req.Tools), len(tools))
-		}
-	}
-
-	// Part 2: the system head, the running summary, this part's own payload messages, the instruction.
-	second := asks[1]
-	if second.Messages[0].Role != "system" || !reflect.DeepEqual(second.Messages[0], sent[0]) {
-		t.Fatalf("part 2 does not open with the system message part 1 opened with:%s", dumpForTest(second.Messages))
-	}
-	if got := msgText(second.Messages[1]); !strings.Contains(got, "SUMMARY 1") {
-		t.Fatalf("cmp1 travels as its own user message: %s", clipForTest(got, 120))
-	}
-	for i := 2; i < len(second.Messages)-1; i++ {
-		if !isOneOf(sent, second.Messages[i]) {
-			t.Fatalf("part 2 message %d is not one of the payload's own messages (%q) — a summariser reading a re-rendering reads a conversation nobody sent:%s",
-				i, msgText(second.Messages[i]), dumpForTest(second.Messages))
-		}
-	}
-	if got := msgText(second.Messages[len(second.Messages)-1]); !strings.Contains(got, "part 2 of ") {
-		t.Fatalf("the counter belongs in the one message the parts cannot share: %s", clipForTest(got, 120))
-	}
-}
-
-// TestTheChainAfterARestartStillAsksInTheSameShape: nothing was sent by this process, so no prefix can
-// be claimed — but a rebuilt payload is the assembler's own output, and asking about it is a slower
-// summary rather than a worse one. The flat transcript stays the fallback for a payload the session
-// cannot read, not for a session that cannot remember.
-func TestTheChainAfterARestartStillAsksInTheSameShape(t *testing.T) {
-	s, _ := chainFixture(t, "chain-cold", 4096)
-	fillChainPath(t, s, 6, 3000)
-	asks, sent, _ := chainRun(t, s, false)
-
-	wantPartOnePrefix(t, asks[0], sent)
-	// Nothing here may fall back to the flat transcript: a rebuilt payload is the assembler's own output,
-	// so the only reason to flatten is a session that cannot tell what it sent — which is no longer a
-	// reason (see summaryPayload). The two strings are the whole signature of that shape: the scaffold it
-	// introduces and the `[role] ` rendering it writes each entry into.
-	for i, req := range asks {
-		for j, m := range req.Messages {
-			text := msgText(m)
-			if strings.Contains(text, "Conversation to compress") || strings.Contains(text, "[user] ") || strings.Contains(text, "[assistant] ") {
-				t.Fatalf("part %d flattens the conversation into a transcript at message %d, which loses every tool result whose answer travels in structuredContent:%s",
-					i+1, j, dumpForTest(req.Messages))
-			}
-		}
-	}
-}
-
-// TestTheChainNeverSummarisesNothing: when the payload cannot be sliced — a caller describing more
-// entries than the payload carries — a part degrades to a transcript of itself and says so, rather than
-// asking the model to summarise an empty request. This is the one case the flat shape is for.
-func TestTheChainNeverSummarisesNothing(t *testing.T) {
-	s, cp := chainFixture(t, "chain-blind", 4096)
-	fillChainPath(t, s, 6, 3000)
-	cfg := s.Config()
-	built, _, tools, err := s.build()
-	if err != nil {
-		t.Fatalf("the fixture's window could not be read: %v", err)
-	}
-	// More entries than there are messages: no boundary through this payload can be trusted.
-	refs := summaryPayload(nil, nil, built.All(), asm.EntryIDs(built), tools, len(built.Entries)+3)
-	if refs.msgs != nil {
-		t.Fatal("the fixture was supposed to produce a payload that cannot be sliced")
-	}
-	p := compact.Params{SummaryMode: compact.ModeIterative, ThresholdPct: 70, SummaryCapPct: 50, Marker: compact.DefaultMarker}
-	ruler := compact.NewRuler(built.StructuredCap)
-	text, _, err := s.summarizeIterative(context.Background(), cfg, p, &compact.Plan{}, built.Entries, ruler, refs, "", 1, func(ir.SummaryAttempt) {})
-	if err != nil {
-		t.Fatalf("an unsliceable payload is a reason to fall back, not a reason to fail: %v", err)
-	}
-	if strings.TrimSpace(text) == "" || cp.count() == 0 {
-		t.Fatal("nothing was summarised")
-	}
-	req := cp.all()[0]
-	if len(req.Messages) < 2 {
-		t.Fatalf("the fallback still has to hand the model something to read:%s", dumpForTest(req.Messages))
-	}
-	if !strings.Contains(msgText(req.Messages[0]), "Conversation to compress") {
-		t.Fatalf("the fallback is a transcript of the part, got %q", clipForTest(msgText(req.Messages[0]), 120))
-	}
-}
+// wantPartOnePrefix is gone with the chain; replay_test.go's TestReplayRoundOneIsABytePrefixOfTheSent
+// payload asserts the same contract on the round that replaced part 1.
 
 // isOneOf reports whether the message is byte-for-byte one of the payload's own.
 func isOneOf(sent []asm.Message, m asm.Message) bool {
@@ -602,20 +394,16 @@ func TestAPrefixShorterThanThePathStillHasASystemHead(t *testing.T) {
 	if !refs.warm {
 		t.Fatal("the sent payload is the front of the path, so it is worth its bytes")
 	}
-	if len(refs.head) != 1 || refs.head[0].Role != "system" {
-		t.Fatalf("a payload shorter than the path still has its system head, got %+v", refs.head)
-	}
 	pre, ok := refs.through(1)
 	if !ok || len(pre) != 2 || !strings.Contains(msgText(pre[len(pre)-1]), "ten kilobytes") {
-		t.Fatalf("part 1 was handed %d message(s) and the entry it was told to read is not in it:%s",
+		t.Fatalf("a round cut after entry 0 was handed %d message(s) and the entry it was told to read is not in it:%s",
 			len(pre), dumpForTest(pre))
 	}
-	if got, ok := refs.messages(0, 1); !ok || !strings.Contains(msgText(got[0]), "ten kilobytes") {
-		t.Fatalf("entry 0 is the message behind the head, got %v (%v)", got, ok)
-	}
-	// The head is what a later part reopens with, and an empty head would send part 2 off with no
-	// system message at all — a different prompt from the turn it is continuing.
-	if got, ok := refs.messages(2, 3); !ok || got[0].Content != "and a second question" {
-		t.Fatalf("the entry nobody has sent yet still has to be reachable, got %v (%v)", got, ok)
+	// A payload shorter than the path still counts messages from its own front: the offset comes from
+	// the system head, not from len(sent) against the path. Work it out the second way and every slice
+	// shifts one message to the left — the summary lands over the wrong conversation, which is the bug
+	// this fixture keeps dead.
+	if pre, ok := refs.through(3); !ok || len(pre) != len(cur) || pre[len(pre)-1].Content != "and a second question" {
+		t.Fatalf("the entry nobody has sent yet still has to be reachable behind the head, got %v (%v)", pre, ok)
 	}
 }

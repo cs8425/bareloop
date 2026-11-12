@@ -659,7 +659,14 @@ func tailCalls(tail []*ir.Entry) []ir.ToolCall {
 // `wait`, and only `wait`. Everything else is left exactly as the log has it, because the one thing
 // worse than a wait that is not resumed is a tool that is run twice: an MCP call has a side effect,
 // and nothing here can tell whether it already happened.
-func (s *Session) recoverPark() {
+func (s *Session) recoverPark() { s.recoverParkAt(time.Now()) }
+
+// recoverParkAt is recoverPark with the clock handed in, the same bargain parkTickAt made for the
+// timer: "is this wait already due" is one decision a test has to ask at a chosen moment, and a
+// fixture that asks it of the wall clock turns the gap between creating a session and scanning it
+// into a race — a slow fixture answers a wait nobody meant to wake (park_test's
+// "the session did not pick the wait up"). The production entry point above hands in now.
+func (s *Session) recoverParkAt(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.park != nil || s.cancel != nil {
@@ -707,7 +714,7 @@ func (s *Session) recoverPark() {
 		s.beginRunLocked(context.Background(), runStart{tail: tail})
 		return
 	}
-	if now := time.Now(); now.Before(until) {
+	if now.Before(until) {
 		s.park = &parked{until: until}
 		s.armLocked(s.park, now)
 		// why the phase says running here: this session is holding a wait, which is what every other park in
@@ -725,7 +732,7 @@ func (s *Session) recoverPark() {
 	// Due already, or due days ago. It is answered now, late, by a run that starts immediately — and the
 	// note says what was missed rather than leaving the model a completed wait with no mention of the
 	// gap between the promise and the answer.
-	note := builtin.ResumeNote("the daemon restarted", until, time.Now())
+	note := builtin.ResumeNote("the daemon restarted", until, now)
 	s.logf("a wait due at %s came due while this daemon was not running: answering it now", until.UTC().Format(time.RFC3339))
 	s.beginRunLocked(context.Background(), runStart{
 		tail:   tail,

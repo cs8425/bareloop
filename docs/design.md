@@ -17,7 +17,7 @@ summarises it, that file is the authority.
 | `internal/asm` | the **only** place that turns entries into a provider payload, plus per-message sizes |
 | `internal/llm` | one OpenAI-compatible provider with usage parsing for OpenAI, llama.cpp and Ollama |
 | `internal/mcp` | JSON-RPC 2.0, stdio and streamable-HTTP transports, both protocol eras |
-| `internal/compact` | compaction: parameters, triggers, the cut, the summary request, the gate, the serial plan |
+| `internal/compact` | compaction: parameters, triggers, the cut, the summary request, the gate, the replay plan |
 | `internal/agent` | sessions, the manager, the loop, tool execution, compaction commits, `n_ctx` resolution |
 | `internal/server` | the JSON API, the websocket stream, the SSE fallback, the static UI |
 | `web` | the UI: HTML, CSS, ES modules, no build step |
@@ -125,7 +125,8 @@ different window needs no config edit; `status.nCtx` is the number in use, and `
 `nCtxSource` say where it came from.
 
 A session that outgrows the window is repaired rather than stuck: the provider refuses the request, the
-window is probed again, the oversized region is folded by the serial chain, and the run stops with
+window is probed again, the oversized region is compacted — replayed round by round if it is several
+windows deep — and the run stops with
 `the context was compacted, please send again` - the next message is answered normally. **Refusing one
 request is the accepted design**, not a bug to pre-empt: until a request has been measured or refused
 there is no real number to split on, and splitting on a character estimate would compact a session the
@@ -156,31 +157,33 @@ for them. A summary prices itself from what the summariser was charged for, reco
 and no subtraction is ever taken across that record — the request after it was counted against a payload
 the earlier ones never formed.
 
-## Summarising serially
+## Catching up: compaction replayed
 
-When the conversation is too large to hand to the summariser in one request - which is also what happens
-after one oversized message, since the summary request is bound by the same window - the summary is
-produced **serially**: the region is cut into parts that each fit, and each call folds the next part into
-the summary of everything before it (`cmp1 + part 2 -> cmp2`, and so on). A message too large to fit even
-on its own is read at its beginning and its end, and the summary is told that its middle was omitted, so
-that it does not invent one. Set `compact.summaryMode: "iterative"` to use the chain even when everything
-would fit. `"map-reduce"` (summarise the parts in parallel, then merge) is reserved for that future
-implementation and currently runs the serial chain - deliberately, because on a local model parallel
-parts queue on the same GPU instead of helping.
+Compaction triggers the moment a context crosses its line — but a conversation can arrive at that line
+many messages deep: a paste that doubles a turn, a session left running while nobody looked. The answer
+is to replay the moments that never happened: cut the path at the entry whose size first pushes its
+estimate past `n_ctx × threshold%`, run one ordinary compaction on that prefix, and repeat on the path
+that results — `[cmp0?, ...msgX] → cmp1`, then `[cmp1, kept..., ...msgY] → cmp2` — until the estimate of
+the whole path is inside the line again. Each round commits one entry and pays for its own summariser
+calls; the bill of a catch-up is the sum of its rounds, never a re-count of them. A conversation that
+tipped once runs one round, and the loop is invisible — the same floors, acceptance, retries and gate
+bind every round as if it were the only one.
 
-The arithmetic is deliberately unfashionable: one part gets
+What a round asks about is the payload bytes up to its cut — the bytes the loop sent, so a warm provider
+reads its own cache — and when those bytes cannot carry the question (a payload whose ids do not describe
+its messages, or a region still larger than the window when cut from them) it goes out as one flat
+transcript instead. A message too large to fit even on its own is read at its beginning and its end, and
+the summary is told that its middle was omitted, so that it does not invent one.
 
 ```
-summaryCap = n_ctx × summaryCap% / 100      // the summary's max_tokens, and what the finished summary may be
-chunkFit   = n_ctx × threshold% / 100       // what each summary call may carry, summary included
+summaryCap = n_ctx × summaryCap% / 100   // one round's summary max_tokens, and what its answer is graded against
+trigger    = n_ctx × threshold% / 100    // the line a round tips over, and the ceiling of its planning path
 ```
 
-so a part plus its own reply can never overflow the window the way a single request holding the whole
-conversation did (observed on a 40960 window: a
-194,359-token region folded in three serial parts). Every cut lands on a legal boundary (a `user` or
-`assistant` message, never a tool call or a tool result), and the part boundaries are chosen from the
-measured per-message sizes, not from a character count. Which mode actually ran is written into the
-compaction entry's meta, because the log line is not the durable record.
+Every cut lands on a legal boundary (a `user` or `assistant` message, never a tool call or a tool
+result), and round boundaries are chosen from the measured per-message sizes, not from a character
+count. Which mode actually ran is written into the compaction entry's meta, because the log line is not
+the durable record.
 
 ## Compaction in one paragraph
 
@@ -876,9 +879,12 @@ that asks you to send again. Guessing the window from config to avoid that one r
 rejected: an accepted refusal is honest, a guessed window is a new wrong number to maintain. Revisit only if
 the provider starts reporting its limit (then probe it at startup instead).
 
-**`map-reduce` summary mode** is accepted by config and runs the serial chain, saying so in the log
-(`internal/compact/iterative.go`). It is the answer to a region so large that serial latency dominates: the
-parts are independent, so they can be summarised in parallel and merged.
+**Parallel summarisation.** The config used to reserve `"map-reduce"` (cut a region, summarise the
+parts in parallel, merge) and run the serial chain instead. The chain is gone — replay catches a
+context up one tipping point at a time — and replay's rounds cannot be parallelised: each round plans
+against the entry the previous one committed. Summarising in parallel is therefore a different design
+rather than a mode word, and the word no longer parses: `summaryMode` accepts `prefix-stable`,
+`transcript`, and nothing else.
 
 **`CompactResult` does not report `summaryMode`.** The mode that actually ran is recorded on the compaction
 entry - which is what replay and the inspector read - but the result of a manual compact still omits it.

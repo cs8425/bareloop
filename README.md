@@ -37,9 +37,10 @@ endpoint.
 - **Nothing is hidden from you.** `inspect` shows the token count of every message and the exact numbers
   the compaction decisions were made from, `payload` shows the literal body of the next request, and every
   request leaves one line in the process log.
-- **Context compaction that survives a huge single message.** When the conversation does not fit the
-  window the summary is produced serially, in parts that each fit; a message too large to fit on its own is
-  read at its beginning and its end and the summariser is told the middle was omitted.
+- **Context compaction that catches up instead of choking.** When the conversation runs several times
+  past the trigger it is compacted one tipping point at a time: every round summarises up to the message
+  that tipped the window over, commits its own entry, and bills its own calls; a message too large to fit
+  on its own is read at its beginning and its end and the summariser is told the middle was omitted.
 - **The window is discovered, not assumed**: the effective `n_ctx` is the smaller of your ceiling and what
   the server reports, and a session that outgrows the window is repaired instead of stuck.
 - **Multi-session**: every session has its own log, MCP server set, system prompt, sampling parameters,
@@ -239,7 +240,7 @@ default:
 | `maxTurns` | `0` or absent = **no cap**: a run ends when the model stops asking for tools | `> 0` = hard cap per agentic run |
 | `compact.auto` | absent = off (compaction after a turn) | `true` |
 | `compact.inLoop` | absent = **on** (compaction between turns) | `false` turns it off |
-| `compact.summaryMode` | absent = `prefix-stable` (one summary request; falls back to the serial chain when the region cannot fit one request) | `"iterative"` always uses the chain; `"map-reduce"` is reserved and currently runs the chain |
+| `compact.summaryMode` | absent = `prefix-stable` (the summary request is cut from the payload bytes the loop sent, so the provider reads its own cache; a region those bytes cannot carry goes out as one flat transcript, oversized messages clipped and marked) | `"transcript"` asks with no cache affinity — always the flat shape; any other word means `prefix-stable` (the old chain modes `"iterative"` and `"map-reduce"` are gone: replay replaced the chain) |
 | `compact.threshold` `summaryCap` `minSummarizeTokens` | `0`, negative or absent = the default (70 / 70 / 2000) — 0 here would be a budget of nothing, which is not an answer anyone means | `> 0`: percentages of `n_ctx`, and a token count for `minSummarizeTokens`. `summaryCap` is the summary's one number: max_tokens of its request and the limit its answer is graded against (the old `keepTarget` and `summaryMax` keys, folded into one; neither is read anymore) |
 | `compact.minKeptUserTurns` `minKeptMessages` | **`0` is a real answer = no floor**, and an omitted key decodes to that 0 — so the 4 that a *new* session starts with is not reachable by leaving the key out | `> 0` is the floor; a negative clamps to 0, never to the shipped default |
 | `compact.keepBudget` | absent = 20 (the tail's share of `n_ctx` — set apart from `summaryCap` so tightening the summary no longer resizes the tail); **an explicit `0` is a real answer = keep nothing but the summary**, the same floor rule as the two above | `> 0`: the percentage of `n_ctx` the kept tail may occupy; a negative clamps to 0 |
