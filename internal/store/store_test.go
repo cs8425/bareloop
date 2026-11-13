@@ -1152,3 +1152,243 @@ func TestSetZdictRejectsOversizedDictionary(t *testing.T) {
 		t.Fatalf("clearing: %v", err)
 	}
 }
+
+// TestTreeShape reads the whole tree the way the branch navigator does: every edge,
+// every child count, and the live path lit among the branches — and lit at its new
+// place when the tip moves there. Shape is the promise: no content is asked, and the
+// rows answer the navigator's two questions ("where do I stand", "what else hangs
+// here") for every branch, not just the walked one.
+func TestTreeShape(t *testing.T) {
+	l := openTest(t)
+	// The user's example tree: root forks (b1 branch / n2 branch); d1 forks (e1 / e2);
+	// the tip stands on f1 deep in the e2 branch.
+	root := user("root")
+	if err := l.AppendEntry(root, true); err != nil {
+		t.Fatalf("AppendEntry root: %v", err)
+	}
+	add := func(parent string) *ir.Entry {
+		e := user("child of " + parent)
+		e.ParentID = parent
+		if err := l.AppendEntry(e, true); err != nil {
+			t.Fatalf("AppendEntry: %v", err)
+		}
+		return e
+	}
+	b1 := add(root.ID)
+	n2 := add(root.ID) // the abandoned fork
+	c1 := add(b1.ID)
+	d1 := add(c1.ID)
+	e1 := add(d1.ID) // tip moves here later
+	e2 := add(d1.ID)
+	f1 := add(e2.ID) // the tip
+
+	byID := func(rows []TreeRow) map[string]TreeRow {
+		m := map[string]TreeRow{}
+		for _, r := range rows {
+			m[r.ID] = r
+		}
+		return m
+	}
+	rows, err := l.Tree(0)
+	if err != nil {
+		t.Fatalf("Tree: %v", err)
+	}
+	if len(rows) != 8 {
+		t.Fatalf("tree has %d rows, want 8", len(rows))
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Seq >= rows[i].Seq {
+			t.Fatalf("rows not seq-ordered at %d", i)
+		}
+	}
+	m := byID(rows)
+	if m[root.ID].NKids != 2 {
+		t.Errorf("root nkids %d, want 2 (the fork and its abandoned twin)", m[root.ID].NKids)
+	}
+	if m[d1.ID].NKids != 2 {
+		t.Errorf("d1 nkids %d, want 2", m[d1.ID].NKids)
+	}
+	if m[f1.ID].NKids != 0 {
+		t.Errorf("leaf nkids %d, want 0", m[f1.ID].NKids)
+	}
+	onPath := func(r TreeRow) bool { return r.OnPath }
+	for id, want := range map[string]bool{
+		root.ID: true, b1.ID: true, c1.ID: true, d1.ID: true, e2.ID: true, f1.ID: true,
+		n2.ID: false, e1.ID: false,
+	} {
+		if got := onPath(m[id]); got != want {
+			t.Errorf("entry %s onPath %v, want %v", id, got, want)
+		}
+	}
+	if !m[f1.ID].IsTip {
+		t.Error("f1 is not flagged the tip")
+	}
+	for id, row := range m {
+		if row.IsTip && id != f1.ID {
+			t.Errorf("entry %s claims the tip beside %s", id, f1.ID)
+		}
+	}
+
+	// The tip walks to the e1 branch: the lights move, the geometry does not.
+	if err := l.SetTip(e1.ID); err != nil {
+		t.Fatalf("SetTip: %v", err)
+	}
+	rows, err = l.Tree(0)
+	if err != nil {
+		t.Fatalf("Tree after SetTip: %v", err)
+	}
+	m = byID(rows)
+	for id, want := range map[string]bool{
+		root.ID: true, b1.ID: true, c1.ID: true, d1.ID: true, e1.ID: true,
+		n2.ID: false, e2.ID: false, f1.ID: false,
+	} {
+		if got := onPath(m[id]); got != want {
+			t.Errorf("after SetTip: entry %s onPath %v, want %v", id, got, want)
+		}
+	}
+	if !m[e1.ID].IsTip || m[f1.ID].IsTip {
+		t.Error("the tip flag did not move with the tip")
+	}
+	if m[root.ID].NKids != 2 || m[d1.ID].NKids != 2 {
+		t.Error("moving the tip moved a child count: geometry is not the tip's to change")
+	}
+
+	// A bounding limit keeps the first rows in seq order and the walk honest: ancestors
+	// before the window's first row cannot claim OnPath, and that is the truthful answer.
+	rows, err = l.Tree(3)
+	if err != nil {
+		t.Fatalf("Tree limit: %v", err)
+	}
+	if len(rows) != 3 || rows[0].ID != root.ID {
+		t.Fatalf("Tree(3) = %d rows starting %s, want 3 starting at the root", len(rows), rows[0].ID)
+	}
+
+	// An empty store answers empty, not null-error.
+	fresh := openTest(t)
+	if rows, err := fresh.Tree(0); err != nil || len(rows) != 0 {
+		t.Fatalf("empty Tree = %d rows err %v, want 0 and nil", len(rows), err)
+	}
+}
+
+// TestSnippetsPreviewsRows prices the navigator's lazy half: opening lines only, one
+// display line whatever the answer wrote, ids that vanished mid-flight skipped without
+// answering a hole, and the caller's order kept.
+func TestSnippetsPreviewsRows(t *testing.T) {
+	l := openTest(t)
+	long := user(strings.Repeat("word ", 100)) // 500 characters: the clip and its mark
+	multi := user("line one\nline\ttwo")
+	quiet := &ir.Entry{Kind: ir.KindTool, Role: "tool", Tool: "fs_read", Ts: time.Now().UTC()}                                                                                                                              // a failed call with no text
+	thinking := &ir.Entry{Kind: ir.KindAssistant, Role: "assistant", Reasoning: "pondering which branch to grow", ToolCalls: []ir.ToolCall{{ID: "c1", Name: "fs_read"}, {ID: "c2", Name: "fs_grep"}}, Ts: time.Now().UTC()} // a thinking model's reply: content empty, the words elsewhere
+	hollow := &ir.Entry{Kind: ir.KindAssistant, Role: "assistant", Ts: time.Now().UTC()}                                                                                                                                    // interrupted before anything landed
+	for _, e := range []*ir.Entry{long, multi, quiet, thinking, hollow} {
+		if err := l.AppendEntry(e, true); err != nil {
+			t.Fatalf("AppendEntry: %v", err)
+		}
+	}
+	snips, err := l.Snippets([]string{long.ID, "9999999", multi.ID, quiet.ID, thinking.ID, hollow.ID})
+	if err != nil {
+		t.Fatalf("Snippets: %v", err)
+	}
+	if len(snips) != 5 {
+		t.Fatalf("got %d snippets for 5 living ids and 1 ghost, want 5", len(snips))
+	}
+	if snips[0].ID != long.ID || snips[1].ID != multi.ID || snips[2].ID != quiet.ID || snips[3].ID != thinking.ID || snips[4].ID != hollow.ID {
+		t.Errorf("the answer shuffled the caller's order: %v", snips)
+	}
+	first := []rune(snips[0].Snippet)
+	if len(first) != 121 || string(first[len(first)-1]) != "…" {
+		t.Errorf("long snippet is %d runes ending %q, want 120 runes and a cut mark", len(first), string(first[len(first)-1]))
+	}
+	if snips[1].Snippet != "line one line two" {
+		t.Errorf("multi-line preview %q, want one collapsed line", snips[1].Snippet)
+	}
+	if snips[2].Snippet != "⟨tool fs_read⟩" {
+		t.Errorf("textless tool row %q, want the tool's name to name it", snips[2].Snippet)
+	}
+	// A row whose content is empty still names itself: calls first, thinking next, nothing last.
+	if snips[3].Snippet != "⟨fs_read +1⟩" {
+		t.Errorf("tool-calling row with no content %q, want its calls to name it", snips[3].Snippet)
+	}
+	if snips[4].Snippet != "⟨no text⟩" {
+		t.Errorf("hollow row %q, want the plain admission", snips[4].Snippet)
+	}
+	reasoning := &ir.Entry{Kind: ir.KindAssistant, Role: "assistant", Reasoning: "weighing the options quietly", Ts: time.Now().UTC()}
+	if err := l.AppendEntry(reasoning, false); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	sr, err := l.Snippets([]string{reasoning.ID})
+	if err != nil || len(sr) != 1 {
+		t.Fatalf("reasoning snippets: %v err %v", sr, err)
+	}
+	if sr[0].Snippet != "⟨thinking⟩ weighing the options quietly" {
+		t.Errorf("thinking-only row %q, want the reasoning preview to name it", sr[0].Snippet)
+	}
+	// An empty ask answers empty — no query, no error.
+	if s, err := l.Snippets(nil); err != nil || len(s) != 0 {
+		t.Fatalf("Snippets(nil) = %d err %v, want 0 and nil", len(s), err)
+	}
+}
+
+// benchFilled opens a store with n entries in one branchy tree, each carrying a
+// paragraph: the shape both halves of the navigator read, at a session the product
+// has measured rather than a toy.
+func benchFilled(b *testing.B, n int) (*Log, []string) {
+	b.Helper()
+	l := openBench(b, b.TempDir())
+	ids := make([]string, 0, n)
+	tip := ""
+	for i := 0; i < n; i++ {
+		e := &ir.Entry{Kind: ir.KindUser, Role: "user", Content: strings.Repeat("filler ", 30), Ts: time.Now().UTC()}
+		e.ParentID = tip
+		if err := l.AppendEntry(e, false); err != nil {
+			b.Fatalf("AppendEntry: %v", err)
+		}
+		tip = e.ID
+		ids = append(ids, e.ID)
+		if i%10 == 9 { // every tenth entry forks, as a lived session does
+			fork := &ir.Entry{Kind: ir.KindUser, Role: "user", Content: "abandoned attempt", Ts: time.Now().UTC()}
+			fork.ParentID = e.ID
+			if err := l.AppendEntry(fork, false); err != nil {
+				b.Fatalf("AppendEntry fork: %v", err)
+			}
+		}
+	}
+	if err := l.SetTip(tip); err != nil {
+		b.Fatalf("SetTip: %v", err)
+	}
+	return l, ids
+}
+
+// openBench is openAt for benchmarks, which share no helper with the T world.
+func openBench(b *testing.B, dir string) *Log {
+	b.Helper()
+	l, err := Open(dir, false)
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	b.Cleanup(func() { l.Close() })
+	return l
+}
+
+// BenchmarkTree prices the shape-only read: one row per entry, no payload opened.
+func BenchmarkTree(b *testing.B) {
+	l, _ := benchFilled(b, 1000)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := l.Tree(0); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkSnippets prices the lazy half: the opening lines of one screenful.
+func BenchmarkSnippets(b *testing.B) {
+	l, ids := benchFilled(b, 1000)
+	screen := ids[:50]
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := l.Snippets(screen); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

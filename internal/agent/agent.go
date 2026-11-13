@@ -40,6 +40,7 @@ const (
 	EvtError       = "error"
 	EvtInfo        = "info"
 	EvtRemoved     = "removed" // an entry was deleted
+	EvtTip         = "tip"     // the path tip moved (Data is a TipMove): the branch navigator's "where do I stand" refresh, sent so a watcher never has to guess from status numbers whether a tip it saw is a rewind or another branch
 	EvtTools       = "tools"   // the published tool set changed (a policy change landed)
 )
 
@@ -67,6 +68,15 @@ type Event struct {
 	Level    string     `json:"level,omitempty"`
 	Data     any        `json:"data,omitempty"`
 	Ts       time.Time  `json:"ts"`
+}
+
+// TipMove is a tip event's Data: the pair of entries the path moved between.
+// Both name live entries except when the tip was unset (From is then ""), and a
+// watcher that does not know one of them simply re-reads — which is the whole
+// point of sending the move instead of a status to be diffed.
+type TipMove struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to"`
 }
 
 // Delta is a streaming fragment of the assistant message being generated.

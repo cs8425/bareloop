@@ -95,6 +95,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/session/{id}/export", s.handleExport)
 	mux.HandleFunc("GET /api/session/{id}/tools", s.handleTools)
 	mux.HandleFunc("GET /api/session/{id}/turns", s.handleTurns)
+	mux.HandleFunc("GET /api/session/{id}/tree", s.handleTree)
+	mux.HandleFunc("GET /api/session/{id}/snippets", s.handleSnippets)
 	mux.HandleFunc("POST /api/session/{id}/tools", s.handleToolsSet)
 	mux.HandleFunc("POST /api/session/{id}/send", s.handleSend)
 	mux.HandleFunc("POST /api/session/{id}/interrupt", s.handleInterrupt)
@@ -919,6 +921,88 @@ func turnLimit(r *http.Request) (int, error) {
 	}
 	return n, nil
 }
+
+// handleTree answers the shape of the whole tree — every entry, branch included, and where the
+// live path stands among them — without a word of content.
+//
+// It exists for the branch navigator (tree-ui design): a client offering "continue from any
+// message" needs every parent edge and child count in one read, and reading the transcript to
+// draw the map is the transcript endpoint's job, priced by its pages. Content rides beside it by
+// demand, not by default: GET .../snippets answers the opening lines of exactly the rows on
+// screen, which is why this query never opens a payload and why no paging knob is worth having
+// at map-row weights.
+func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	limit := treeRowsDefault
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("limit must be a number of at least 1, got %q", v))
+			return
+		}
+		limit = min(n, treeRowsMax)
+	}
+	rows, err := sess.Tree(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"rows": rows,
+		// A full-length answer is how the caller learns the bound bit: a tree this deep
+		// wants a search box, not a second page.
+		"truncated": len(rows) == limit,
+		"count":     len(rows),
+		"limit":     limit,
+	})
+}
+
+// The tree endpoint's two numbers: a default that answers any session the product has measured
+// (1731 entries is the largest live tree, and its rows are tens of kilobytes), and a ceiling
+// against a URL typo, not against a real session.
+const (
+	treeRowsDefault = 5000
+	treeRowsMax     = 20000
+)
+
+// handleSnippets answers the opening lines of named entries — the lazy half of the branch
+// navigator, so a map draws its rows without carrying their conversations. The ids come from a
+// Tree answer and are few on purpose: a screenful is dozens of rows, and the cap says the same
+// out loud that a scroll would discover.
+func (s *Server) handleSnippets(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var ids []string
+	for _, part := range strings.Split(r.URL.Query().Get("ids"), ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			ids = append(ids, p)
+		}
+	}
+	if len(ids) == 0 {
+		writeErr(w, http.StatusBadRequest, errors.New("snippets wants ids= — a comma-separated list of entry ids from a tree read"))
+		return
+	}
+	if len(ids) > snippetsMaxIDs {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("snippets takes at most %d ids per call, got %d: ask for the rows on screen", snippetsMaxIDs, len(ids)))
+		return
+	}
+	snips, err := sess.Snippets(ids)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	// An id deleted since the tree read is skipped, not answered with a hole: the caller's
+	// screen loses a line, not a truth (store.Snippets keeps the caller's order).
+	writeJSON(w, map[string]any{"snippets": snips, "count": len(snips)})
+}
+
+// snippetsMaxIDs is the navigator's screenful, generously drawn.
+const snippetsMaxIDs = 200
 
 // ---------------------------------------------------------------- SSE (fallback transport)
 

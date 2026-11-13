@@ -1528,6 +1528,193 @@ func (l *Log) ToolUses(ids []string) (uses map[string]int, lastUsed map[string]s
 	return uses, lastUsed, nil
 }
 
+// TreeRow is one entry of the whole tree as shape only: who hangs off whom, how
+// many children hang here, and whether the live path walks through it — a branch
+// navigator's entire vocabulary. Text is absent by construction (SkeletonRow's
+// reasoning, restated because the reader differs): the navigator asks "which
+// branch am I on, what else lives here" of every entry, and an answer carrying
+// content would be the transcript endpoint with extra steps. The opening words
+// ride a separate call (Snippets) so the lazy half of the navigator stays lazy:
+// this query never opens a payload, and its cost is a row per entry, not the
+// conversation.
+type TreeRow struct {
+	ID       string `json:"id"`
+	ParentID string `json:"parent,omitempty"`
+	Kind     string `json:"kind"`
+	Seq      int64  `json:"seq"`
+	Ts       int64  `json:"ts"`
+	// NKids is every child in the store, path or not: a node with two of them is
+	// where the conversation forked, and the navigator counts alternates from it.
+	NKids int `json:"nkids"`
+	// OnPath is the chain root→tip as the tree draws it — every ancestor of the
+	// tip, compaction included. Whether the *model* sees a prefix is Effective's
+	// question, not the tree's; the navigator wants to know where it stands.
+	OnPath bool `json:"onPath"`
+	IsTip  bool `json:"isTip"`
+}
+
+// Tree reads the whole tree in one index-ordered scan — parents before children
+// by construction, since a child's seq is handed out after its parent's exists —
+// and walks the tip chain for OnPath exactly the way Skeleton walks it (the seen
+// set is the corrupt-cycle guard, and here a break mid-walk simply leaves the
+// tree rooted at its current tip). No payload is read: at a thousand entries the
+// answer is tens of kilobytes, which is why this endpoint pages nothing and why
+// BenchmarkTree, not faith, prices it.
+func (l *Log) Tree(limit int) ([]TreeRow, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, ErrClosed
+	}
+	q := "SELECT id, IFNULL(parent,''), kind, seq, CAST(ts AS INTEGER) FROM entry ORDER BY seq"
+	args := []any{}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := l.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := []TreeRow{}
+	byID := map[string]int{}
+	for i := 0; rows.Next(); i++ {
+		var r TreeRow
+		if err := rows.Scan(&r.ID, &r.ParentID, &r.Kind, &r.Seq, &r.Ts); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		byID[r.ID] = i
+		out = append(out, r)
+		// Seq order is parent-before-child for the tree's own edges, so a parent seen
+		// later means it is off the store or before a truncating LIMIT's window: the
+		// child still counts where it stands — a branch the navigator cannot see is
+		// still a branch.
+		if p, ok := byID[r.ParentID]; ok {
+			out[p].NKids++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	// The tip chain, walked the Skeleton way. With a truncating limit an ancestor
+	// can sit before the window's first row: byID misses it and the walk stops
+	// honest — those deeper rows simply do not claim OnPath.
+	tip := l.effectiveTip()
+	seen := map[string]bool{}
+	for id := tip; id != ""; {
+		if i, ok := byID[id]; ok {
+			out[i].OnPath = true
+		} else {
+			break
+		}
+		if seen[id] {
+			break // corrupt cycle: what the walk reached is the honest answer
+		}
+		seen[id] = true
+		if i, ok := byID[id]; ok {
+			id = out[i].ParentID
+		} else {
+			break
+		}
+	}
+	if i, ok := byID[tip]; ok {
+		out[i].IsTip = true
+	}
+	return out, nil
+}
+
+// Snippet is one entry's opening line: enough of its content to name the row in a
+// branch navigator, cut to a single display line. Only content — a picture's or a
+// tool's whole output is not what a map row shows.
+type Snippet struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Snippet string `json:"snippet"`
+}
+
+// Snippets reads the openings for the named entries, one point query each (the
+// primary key is the whole plan), inflating without blobs — an image has no words
+// to preview. Ids that name nothing are skipped rather than answered with a hole
+// (ToolUses' rule: deleted since the tree was read is the normal case, not an
+// error), and the answer keeps the caller's order. The whole cost of the lazy
+// half, priced by BenchmarkSnippets: this is why Tree reads no payload.
+func (l *Log) Snippets(ids []string) ([]Snippet, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return nil, ErrClosed
+	}
+	out := make([]Snippet, 0, len(ids))
+	for _, id := range ids {
+		var p string
+		err := l.db.QueryRow("SELECT payload FROM entry WHERE id = ?", id).Scan(&p)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // gone between the tree read and this one: the navigator loses a line
+		}
+		if err != nil {
+			return nil, err
+		}
+		e, err := l.inflate(p, false) // a picture has no opening line; no blob leaves the table
+		if err != nil {
+			return nil, err
+		}
+		s := Snippet{ID: id, Kind: e.Kind, Snippet: snippetHead(e.Content, 120)}
+		if s.Snippet == "" {
+			// An empty row names nothing, and a map row the reader cannot name is a
+			// row they navigate blind — thinking models answer with content empty and
+			// the words in the reasoning, and an interrupted turn may hold no text at
+			// all. So the next thing that identifies the entry speaks, in the order a
+			// reader would read it: a result names its tool, a reply names its calls,
+			// a thinking reply previews what it was thinking, and only an entry with
+			// nothing to say says so.
+			switch {
+			case e.Kind == ir.KindTool && e.Tool != "":
+				s.Snippet = "⟨tool " + e.Tool + "⟩"
+			case len(e.ToolCalls) > 0:
+				s.Snippet = "⟨" + e.ToolCalls[0].Name
+				if len(e.ToolCalls) > 1 {
+					s.Snippet += fmt.Sprintf(" +%d", len(e.ToolCalls)-1)
+				}
+				s.Snippet += "⟩"
+			case e.Reasoning != "":
+				s.Snippet = "⟨thinking⟩ " + snippetHead(e.Reasoning, 100)
+			default:
+				s.Snippet = "⟨no text⟩"
+			}
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// snippetHead collapses an entry's content to one display line of at most n
+// runes — Fields/Join because a map row is one line whatever the answer wrote —
+// and marks a cut. n runes, not n bytes: the clip that lands mid-UTF8 is the
+// searchSnippet lesson this file has already learned once.
+func snippetHead(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(s), " "))
+	if len(r) <= n {
+		return string(r)
+	}
+	// The cut mark sits outside the n, exactly as MaxTurnSnippet spends it:
+	// n runes of content and an ellipsis saying where the clip landed.
+	return string(r[:n]) + "…"
+}
+
+// Tip is the tip the session stands on — effectiveTip with the lock it needs,
+// for callers above the store that must know the old one before moving it.
+func (l *Log) Tip() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.db == nil {
+		return ""
+	}
+	return l.effectiveTip()
+}
+
 // effectiveTip is the tip the session stands on: meta's, when it names a live entry;
 // else the newest entry — "no tip" always meant "stand on the newest" (see SetTip).
 func (l *Log) effectiveTip() string {

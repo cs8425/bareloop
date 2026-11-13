@@ -957,10 +957,17 @@ func (s *Session) SetTip(id string) error {
 		return errors.New("agent: cannot move the path tip while running")
 	}
 	s.mu.Unlock()
+	from := s.log.Tip() // before the move, so a watcher learns where the path was standing
 	if err := s.log.SetTip(id); err != nil {
 		return err
 	}
 	s.reload()
+	if to := s.log.Tip(); to != from {
+		// The named move, not a status to be diffed: whether this is a rewind or
+		// another branch is the watcher's to know, and no id arithmetic should be
+		// asked to guess it (see EvtTip).
+		s.emit(Event{Type: EvtTip, Data: TipMove{From: from, To: to}})
+	}
 	s.emitState()
 	return nil
 }
@@ -1651,6 +1658,18 @@ func (s *Session) TurnRows(limit int) (*ir.TurnList, error) {
 // UsageRows is the cost panel's skeleton, read row by row from disk.
 func (s *Session) UsageRows() ([]store.SkeletonRow, error) {
 	return s.log.Skeleton()
+}
+
+// Tree is the branch navigator's shape-only view of the whole tree; limit bounds
+// the rows, and a full-length answer is how the caller learns it hit the bound.
+func (s *Session) Tree(limit int) ([]store.TreeRow, error) {
+	return s.log.Tree(limit)
+}
+
+// Snippets is the navigator's lazy half: the opening lines of exactly the rows
+// a reader can see, from a caller that read them off a Tree answer.
+func (s *Session) Snippets(ids []string) ([]store.Snippet, error) {
+	return s.log.Snippets(ids)
 }
 
 func (s *Session) nctxLocked() int {
