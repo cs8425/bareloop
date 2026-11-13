@@ -6,6 +6,7 @@ import { note, toast } from './ui.js';
 import { scrollDown } from './scroll.js';
 import { claimStream, entryNode, requestCard, retireStream, streamDelta, toolCard } from './transcript.js';
 import { renderTools, syncToolsPanel } from './tools.js';
+import { syncTreePanel } from './tree.js';
 import { clearBusy, loadSoon, refresh, renderNewer, renderPending, renderStatus, returnToTip, showBusy } from './session.js';
 
 // Everything on this list answers "what is happening now" by drawing at the bottom of #log, and that
@@ -85,30 +86,40 @@ export function handleEvent(ev) {
       state.entries.get(ev.info)?.remove();
       state.entries.delete(ev.info);
       break;
+    case 'tip': {
+      // The path moved, named by the daemon (`TipMove{from,to}`) rather than read off a
+      // diff of status frames: guessing the move from consecutive tips cannot tell a
+      // rewind from a jump to another branch, and the two rules below depend on that
+      // difference. This replaced the arithmetic this file used to do on `state` frames.
+      const from = ev.data?.from;
+      const to = ev.data?.to;
+      const parked = isParked();
+      if (parked) {
+        // Reading an older page: a move backwards may have unmade the entry this page is
+        // anchored on, so it stops being a page of the conversation — back to the tip is
+        // the only honest place, and the toast says why. A move forward or to a newer
+        // branch leaves the parked page exactly as true as it was; that case is what the
+        // "newer" chip exists to count.
+        if (!!from && to && numId(to) < numId(from)) {
+          toast('this conversation moved backwards while you were reading a page of it — back to the newest message.');
+          returnToTip().catch(() => {});
+        }
+      } else if (to) {
+        // The path on screen is stale the moment the tip moves under it — whoever moved it
+        // (a branch map, a second tab), the repair is one re-read of the path.
+        refresh().catch(() => {});
+      }
+      syncTreePanel();
+      break;
+    }
     case 'state': {
-      const prevTip = state.status?.tip;
       state.status = ev.state;
       renderStatus(ev.state);
       // Coalesced for the same reason the other sessions' events are: a running session pushes a state event
       // per tick, and the sidebar's numbers are a snapshot rather than a stream.
       loadSoon();
-      // A tip that moved backwards is a time travel or a deleted entry: what is on screen is no longer
-      // the path, and no single event can fix that. A tip that moved forwards to an entry nobody is
-      // holding means the path changed somewhere this tab did not watch — another tab sent a message.
-      // A forward move to an entry already on screen is this session's own work, already drawn.
-      // Parked, both rules change shape: a forward move is what the "newer" chip is for rather than a
-      // reason to re-read a page that did not change, and a backwards move means the entry this page was
-      // anchored on may have stopped existing — so it goes back to the tip, and says so where a rebuild
-      // cannot eat the message.
-      const tip = ev.state?.tip;
-      const parked = isParked();
-      const moved = !!tip && !!prevTip && tip !== prevTip;
-      if (moved && numId(tip) < numId(prevTip)) {
-        if (parked) {
-          toast('this conversation went backwards while you were reading a page of it — back to the newest message.');
-          returnToTip().catch(() => {});
-        } else refresh().catch(() => {});
-      } else if (moved && !parked && !state.entries.has(tip)) refresh().catch(() => {});
+      // Tip moves are not this case's business any more: they arrive named on the `tip` event above,
+      // which is what a move looks like whether or not a status frame happens to carry it.
       syncToolsPanel();
       break;
     }

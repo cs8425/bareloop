@@ -188,7 +188,7 @@ select { font: inherit; }
 button.icon-btn,
 label.icon-btn { display: inline-grid; place-items: center; width: 30px; height: 28px; padding: 0; }
 /* #topbar is a flex row and a button is allowed to shrink. At 375px the session name - which is allowed to
-   grow - took the room, and #btn-inspect/#btn-settings were painted 19px wide out of the 30 they ask for,
+   grow - took the room, and #btn-panel/#btn-settings were painted 19px wide out of the 30 they ask for,
    with a 15px glyph inside and 2px of padding left on each side. #menu already says `flex: 0 0 auto` for
    exactly this reason; this is the rest of the row. */
 #topbar > .icon-btn { flex: 0 0 auto; }
@@ -989,7 +989,12 @@ button,
     right: 0;
     bottom: 0;
     width: auto;
-    max-height: 76dvh;
+    /* height, not max-height: a sheet whose top edge moves every time a tab swaps its content is a sheet
+       that forgot it was a sheet. The four tabs (tools, tree, context, inspect) differ in content height
+       by thousands of pixels — the tree tab is always full, a context tab without a session is one line —
+       and under max-height the drawer jumped between them. The height belongs to the sheet; #panel-body
+       (flex:1, overflow-y:auto) owns the scrolling, as it already does on the desktop's full-height pin. */
+    height: 76dvh;
     border-left: 0;
     border-top: 1px solid var(--border);
     border-radius: 12px 12px 0 0;
@@ -1557,3 +1562,98 @@ dialog .mcp-f.check > input[type='checkbox'] { width: var(--sw-w); }
 /* What an edit has not done yet. The hint is already the sentence that explains the list, so it is the right
    place to add “and right now it is not stored”. */
 #mcp-hint.dirty::after { content: ' — edited, not saved yet'; color: var(--warn); }
+
+/* ------------------------------------------------------------------ branch map
+   The tree tab (js/tree.js): one row per interesting entry — fork, dead end, tip —
+   with the chains between them folded to a `⋯ N` line. Depth is indentation, the
+   lighting is the path: the tip is the one filled dot, the path is lit, everything
+   else is a branch waiting to be walked back to. A row is the button: click moves
+   the path there (POST tip), which is why hover styles the whole row and not a
+   control inside it. */
+#panel-body .tree-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+#panel-body .tree-trunc {
+  margin-top: 5px;
+  padding: 5px 8px;
+  border: 1px dashed var(--warn, #d29922);
+  border-radius: 6px;
+  color: #f0d6a0;
+  font-size: var(--t-0);
+}
+#panel-body .tree-gap {
+  color: var(--muted);
+  font: var(--t-0) var(--mono);
+  padding: 1px 0;
+  user-select: none;
+}
+#panel-body .tree-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+  min-height: 24px; /* a thumb, from the phone block's floor, without stretching the row's text */
+}
+#panel-body .tree-row:hover {
+  background: var(--bg3);
+}
+#panel-body .tree-row .tree-go {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: var(--t-0);
+  opacity: 0;
+}
+#panel-body .tree-row:hover .tree-go,
+#panel-body .tree-row:focus-within .tree-go {
+  opacity: 1;
+}
+/* The button is hover-revealed on a pointer, and useless where there is no hover:
+   the whole row already is the button, so the phone hides the chip entirely
+   (`@media (hover: none)` is this sheet's existing dialect for that). */
+@media (hover: none) {
+  #panel-body .tree-row .tree-go {
+    display: none;
+  }
+}
+#panel-body .tree-mark {
+  flex: 0 0 1.2em;
+  text-align: center;
+  color: var(--muted);
+}
+#panel-body .tree-row.is-tip .tree-mark {
+  color: var(--accent);
+}
+#panel-body .tree-row.is-tip {
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+}
+#panel-body .tree-row.off-path {
+  color: var(--muted);
+}
+#panel-body .tree-kind {
+  flex: 0 0 1em;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+#panel-body .tree-id {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: var(--t-0);
+}
+#panel-body .tree-snip {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#panel-body .tree-ago {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--t-0);
+}

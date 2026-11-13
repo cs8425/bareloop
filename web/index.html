@@ -79,7 +79,7 @@
               <span id="ring-note" class="dim">open a session and send a message to measure the window</span>
             </span>
           </span>
-          <button id="btn-inspect" type="button" class="icon-btn" title="the request panel — what would be sent, the window, the cost, the tools" aria-label="open the request panel"><span data-icon="detail"></span></button>
+          <button id="btn-panel" type="button" class="icon-btn" title="the panel — the tool catalogue, the branch tree, the context window, and the exact request" aria-label="open the panel"><span data-icon="detail"></span></button>
           <button id="btn-settings" type="button" class="icon-btn" title="model, MCP servers, compaction" aria-label="session settings"><span data-icon="settings"></span></button>
           <!-- Stays hidden until the daemon answers /api/whoami with a user: a gate-less daemon has no door to log out of, and js/auth.js does not draw a key for it. -->
           <button id="btn-logout" type="button" class="icon-btn hidden" title="log out" aria-label="log out"><span data-icon="logout"></span></button>
@@ -149,17 +149,20 @@
 
       <aside id="panel" class="hidden">
         <div class="side-head">
-          <!-- One surface, three tabs, one mode variable (js/panel.js): the inspect table, the window's
-               numbers with its bill and its compact button, and the tool catalogue were four doors to three
-               rooms — each opened by its own chrome button and each stealing width from the transcript when
-               opened. Now the transcript keeps its column (the panel floats over it) and the questions share
-               a place. Usage and cost are one tab because they are one question — what is filling the window
-               and what it is doing to the bill — answered by two owners (js/panel.js, js/stats.js) into the
-               same body. The tools tab rewrites its own label with the counts the top-bar badge used to carry. -->
+          <!-- One surface, four tabs, one mode variable (js/panel.js), in the order you reach for them:
+               the tool catalogue, the branch map (js/tree.js), the window's numbers with its bill and its
+               compact button, and the inspect table. These were once four doors to three rooms — each
+               opened by its own chrome button and each stealing width from the transcript when opened. Now
+               the transcript keeps its column (the panel floats over it) and the questions share a place.
+               Usage and cost are one tab because they are one question — what is filling the window and
+               what it is doing to the bill — answered by two owners (js/panel.js, js/stats.js) into the
+               same body. The tools tab rewrites its own label with the counts the top-bar badge used to
+               carry. -->
           <div class="tabs" role="tablist" aria-label="panel">
-            <button type="button" class="tab" data-tab="inspect" role="tab">inspect</button>
-            <button type="button" class="tab" data-tab="context" role="tab">context</button>
             <button type="button" class="tab" data-tab="tools" role="tab">tools</button>
+            <button type="button" class="tab" data-tab="tree" role="tab">tree</button>
+            <button type="button" class="tab" data-tab="context" role="tab">context</button>
+            <button type="button" class="tab" data-tab="inspect" role="tab">inspect</button>
           </div>
           <button id="panel-close" type="button" class="icon-btn" title="close" aria-label="close the panel"><span data-icon="close"></span></button>
         </div>

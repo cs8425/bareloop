@@ -1,4 +1,4 @@
-// The panel: one surface, three tabs, floating over the transcript instead of squeezing it.
+// The panel: one surface, four tabs, floating over the transcript instead of squeezing it.
 //
 // This is the debugging surface for the claim that bareloop has no hidden behaviour — so it shows the
 // system prompt verbatim, every message the assembler kept, which ones were summarised away, the exact
@@ -17,8 +17,11 @@ import { note } from './ui.js';
 import { compactNow } from './app.js';
 import { EV_REFRESH, EV_SESSION, on } from './bus.js';
 
-// Which tab is on screen ('' = the panel is closed).
+// Which tab is on screen ('' = the panel is closed), and the last one that was — the topbar button
+// opens the panel as the reader left it, because the four tabs share one surface and the door should
+// not relight whichever tab happens to be named in the markup.
 let mode = '';
+let lastTab = 'tools';
 
 // renderers is each tab's draw queue, registered by the modules that own the content. They register
 // rather than being imported here because panel.js is imported by them — a direct import would close
@@ -83,6 +86,7 @@ function bindAll(guard, real) {
 
 export function openPanel(next) {
   mode = next;
+  lastTab = next;
   const mine = ++ticket;
   $('#panel').classList.remove('hidden');
   for (const b of document.querySelectorAll('#panel [data-tab]')) {
@@ -147,7 +151,7 @@ export function hidePanel() {
 }
 
 export function wirePanel() {
-  $('#btn-inspect').onclick = () => showPanelTab('inspect');
+  $('#btn-panel').onclick = () => showPanelTab(lastTab);
   $('#panel-close').onclick = hidePanel;
   for (const b of document.querySelectorAll('#panel [data-tab]')) {
     b.onclick = () => showPanelTab(b.dataset.tab);

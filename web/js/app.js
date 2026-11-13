@@ -35,6 +35,7 @@ import { wireSettings } from './settings.js';
 import { wireAuth } from './auth.js';
 import { hidePanel, wirePanel } from './panel.js';
 import { wireTools } from './tools.js';
+import { wireTree } from './tree.js';
 import './stats.js'; // registers the cost tab's renderer (js/panel.js); it owns no wiring of its own
 import { wireZoom } from './lightbox.js';
 import { flushStreams } from './transcript.js';
@@ -242,6 +243,7 @@ function wire() {
   window.addEventListener('bareloop:login', () => connect());
   wirePanel();
   wireTools();
+  wireTree();
   // One delegated listener for every picture the transcript will ever draw, so an entry rendered next month is
   // zoomable without anything having remembered to wire it (js/lightbox.js).
   wireZoom();
