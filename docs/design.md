@@ -5,7 +5,7 @@ other half: the decisions, the invariants they leave in the code, and the concre
 came from. Read it before changing the loop, the assembler or compaction.
 
 Compaction has a contract of its own -
-[`notes/compact-threshold-mode.en.md`](../notes/compact-threshold-mode.en.md) - and where this file
+[`compact-logic.md`](compact-logic.md) - and where this file
 summarises it, that file is the authority.
 
 ## Layout

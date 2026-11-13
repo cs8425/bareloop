@@ -2,7 +2,8 @@
 
 The complete surface: every endpoint, every parameter, every event frame. The reasoning for
 why the API is shaped this way lives in [design.md](design.md); what lives here is the contract
-a client can rely on.
+a client can rely on. The compaction algorithm behind `/compact` — cuts, replay, the gate —
+is specified in [compact-logic.md](compact-logic.md).
 
 `bareloopd` serves everything from one port: the JSON API under `/api/`, the event transports
 (`/ws`, `/api/session/{id}/events`), and the web UI at `/`. The UI is not privileged — every

@@ -48,7 +48,7 @@ endpoint.
 - MCP **2026-07-28** and **2025-11-25**, over stdio and streamable HTTP, with a dialog in the UI whenever a
   tool needs input.
 - Context compaction follows the contract in
-  [`notes/compact-threshold-mode.en.md`](notes/compact-threshold-mode.en.md).
+  [`docs/compact-logic.md`](docs/compact-logic.md).
 
 | read this | for |
 |---|---|
@@ -56,7 +56,7 @@ endpoint.
 | [`docs/design.md`](docs/design.md) | how it works and why: the context window, compaction invariants, prompt cache, retries, MCP eras, the UI's shape, the markdown renderer's hooks, and what is deliberately deferred |
 | [`docs/zstd-dictionary.md`](docs/zstd-dictionary.md) | the storage codec and its dictionary: what a payload row is made of, how the shipped zstd book is trained, how to train your own, and what losing one costs |
 | [`docs/api.md`](docs/api.md) | the full HTTP and websocket reference: every endpoint, every query parameter, every event frame — the contract a client relies on, so this README stays prose |
-| [`notes/compact-threshold-mode.en.md`](notes/compact-threshold-mode.en.md) | the compaction spec (the authority when the two docs disagree) |
+| [`docs/compact-logic.md`](docs/compact-logic.md) | the compaction logic in diagrams: the data model, the three cut shapes, the two request shapes, replay, commit, the invariants — the authority when the prose docs disagree (implementation-agnostic: a harness can be built from it alone) |
 | [`config.example.json`](config.example.json) | every config field, documented inline |
 
 ## Build

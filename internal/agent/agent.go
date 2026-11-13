@@ -1,14 +1,14 @@
 // Package agent holds the server-side agent loop.
 //
-// The design follows _notes/compact-threshold-mode.en.md:
+// The design follows the compaction contract in docs/compact-logic.md:
 //
 //   - the path in storage is the truth; every turn re-reads it, so a message the user
 //     sends while the loop runs becomes part of the next payload without extra machinery
-//     (§0 "the path is the truth", §6 "new message during compaction → queued, then sent")
+//     ("the path is the truth"; a message sent during compaction is queued, then sent)
 //   - exactly one assembler (package asm) renders payloads — main send, in-loop rebuild,
-//     summary request, inspector, rebuild after reload (§5.4)
-//   - compaction never runs while a generation is running (§1.1) and commits the entry and
-//     the new path tip in one storage write (§3.8, §3.10)
+//     summary request, inspector, rebuild after reload
+//   - compaction never runs while a generation is running, and commits the entry and
+//     the new path tip in one storage write
 //   - every tool the model may call comes from an MCP server, except the handful this daemon
 //     answers itself (package builtin), which a session has to ask for by name
 package agent
