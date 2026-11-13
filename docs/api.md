@@ -101,6 +101,8 @@ there is TLS, so a laptop that reconnects on a new address cannot walk past a lo
 | GET | `/api/session/{id}/tools` | the tools drawer view |
 | POST | `/api/session/{id}/tools` | set one server's tool policy |
 | GET | `/api/session/{id}/turns` | a ruler over the path: one row per turn, no content |
+| GET | `/api/session/{id}/tree` | the whole tree as shape only: edges, child counts, where the live path stands |
+| GET | `/api/session/{id}/snippets` | the opening line of named entries — the tree map's lazy half |
 | POST | `/api/session/{id}/send` | send a message now |
 | POST | `/api/session/{id}/interrupt` | abort what is in flight, then send |
 | POST | `/api/session/{id}/stop` | abort what is in flight |
@@ -315,6 +317,40 @@ come back, `clamped` is true and `hasOlder` says the path goes on before the fir
 `?limit=` takes fewer, from the newest end. `before`, `after` and `anchor` are 400s here — a
 turn list that skipped a stretch of the path without saying so is worse than one that refuses.
 
+### `GET /api/session/{id}/tree`
+
+Every entry as shape and nothing else — `{rows, count, truncated, limit}`, one row per entry in
+`seq` order (which is the store's lived order, parents necessarily before children):
+
+```jsonc
+{ "id": "0000042", "parent": "0000039", "kind": "assistant", "seq": 42, "ts": 1794539820,
+  "nkids": 3, "onPath": true, "isTip": false }
+```
+
+- `nkids` counts every child in the store, path or not: a node with two of them is where the
+  conversation forked, and alternates are `nkids - 1` from a walker already on the path.
+- `onPath` is the chain root→tip as the tree draws it — every ancestor of the tip, compaction
+  included. Whether the *model* sees a prefix is the window's question (`/inspect` answers it);
+  the tree answers where the path stands, in geometry, not what it sends.
+- No content is asked, by construction and not by flag: the query never opens a payload, so the
+  answer costs a row per entry and pages nothing (`limit` defaults to 5000, ceilings at 20000,
+  and `truncated` is how a full-length answer says the bound bit — such a tree wants a search
+  box, not a second page). Opening words ride `snippets`, on demand, for exactly the rows a
+  screen shows.
+
+### `GET /api/session/{id}/snippets?ids=…`
+
+The lazy half of the map: `{snippets, count}` with `{id, kind, snippet}` per named entry — the
+first line of its content, collapsed to one display line, capped at 120 runes with an ellipsis
+where it was cut. A row whose content is empty still names itself, since a map row the reader
+cannot name is a row they navigate blind: a tool result says `⟨tool 名⟩`, a reply whose words
+went to tool calls says `⟨fs_read +1⟩`, a thinking model's contentless reply previews its
+reasoning beside `⟨thinking⟩`, and an entry with nothing to say says `⟨no text⟩`. Ids come from
+a `tree` read, a screenful at a time (cap 200 per call, 400 above it); the answer keeps the
+caller's order and skips ids that were deleted in between rather than answering a hole. An
+image entry's snippet is its text beside the picture — no bytes of the picture cross this wire,
+same bargain as `turns`.
+
 ## Writes
 
 Every action route answers `{"ok": true}` plus whatever the caller can repaint without asking
@@ -332,7 +368,7 @@ message). A message that arrives while the path is not free is **held in memory*
 | `POST .../gate` | `{id, answer}` | `{ok}` | `answer` is `accept`, `retry` or `skip` on an oversized-summary gate |
 | `POST .../elicit` | `{id, behavior, content}` | `{ok}` | `behavior` defaults to `accept`; `content` is the elicited form values |
 | `POST .../entry/patch` | `{id, content}` | `{ok}` | rewrite in place: every path through the entry changes, and it does not branch |
-| `POST .../entry/delete` | `{id}` | `{ok}` | delete a leaf, or make an interior entry synthetic |
+| `POST .../entry/delete` | `{id}` | `{ok}` | delete an entry: a leaf goes, an interior entry goes and its children re-attach to its parent |
 | `POST .../tip` | `{id}` | `{ok, status}` | move the tip — time travel; the log keeps everything, the path changes |
 | `POST .../reload` | — | `{ok, status}` | re-read the log from disk (another writer edited the session) |
 | `POST .../unload` | — | `{ok, unloaded, session}` | gives back the RAM without touching the directory. A run or summary in flight is refused with a 400 naming the phase — `/stop` first. `unloaded: false` is the honest answer for a session this process was not holding: it is shut, which is what was asked for. What only memory had goes — a held message, the in-memory half of a parked wait — the same bill a restart pays |
@@ -367,7 +403,7 @@ know "nothing happened" from "something happened that I never received".
 | `elicitation` | `request` | `{id, server, tool, message, mode, schema, round}` |
 | `info` | `request_done` (the closed request's id), `removed` (the entry id), `hello`, `log`, `info`, `error` | a string |
 | `level` | `log`, `info`, `error` | severity |
-| `data` | `tools` (the tools view), `compaction` (stage progress or the result), others | any JSON |
+| `data` | `tools` (the tools view), `compaction` (stage progress or the result), `tip` (`{from, to}` — the entries the path moved between), others | any JSON |
 
 | type | when it fires |
 |---|---|
@@ -383,6 +419,7 @@ know "nothing happened" from "something happened that I never received".
 | `request_done` | that request was answered or cancelled (`info` names it) |
 | `log` / `info` / `error` | diagnostics for the page to show |
 | `removed` | an entry was deleted (`info` names it) |
+| `tip` | the path tip moved (`data` names the pair) — sent beside the `state` it accompanies, so a watcher never has to tell a rewind from a branch change by diffing numbers |
 | `tools` | the published tool set changed; the body is the same view `GET .../tools` returns |
 
 Not events, but on the same socket: `heartbeat` frames (below) and command answers —

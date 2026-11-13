@@ -652,6 +652,7 @@ otherwise the model answers in whatever it prefers
 | GET | `/api/session/{id}/payload` | the exact body of the next request: `{system, messages, tools}` |
 | GET · POST | `/api/session/{id}/tools` | the tools drawer — every server and tool with cost and use; the POST sets one server's policy, landed at the end of the run |
 | GET | `/api/session/{id}/turns` | one row per turn of the path — each id a legal jump target for the pager — and no content at all |
+| GET | `/api/session/{id}/tree` | the whole tree as shape only — every edge, every child count, and where the live path stands — with no content by construction; opening lines ride `/snippets?ids=` for exactly the rows on screen |
 | GET | `/api/session/{id}/events` · `/ws` | the event stream as SSE (fallback transport) / as a websocket (primary) |
 
 The two promises this table rests on are worth memorising; the parameters, the `window` fields,
@@ -686,7 +687,7 @@ the message like any other entry, which makes it *pending* - on disk the moment 
 `status.pending`, read at the next turn boundary: after the tool result belonging to the current turn, or as
 soon as a compaction finishes. A restart cannot lose it.
 
-**An answer is owed.** Two shapes of the same debt. A `tool_call` reached `data/<id>/log.jsonl` and its result
+**An answer is owed.** Two shapes of the same debt. A `tool_call` reached the session log and its result
 has not been written - while a slow tool runs, while a `wait` sleeps, while a parked session waits on a timer
 with no goroutine held open for it. Or a request went to the model and has not come back: nothing is on disk
 yet, so the entry that would answer it does not exist.
