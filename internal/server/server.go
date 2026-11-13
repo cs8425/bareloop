@@ -952,20 +952,23 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"rows": rows,
-		// A full-length answer is how the caller learns the bound bit: a tree this deep
+		// A full-length (or longer — a rewound tip's spine backfills past the bound,
+		// store.Tree) answer is how the caller learns the bound bit: a tree this deep
 		// wants a search box, not a second page.
-		"truncated": len(rows) == limit,
+		"truncated": len(rows) >= limit,
 		"count":     len(rows),
 		"limit":     limit,
 	})
 }
 
-// The tree endpoint's two numbers: a default that answers any session the product has measured
-// (1731 entries is the largest live tree, and its rows are tens of kilobytes), and a ceiling
-// against a URL typo, not against a real session.
+// The tree endpoint's two numbers: a default that answers any session the product has
+// measured — 8.5k entries is the largest live tree today, at ~60 bytes of edges JSON per
+// row — and a ceiling against a URL typo, not against a real session. Both outgrew their
+// first numbers once; what has not changed is that a truncating answer keeps the newest
+// rows (store.Tree), so even the typo ceiling leaves the reader standing on the map.
 const (
-	treeRowsDefault = 5000
-	treeRowsMax     = 20000
+	treeRowsDefault = 50000
+	treeRowsMax     = 200000
 )
 
 // handleSnippets answers the opening lines of named entries — the lazy half of the branch

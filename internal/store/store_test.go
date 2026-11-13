@@ -1253,14 +1253,28 @@ func TestTreeShape(t *testing.T) {
 		t.Error("moving the tip moved a child count: geometry is not the tip's to change")
 	}
 
-	// A bounding limit keeps the first rows in seq order and the walk honest: ancestors
-	// before the window's first row cannot claim OnPath, and that is the truthful answer.
+	// A bounding limit keeps the newest rows and the tip with them: the cut lands on
+	// the newest end, and a tip the window stands past walks its chain back into the
+	// answer by primary key (the walk Skeleton proves bounded). A reader who moved the
+	// tip onto a truncated map must always see where they stand — losing the tip was
+	// the old head-cut's sin, and this limit exists only against URL typos.
 	rows, err = l.Tree(3)
 	if err != nil {
 		t.Fatalf("Tree limit: %v", err)
 	}
-	if len(rows) != 3 || rows[0].ID != root.ID {
-		t.Fatalf("Tree(3) = %d rows starting %s, want 3 starting at the root", len(rows), rows[0].ID)
+	var tipRow *TreeRow
+	for i := range rows {
+		if rows[i].IsTip {
+			tipRow = &rows[i]
+		}
+	}
+	if tipRow == nil || tipRow.ID != e1.ID {
+		t.Fatalf("Tree(3) = %d rows without the tip flagged (want %s)", len(rows), e1.ID)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Seq >= rows[i].Seq {
+			t.Fatalf("Tree(3) rows lost seq order at %d", i)
+		}
 	}
 
 	// An empty store answers empty, not null-error.

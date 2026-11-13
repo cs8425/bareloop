@@ -82,7 +82,7 @@ function draw(body) {
   );
   head.appendChild(el('div', 'dim', 'click any row to move the path there — the transcript follows, nothing is deleted'));
   if (view.truncated) {
-    head.appendChild(el('div', 'tree-trunc', `the tree is deeper than one read carries (${view.limit} rows): the oldest stretch is missing from this map`));
+    head.appendChild(el('div', 'tree-trunc', `the tree is deeper than one read carries (${view.limit} rows): the oldest stretch is cut, newest rows kept — the tip's chain is on this map even when its oldest entries are not`));
   }
   body.appendChild(head);
 

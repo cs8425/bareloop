@@ -333,10 +333,12 @@ Every entry as shape and nothing else — `{rows, count, truncated, limit}`, one
   included. Whether the *model* sees a prefix is the window's question (`/inspect` answers it);
   the tree answers where the path stands, in geometry, not what it sends.
 - No content is asked, by construction and not by flag: the query never opens a payload, so the
-  answer costs a row per entry and pages nothing (`limit` defaults to 5000, ceilings at 20000,
-  and `truncated` is how a full-length answer says the bound bit — such a tree wants a search
-  box, not a second page). Opening words ride `snippets`, on demand, for exactly the rows a
-  screen shows.
+  answer costs a row per entry and pages nothing (`limit` defaults to 50000, ceilings at 200000,
+  and `truncated` is how a full-length-or-longer answer says the bound bit — such a tree wants a
+  search box, not a second page). A truncating answer keeps the **newest** rows, and a tip the
+  window stands past walks its own chain back into them: the map always shows the ground the
+  session stands on, because a navigator that lost the tip is the one sin it must not commit.
+  Opening words ride `snippets`, on demand, for exactly the rows a screen shows.
 
 ### `GET /api/session/{id}/snippets?ids=…`
 

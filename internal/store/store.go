@@ -40,6 +40,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1553,56 +1554,107 @@ type TreeRow struct {
 	IsTip  bool `json:"isTip"`
 }
 
-// Tree reads the whole tree in one index-ordered scan — parents before children
+// Tree reads the tree's shape in one index-ordered scan — parents before children
 // by construction, since a child's seq is handed out after its parent's exists —
 // and walks the tip chain for OnPath exactly the way Skeleton walks it (the seen
 // set is the corrupt-cycle guard, and here a break mid-walk simply leaves the
 // tree rooted at its current tip). No payload is read: at a thousand entries the
 // answer is tens of kilobytes, which is why this endpoint pages nothing and why
-// BenchmarkTree, not faith, prices it.
+// BenchmarkTree, not faith, prices it. A positive limit cuts the NEWEST window
+// and drags the tip's spine in after it — see the two comments inside.
 func (l *Log) Tree(limit int) ([]TreeRow, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.db == nil {
 		return nil, ErrClosed
 	}
+	// A truncating limit keeps the NEWEST rows, never the oldest: a navigator that
+	// lost the tip is the one sin it must not commit. The old head-cut (`ORDER BY
+	// seq LIMIT n`) on an 8500-entry session handed back the oldest 5000 — the tip
+	// and its whole chain off the answer, IsTip unmarkable, and a reader who moved
+	// the tip onto the visible half had no visible way back. Tail-cutting keeps the
+	// ground the session stands on plus its recent branching; the deep history
+	// degrades to forest roots, which is what the rows already do with a parent
+	// that sits before the window.
 	q := "SELECT id, IFNULL(parent,''), kind, seq, CAST(ts AS INTEGER) FROM entry ORDER BY seq"
+	tail := false
 	args := []any{}
 	if limit > 0 {
-		q += " LIMIT ?"
+		q = "SELECT id, IFNULL(parent,''), kind, seq, CAST(ts AS INTEGER) FROM entry ORDER BY seq DESC LIMIT ?"
 		args = append(args, limit)
+		tail = true
 	}
 	rows, err := l.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	out := []TreeRow{}
-	byID := map[string]int{}
-	for i := 0; rows.Next(); i++ {
+	var out []TreeRow
+	for rows.Next() {
 		var r TreeRow
 		if err := rows.Scan(&r.ID, &r.ParentID, &r.Kind, &r.Seq, &r.Ts); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		byID[r.ID] = i
 		out = append(out, r)
-		// Seq order is parent-before-child for the tree's own edges, so a parent seen
-		// later means it is off the store or before a truncating LIMIT's window: the
-		// child still counts where it stands — a branch the navigator cannot see is
-		// still a branch.
-		if p, ok := byID[r.ParentID]; ok {
-			out[p].NKids++
-		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return nil, err
 	}
 	rows.Close()
-	// The tip chain, walked the Skeleton way. With a truncating limit an ancestor
-	// can sit before the window's first row: byID misses it and the walk stops
-	// honest — those deeper rows simply do not claim OnPath.
+	if tail { // seq DESC came out child-before-parent; flip it back to seq order
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+	}
+	// Tail-cutting keeps the newest rows — but a tip rewound to older ground with
+	// newer siblings behind it is not in them, and a navigator that lost the ground
+	// the session stands on is the one sin it must not commit. So when the window
+	// stands past the tip, walk the tip chain by primary key — the same walk
+	// Skeleton proves bounded and cycle-guarded — and add every row it passes until
+	// the chain enters the window. A deep rewind costs one point query per hop of
+	// the chain; that is the rare path, and truncation is rarer still.
 	tip := l.effectiveTip()
+	if tail {
+		inWin := make(map[string]bool, len(out))
+		for i := range out {
+			inWin[out[i].ID] = true
+		}
+		if !inWin[tip] && tip != "" {
+			for id := tip; id != "" && !inWin[id]; {
+				inWin[id] = true // claim before the query: a corrupt cycle walks out, not around
+				var r TreeRow
+				err := l.db.QueryRow("SELECT id, IFNULL(parent,''), kind, seq, CAST(ts AS INTEGER) FROM entry WHERE id = ?", id).
+					Scan(&r.ID, &r.ParentID, &r.Kind, &r.Seq, &r.Ts)
+				if err != nil {
+					break // the chain broke where the store says it broke: honest
+				}
+				out = append(out, r)
+				id = r.ParentID
+			}
+			// The spine rows joined out of order: restore seq order (parents before
+			// children again) so every pass below reads the same invariant.
+			sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+		}
+	}
+	if out == nil { // an empty store answers [], not null
+		out = []TreeRow{}
+	}
+	byID := make(map[string]int, len(out))
+	for i := range out {
+		byID[out[i].ID] = i
+		// Seq order is parent-before-child for the tree's own edges, so a parent seen
+		// later means it is off the store or before a truncating limit's window: the
+		// child still counts where it stands — a branch the navigator cannot see is
+		// still a branch.
+		if p, ok := byID[out[i].ParentID]; ok {
+			out[p].NKids++
+		}
+	}
+	// The tip chain, walked the Skeleton way. With a truncating limit an ancestor
+	// can sit before the window's first row and below the backfilled spine: byID
+	// misses it and the walk stops honest — those deeper rows simply do not claim
+	// OnPath. The tip itself always answers, spine backfill above having seen to it.
 	seen := map[string]bool{}
 	for id := tip; id != ""; {
 		if i, ok := byID[id]; ok {
