@@ -122,8 +122,13 @@ type RunInfo struct {
 	Images     int             `json:"images,omitempty"`
 	Ms         int64           `json:"ms,omitempty"`
 	Error      string          `json:"error,omitempty"`
-	EntryID    string          `json:"entryId,omitempty"`
-	Rounds     int             `json:"rounds,omitempty"`
+	// EntryID names the assistant entry whose toolCalls array holds this call — the entry a card
+	// belongs under. Every frame of the call carries it, from running to terminal, so a reload or a
+	// hub replay attaches the card where it lives instead of guessing (or orphaning it at the tail,
+	// the 2026-11-13 F5 report while this field had no writer). It is not the tool result's own id:
+	// the UI joins that from the result entry's toolCallId.
+	EntryID string `json:"entryId,omitempty"`
+	Rounds  int    `json:"rounds,omitempty"`
 }
 
 // Status is the session status line.

@@ -293,6 +293,82 @@ func TestARefusedToolResultStillEndsItsCard(t *testing.T) {
 	}
 }
 
+// TestToolFramesNameTheirHostEntry pins the wire's host pointer: every frame of a tool call — the
+// running one and the terminal one — names the assistant entry whose toolCalls array asked for it.
+// While RunInfo.EntryID had no writer the browser could only guess where a card belongs, and a hub
+// replay turned that guess into a pile of orphan cards at the transcript's tail (2026-11-13 report:
+// F5). The refusal test above pins the other half: a frame invents no entry that never was.
+func TestToolFramesNameTheirHostEntry(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		frames []Event
+	)
+	m := NewManager(t.TempDir(), false, Config{}, func(e Event) {
+		mu.Lock()
+		frames = append(frames, e)
+		mu.Unlock()
+	}, nil)
+	cfg := Config{ID: "hosted"}
+	cfg.BuiltinTools = []string{"get_datetime"}
+	cfg.LLM = llm.Config{BaseURL: "http://127.0.0.1:1/v1"}
+	s, err := m.Create(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	script := []turn{
+		gatedToolCalls("call-1", "get_datetime", `{}`),
+		says("done"),
+	}
+	f := &fakeProvider{script: script}
+	s.provider = f
+	t.Cleanup(func() { _ = s.Close() })
+
+	send(t, s, "what time is it")
+	f.waitForRequest(t, 1)
+	f.gate(t, 1).release()
+	waitForIdle(t, s)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	host, toolEntry := "", ""
+	var opened, ended *RunInfo
+	for _, e := range frames {
+		switch {
+		case e.Type == EvtEntry && e.Entry != nil && e.Entry.Kind == ir.KindAssistant && len(e.Entry.ToolCalls) > 0:
+			host = e.Entry.ID
+		case e.Type == EvtEntry && e.Entry != nil && e.Entry.Kind == ir.KindTool:
+			toolEntry = e.Entry.ID
+		case e.Type == EvtToolCall && e.Run != nil:
+			opened = e.Run
+		case e.Type == EvtToolResult && e.Run != nil:
+			ended = e.Run
+		}
+	}
+	if host == "" {
+		t.Fatalf("the run committed no assistant entry with a tool call:%s", describeFrames(frames))
+	}
+	if opened == nil || ended == nil {
+		t.Fatalf("the call opened=%v ended=%v: the card never saw both ends of its life:%s", opened != nil, ended != nil, describeFrames(frames))
+	}
+	if opened.EntryID != host {
+		t.Errorf("the running frame names host %q, not the assistant entry %s that asked for the call", opened.EntryID, host)
+	}
+	if ended.EntryID != host {
+		t.Errorf("the terminal frame names host %q, not %s: a card detached by then would orphan again on reload", ended.EntryID, host)
+	}
+	if toolEntry == "" || toolEntry == host {
+		t.Errorf("the tool result entry is %q; it is a different entry than the host %s, and the frames must not confuse the two", toolEntry, host)
+	}
+	body, err := json.Marshal(ended)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(body), `"entryId":"`+host+`"`) {
+		t.Errorf("the wire drops the host pointer a reload would attach by: %s", body)
+	}
+}
+
 // TestAStreamedReplyNamesItsStream is the identity that lets a browser finish the job 2026-11-05
 // started: a live buffer is keyed by its stream id and nothing else, so the frame that commits an
 // assistant entry has to name it. The rule that replaces it — "the newest buffer is the one this reply

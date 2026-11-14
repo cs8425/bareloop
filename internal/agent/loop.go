@@ -352,7 +352,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 		// The run's own context goes in here. What the daemon knows about the call being resumed travels on
 		// it addressed to that call rather than scoped to these few, because a scope would have to end with
 		// the tail and a run does not (see resumeCall).
-		if aborted := s.runTools(ctx, tailCalls(st.tail)); aborted || s.isParked() {
+		if aborted := s.runTools(ctx, callHosts(st.tail...), tailCalls(st.tail)); aborted || s.isParked() {
 			// The wake ended the way any run ends when it is aborted, or when the wait it produced is
 			// longer than a run will hold: the next moment belongs to the daemon, not to this goroutine.
 			return
@@ -597,7 +597,7 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 
-		abortedTools := s.runTools(ctx, entry.ToolCalls)
+		abortedTools := s.runTools(ctx, callHosts(committed), entry.ToolCalls)
 		if s.isParked() {
 			// A wait this run handed over is neither the end of the conversation nor a place to compact:
 			// the path ends on a call with no result, and a boundary here would put a summary in front of
@@ -946,9 +946,17 @@ stream:
 // runTools executes every tool call the model asked for, in order, recording one entry each.
 // A result is always recorded, even on failure or abort: the next payload must never contain
 // a tool call without a result (spec §5.1).
-func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bool) {
+//
+// hosts names the entry behind each call — the assistant entry whose toolCalls array asked for
+// it — and every frame of that call carries the name (RunInfo.EntryID). It is the difference
+// between a browser attaching a card where it belongs and guessing: while the field was written
+// by nobody, a hub replay orphaned every old card at the transcript's tail (2026-11-13 report:
+// F5 piled a session's cards at the newest end), and the UI had to fall back to asking whether
+// the call is the live edge right now. A call whose host is unknown (a hand-built frame, an old
+// replay from a dead daemon) keeps an empty entryId, which is a fact and not a failure.
+func (s *Session) runTools(ctx context.Context, hosts map[string]string, calls []ir.ToolCall) (aborted bool) {
 	for _, tc := range calls {
-		run := &RunInfo{ID: tc.ID, CallID: tc.ID, Tool: tc.Name, Args: string(tc.Args), Status: "running", Rounds: s.turnCount()}
+		run := &RunInfo{ID: tc.ID, CallID: tc.ID, Tool: tc.Name, Args: string(tc.Args), Status: "running", Rounds: s.turnCount(), EntryID: hosts[tc.ID]}
 		if ref, ok := s.reg.resolve(tc.Name); ok {
 			run.Server = ref.Server
 		}
@@ -1055,6 +1063,25 @@ func (s *Session) runTools(ctx context.Context, calls []ir.ToolCall) (aborted bo
 		s.emitState()
 	}
 	return aborted
+}
+
+// callHosts maps every tool call id of these entries to the entry that asked for it, the way
+// runTools wants it: the ordinary turn hands over the one assistant entry it just committed,
+// and the replay of a woken tail hands over every entry the tail holds, because a woken run can
+// be owed calls by more than one reply.
+func callHosts(entries ...*ir.Entry) map[string]string {
+	hosts := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		for _, tc := range e.ToolCalls {
+			if tc.ID != "" {
+				hosts[tc.ID] = e.ID
+			}
+		}
+	}
+	return hosts
 }
 
 // refuseToolResult is a tool run's closeStreamErr: the call happened, the path refused to take its result,
