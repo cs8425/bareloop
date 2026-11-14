@@ -152,7 +152,13 @@ type FunctionCall struct {
 // Message is one chat message on the wire.
 type Message struct {
 	Role string `json:"role"`
-	// Content is a string, a []ContentPart, or omitted (assistant with only tool_calls).
+	// Content is a string, a []ContentPart, or nil for omitted (assistant with only
+	// tool_calls). Presence is decided by MarshalJSONTo, never by the tag: this build's v2
+	// engine unwraps the interface and calls a held "" empty — measured, 2026-11-13 — so
+	// `omitempty` silently deleted the key from a tool result that had stored nothing, and
+	// a strict provider refused the whole payload ("All non-assistant messages must
+	// contain 'content'") on every turn that carried the entry. The tag stays only to
+	// spell the compat shape for engines that never reach either method.
 	Content any `json:"content,omitempty"`
 	// ReasoningContent is only sent when Options.SendReasoning is on; the same switch is
 	// used by every caller, so the prefix stays identical either way (spec §5.4 #3).
@@ -160,6 +166,205 @@ type Message struct {
 	ToolCalls        []ToolCallOut `json:"tool_calls,omitempty"`
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 	Name             string        `json:"name,omitempty"`
+}
+
+// checkShape refuses the message shapes a provider is known to punish, at the one place
+// that still runs before the request. Which keys a message may carry is a question of its
+// shape — role plus which fields are set — not of each field asking to be written: the
+// 2026-11-13 dogfood 400 ("All non-assistant messages must contain 'content'") was a per-
+// field value test ("set means written") meeting a role rule ("a tool result must carry
+// content"), and the field lost. The two shapes that poison a session whole:
+//
+//   - a tool result with no content at all: with the old tag it reached the wire keyless
+//     (the engine read an interface holding "" as empty) and every later turn died with it;
+//   - an assistant message pairing tool_calls with an empty-string content — the
+//     "tool call + content" combo strict parsers reject, and which the assembler cannot
+//     produce (an empty assistant text assembles to nil, omitting the key) — so reaching
+//     for it means a caller bypassed the choke point, which is exactly when to refuse.
+//
+// Empty strings stay legal where the spec says they are (a tool result that says "" is a
+// result; a user "" is a message) — the rule protects required keys, not taste. An
+// unrecognised role shape-checks as nothing: imported histories are the village's to
+// deliver, the provider's to judge.
+func (m Message) checkShape() error {
+	switch m.Role {
+	case "tool":
+		if m.Content == nil {
+			return fmt.Errorf("asm: tool message (tool_call_id %q) must carry content — an empty result sends \"\"", m.ToolCallID)
+		}
+		if m.ToolCallID == "" {
+			return fmt.Errorf("asm: tool message must carry tool_call_id")
+		}
+	case "assistant":
+		if s, ok := m.Content.(string); ok && s == "" && len(m.ToolCalls) > 0 {
+			return fmt.Errorf("asm: assistant message pairs tool_calls with an empty content — say something or send nil")
+		}
+	case "user", "system":
+		if m.Content == nil {
+			return fmt.Errorf("asm: %s message must carry content", m.Role)
+		}
+	}
+	return nil
+}
+
+// MarshalJSONTo writes a message token by token — the same hand ContentPart learned from
+// llama.cpp, extended one level up after the 2026-11-13 dogfood proved the message layer
+// had the same disease: what goes into `content` comes out, always. A nil Content is the
+// one way to omit the key; an empty string is a value like any other and ships as "".
+// Field order is the struct declaration order, so the KV prefix reads the same bytes the
+// engine wrote before this method existed — the goldens are what prove "same bytes", not
+// this sentence.
+func (m Message) MarshalJSONTo(e *jsontext.Encoder) error {
+	if err := m.checkShape(); err != nil {
+		return err
+	}
+	if m.Content != nil {
+		switch m.Content.(type) {
+		case string, []ContentPart:
+		default:
+			return fmt.Errorf("asm: Message.Content is %T, want string or []ContentPart", m.Content)
+		}
+	}
+	str := func(s string) error { return e.WriteToken(jsontext.String(s)) }
+	key := func(k string) error { return str(k) }
+	if err := e.WriteToken(jsontext.BeginObject); err != nil {
+		return err
+	}
+	if err := key("role"); err != nil {
+		return err
+	}
+	if err := str(m.Role); err != nil {
+		return err
+	}
+	if m.Content != nil {
+		if err := key("content"); err != nil {
+			return err
+		}
+		switch c := m.Content.(type) {
+		case string:
+			if err := str(c); err != nil {
+				return err
+			}
+		case []ContentPart:
+			if err := e.WriteToken(jsontext.BeginArray); err != nil {
+				return err
+			}
+			for _, p := range c {
+				if err := p.MarshalJSONTo(e); err != nil {
+					return err
+				}
+			}
+			if err := e.WriteToken(jsontext.EndArray); err != nil {
+				return err
+			}
+		}
+	}
+	if m.ReasoningContent != "" {
+		if err := key("reasoning_content"); err != nil {
+			return err
+		}
+		if err := str(m.ReasoningContent); err != nil {
+			return err
+		}
+	}
+	if len(m.ToolCalls) > 0 {
+		if err := key("tool_calls"); err != nil {
+			return err
+		}
+		if err := e.WriteToken(jsontext.BeginArray); err != nil {
+			return err
+		}
+		for _, tc := range m.ToolCalls {
+			if err := e.WriteToken(jsontext.BeginObject); err != nil {
+				return err
+			}
+			if err := key("id"); err != nil {
+				return err
+			}
+			if err := str(tc.ID); err != nil {
+				return err
+			}
+			if err := key("type"); err != nil {
+				return err
+			}
+			if err := str(tc.Type); err != nil {
+				return err
+			}
+			if err := key("function"); err != nil {
+				return err
+			}
+			if err := e.WriteToken(jsontext.BeginObject); err != nil {
+				return err
+			}
+			if err := key("name"); err != nil {
+				return err
+			}
+			if err := str(tc.Function.Name); err != nil {
+				return err
+			}
+			if err := key("arguments"); err != nil {
+				return err
+			}
+			if err := str(tc.Function.Arguments); err != nil {
+				return err
+			}
+			if err := e.WriteToken(jsontext.EndObject); err != nil {
+				return err
+			}
+			if err := e.WriteToken(jsontext.EndObject); err != nil {
+				return err
+			}
+		}
+		if err := e.WriteToken(jsontext.EndArray); err != nil {
+			return err
+		}
+	}
+	if m.ToolCallID != "" {
+		if err := key("tool_call_id"); err != nil {
+			return err
+		}
+		if err := str(m.ToolCallID); err != nil {
+			return err
+		}
+	}
+	if m.Name != "" {
+		if err := key("name"); err != nil {
+			return err
+		}
+		if err := str(m.Name); err != nil {
+			return err
+		}
+	}
+	return e.WriteToken(jsontext.EndObject)
+}
+
+// MarshalJSON is the v1 twin of MarshalJSONTo — the shape a GOEXPERIMENT=nojsonv2 build
+// writes, and the method every v1-API caller sees on any build. Content's presence is
+// branched in code here too rather than left to a tag: the fallback exists to be the
+// boringly explicit answer, and a type whose whole contract is "what goes in comes out"
+// may not reopen that question through omitempty on its way out of a struct literal.
+// The golden table pins both twins to the same shapes so neither route can rot.
+func (m Message) MarshalJSON() ([]byte, error) {
+	if err := m.checkShape(); err != nil {
+		return nil, err
+	}
+	if m.Content == nil {
+		return json.Marshal(struct {
+			Role             string        `json:"role"`
+			ReasoningContent string        `json:"reasoning_content,omitempty"`
+			ToolCalls        []ToolCallOut `json:"tool_calls,omitempty"`
+			ToolCallID       string        `json:"tool_call_id,omitempty"`
+			Name             string        `json:"name,omitempty"`
+		}{m.Role, m.ReasoningContent, m.ToolCalls, m.ToolCallID, m.Name})
+	}
+	return json.Marshal(struct {
+		Role             string        `json:"role"`
+		Content          any           `json:"content"`
+		ReasoningContent string        `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCallOut `json:"tool_calls,omitempty"`
+		ToolCallID       string        `json:"tool_call_id,omitempty"`
+		Name             string        `json:"name,omitempty"`
+	}{m.Role, m.Content, m.ReasoningContent, m.ToolCalls, m.ToolCallID, m.Name})
 }
 
 // Blobs resolves the image references a session's entries carry: an image part whose
@@ -430,6 +635,21 @@ func content(e *ir.Entry, opts Options) any {
 	if len(imgs) == 0 {
 		if e.Role == "assistant" && text == "" {
 			return nil // omit content for tool-call-only assistant messages
+		}
+		if text == "" {
+			// Policy, not presence: Message's hand-written marshal and checkShape already keep the
+			// key on the wire (the 2026-11-13 dogfood 400 was the engine's omitempty deleting it from
+			// an interface holding ""; the probe measured the drop, the llama.cpp replay measured
+			// that a present "" answers 200). Empty is still not sent as empty, because a model
+			// handed a content-free tool result reads the silence as "no answer yet" and re-calls
+			// the tool — and other gateways, unlike the one measured here, may truthiness-check the
+			// field and read "" as the missing key all over again. So the emptiness is said in
+			// words, as the synthesised result and the image note already are — which words depends
+			// on who was empty, because each sentence says something true.
+			if e.Role == "tool" {
+				return "[empty result — the tool returned no output]"
+			}
+			return "[empty message]"
 		}
 		return text
 	}

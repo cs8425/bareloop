@@ -206,6 +206,35 @@ func TestOrphanToolResultIsDropped(t *testing.T) {
 	}
 }
 
+// TestEmptyToolResultTravelsWithWords is the dogfood lesson of 2026-11-13: a provider refused the
+// whole payload ("All non-assistant messages must contain 'content'") over a tool result that had
+// stored nothing, and because the entry stands on the path, every later turn repeated the 400 — a
+// poison pill no resume can dissolve. So an empty result now goes out in words. Assistant messages
+// keep omitting the key (TestTrailingUnansweredToolCallIsLegal pins that; it is only legal there).
+func TestEmptyToolResultTravelsWithWords(t *testing.T) {
+	as := a("")
+	as.ToolCalls = []ir.ToolCall{call("c1")}
+	empty := &ir.Entry{ID: "t", Kind: ir.KindTool, Role: "tool", ToolCallID: "c1"}
+	b := Assemble(Payload{Kept: []*ir.Entry{u("hi"), as, empty}}, Options{})
+	txt, ok := b.Messages[2].Content.(string)
+	if !ok || !strings.Contains(txt, "no output") {
+		t.Fatalf("an empty tool result must travel with words, got %#v", b.Messages[2].Content)
+	}
+	raw, err := json.Marshal(b.Messages[2])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"content"`) {
+		t.Fatalf("a tool message must carry the content key: %s", raw)
+	}
+	// The same defence covers an empty user message: every non-assistant message is sent with
+	// content, and the sentence matches who is empty.
+	quiet := Assemble(Payload{Kept: []*ir.Entry{{ID: "q", Kind: ir.KindUser, Role: "user"}}}, Options{}).Messages[0]
+	if txt, _ := quiet.Content.(string); txt != "[empty message]" {
+		t.Fatalf("empty user message = %#v, want the plain admission", quiet.Content)
+	}
+}
+
 // TestSummaryIsSplicedOnceWithUserRole is spec §3.6/§3.7, in both directions: exactly one copy of
 // the summary text, role user, and the caller's entry is not mutated.
 func TestSummaryIsSplicedOnceWithUserRole(t *testing.T) {

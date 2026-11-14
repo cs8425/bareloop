@@ -1,6 +1,7 @@
 package asm
 
-// Wire byte contract for ContentPart. The referee here is a literal, not an implementation:
+// Wire byte contract for ContentPart and Message. The referee here is a literal, not an
+// implementation:
 // llama.cpp reads part.at("text") for every part and answers a request that dropped the key
 // with 500 "key 'text' not found", and the KV cache is keyed by the exact prefix bytes, so a
 // part that re-marshals differently between turns re-prefills the whole conversation.
@@ -135,5 +136,129 @@ func TestPayloadContentBytesGolden(t *testing.T) {
 	want := `[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,QUJDRA=="}},{"type":"text","text":"what is in this picture?"}]}]`
 	if string(raw) != want {
 		t.Fatalf("\n got %s\nwant %s", raw, want)
+	}
+}
+
+// goldenMessages pins the Message twins the same way goldenParts pins ContentPart — and for
+// the same reason, arrived at one level up: the 2026-11-13 dogfood 400 ("All non-assistant
+// messages must contain 'content'") was the engine's omitempty deleting the key from a tool
+// result whose content was "", measured by probe before Message marshalled by hand. The
+// empty-content row below is why this table exists; before the hand-written marshal it was
+// the wire's idea of a joke: a tool message that ships without content.
+var goldenMessages = []struct {
+	name   string
+	msg    Message
+	native string
+	compat string
+}{
+	{"user-text", Message{Role: "user", Content: "hi"},
+		`{"role":"user","content":"hi"}`,
+		`{"role":"user","content":"hi"}`},
+	// The dogfood lesson: "" is a value, not an absence. This row is the whole reason.
+	{"tool-empty-content", Message{Role: "tool", Content: "", ToolCallID: "c1"},
+		`{"role":"tool","content":"","tool_call_id":"c1"}`,
+		`{"role":"tool","content":"","tool_call_id":"c1"}`},
+	// nil is the one way to omit the key — the assistant that only carries calls.
+	{"assistant-tool-calls-only", Message{Role: "assistant", ToolCalls: []ToolCallOut{
+		{ID: "c1", Type: "function", Function: FunctionCall{Name: "ls", Arguments: "{}"}}},
+	},
+		`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"ls","arguments":"{}"}}]}`,
+		`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"ls","arguments":"{}"}}]}`},
+	// Field order is the struct declaration order, spelled out by the fullest shape.
+	{"tool-result-named", Message{Role: "tool", Content: "out", ToolCallID: "c1", Name: "mcp-x"},
+		`{"role":"tool","content":"out","tool_call_id":"c1","name":"mcp-x"}`,
+		`{"role":"tool","content":"out","tool_call_id":"c1","name":"mcp-x"}`},
+	{"assistant-reasoning", Message{Role: "assistant", Content: "t", ReasoningContent: "think"},
+		`{"role":"assistant","content":"t","reasoning_content":"think"}`,
+		`{"role":"assistant","content":"t","reasoning_content":"think"}`},
+	{"user-parts", Message{Role: "user", Content: []ContentPart{{Type: PartTypeText, Text: "x"}}},
+		`{"role":"user","content":[{"type":"text","text":"x"}]}`,
+		`{"role":"user","content":[{"type":"text","text":"x"}]}`},
+	// The two regimes part ways exactly where ContentPart's table says they do.
+	{"html-trio", Message{Role: "user", Content: "<a> & </a>"},
+		`{"role":"user","content":"<a> & </a>"}`,
+		`{"role":"user","content":"\u003ca\u003e \u0026 \u003c/a\u003e"}`},
+}
+
+func TestMessageMarshalJSONToNativeBytes(t *testing.T) {
+	for _, c := range goldenMessages {
+		var buf bytes.Buffer
+		if err := c.msg.MarshalJSONTo(jsontext.NewEncoder(&buf)); err != nil {
+			t.Fatalf("%s: MarshalJSONTo: %v", c.name, err)
+		}
+		got := strings.TrimSuffix(buf.String(), "\n")
+		if got != c.native {
+			t.Errorf("%s: native bytes:\n got %s\nwant %s", c.name, got, c.native)
+		}
+	}
+}
+
+func TestMessageWireGolden(t *testing.T) {
+	for _, c := range goldenMessages {
+		raw, err := json.Marshal(c.msg)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", c.name, err)
+		}
+		if string(raw) != c.compat {
+			t.Errorf("%s:\n got %s\nwant %s", c.name, raw, c.compat)
+		}
+	}
+}
+
+func TestMessageMarshalJSONFallbackBytes(t *testing.T) {
+	for _, c := range goldenMessages {
+		raw, err := c.msg.MarshalJSON()
+		if err != nil {
+			t.Fatalf("%s: MarshalJSON: %v", c.name, err)
+		}
+		if string(raw) != c.compat {
+			t.Errorf("%s: fallback bytes:\n got %s\nwant %s", c.name, raw, c.compat)
+		}
+	}
+}
+
+// TestMessageShapeRefusals pins the refusals next to the acceptances, because a provider
+// conversation is only half the contract: on the llama.cpp server that produced the 2026-11-13
+// 400, a tool message without the content key answers 400 "All non-assistant messages must
+// contain 'content'" while the same message with content "" answers 200 — the key, not the
+// value, is what dies. The D card (assistant pairing tool_calls with an empty content)
+// happened to pass that same server, and the shape rule refuses it anyway: the assembler
+// cannot produce it, so a caller holding one bypassed the choke point, and "this one server
+// tolerated it once" is not a promise worth a poisoned session against the next.
+func TestMessageShapeRefusals(t *testing.T) {
+	call := []ToolCallOut{{ID: "c1", Type: "function", Function: FunctionCall{Name: "ls", Arguments: "{}"}}}
+	for _, c := range []struct {
+		name string
+		msg  Message
+		want string // substring of the refusal
+	}{
+		{"tool-no-content", Message{Role: "tool", ToolCallID: "c1"}, "must carry content"},
+		{"tool-no-call-id", Message{Role: "tool", Content: "out"}, "tool_call_id"},
+		{"assistant-calls-empty-content", Message{Role: "assistant", Content: "", ToolCalls: call}, "empty content"},
+		{"user-no-content", Message{Role: "user"}, "must carry content"},
+		{"system-no-content", Message{Role: "system"}, "must carry content"},
+	} {
+		var buf bytes.Buffer
+		err := c.msg.MarshalJSONTo(jsontext.NewEncoder(&buf))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: MarshalJSONTo refused with %v, want %q", c.name, err, c.want)
+		}
+		_, err = c.msg.MarshalJSON()
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: MarshalJSON refused with %v, want %q", c.name, err, c.want)
+		}
+	}
+	// And what the rules let through stays through on both twins: the empty-but-present
+	// shapes measured 200 against the fault's own server.
+	for _, c := range []Message{
+		{Role: "tool", Content: "", ToolCallID: "c1"}, // the measured-200 C card
+		{Role: "user", Content: ""},                   // empty is still a message
+		{Role: "assistant", Content: ""},              // empty alone (no calls) — the rule only refuses empty+calls
+		{Role: "developer", Content: nil},             // unrecognised roles shape-check as nothing
+		{Role: "assistant", ToolCalls: []ToolCallOut{{ID: "c1", Type: "function", Function: FunctionCall{Name: "ls", Arguments: "{}"}}}},
+	} {
+		if err := c.checkShape(); err != nil {
+			t.Errorf("%s: refused a shape that should travel: %v", c.Role, err)
+		}
 	}
 }
