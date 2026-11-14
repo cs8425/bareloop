@@ -864,6 +864,15 @@ stream:
 	for _, idx := range order {
 		if completeArgs(byIndex[idx].Args) {
 			c := *byIndex[idx]
+			// Duplicate member names are a call head's slip that every reader already reads
+			// last-wins — every reader except storage, whose strict re-marshal refuses them and
+			// was taking the whole assistant entry down with it (qwen3.8, 2026-11-13). Conformed
+			// at the ingest gate, next to completeArgs, whose precedent it shares: a call whose
+			// arguments cannot be stored whole is dealt with here, not at the record.
+			if canon, deduped := ir.CanonicalArgs(c.Args); deduped {
+				s.logf("tool call %s: arguments repeated a member name — stored last-wins", c.Name)
+				c.Args = canon
+			}
 			if ref, ok := s.reg.resolve(c.Name); ok {
 				c.Server = ref.Server // so the entry carries the same prefix the live card had
 			}

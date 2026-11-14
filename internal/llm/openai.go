@@ -531,8 +531,13 @@ func (cr completionResponse) toResult() *Result {
 	res.Reasoning = ch.Message.reasoning()
 	res.FinishReason = ch.FinishReason
 	for _, tc := range ch.Message.ToolCalls {
+		// Same rule as the streaming path (internal/agent loop.go): duplicate member names are
+		// conformed to what every reader already reads, before the arguments are stored. Silent
+		// here — this path answers summary calls, and it has no session to tell; the bytes are
+		// touched only when the model really did repeat a name.
+		args, _ := ir.CanonicalArgs([]byte(orEmptyObj(tc.Function.Arguments)))
 		res.ToolCalls = append(res.ToolCalls, ir.ToolCall{
-			ID: tc.ID, Name: tc.Function.Name, Args: json.RawMessage(orEmptyObj(tc.Function.Arguments)),
+			ID: tc.ID, Name: tc.Function.Name, Args: json.RawMessage(args),
 		})
 	}
 	if res.Usage == nil && len(ch.Usage) > 0 {
