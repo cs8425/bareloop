@@ -46,8 +46,12 @@ export function wireTools() {
     else await openTools();
   });
   // A session switch used to leave the previous session's catalogue open under the new session's
-  // name — which is a claim about what the next request carries.
+  // name — which is a claim about what the next request carries. Dropping the cache is the fix;
+  // refetching now is only worth it when the drawer is open, and `if (view) draw()` in the renderer
+  // is exactly why the invalidation cannot be skipped: a cached view now belongs to nobody, and an
+  // empty cache is the only state that makes opening the tab read from the session on screen.
   on(EV_SESSION, () => {
+    view = null;
     if (panelMode() === 'tools') openTools();
   });
 }

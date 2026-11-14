@@ -241,12 +241,25 @@ function onToolProgress(d, isResult) {
     else if (d.status === 'error') card.setBadge('error', 'state-error', d.error || d.result || 'this call failed and the daemon has no more to say about why');
     else if (d.ms) card.setBadge(`${d.ms} ms`, 'state-ok');
   }
-  attach(card, d.entryId);
+  // The card is home once its own entry has drawn it (`fillBody`), and a card that has been decorated
+  // by a progress frame only needs that home. Tail placement is reserved for the one call genuinely
+  // in flight right now — running status under a running phase — because that is progress with no
+  // other host (a resumed run, a non-streaming turn). Everything else that arrives at this line is a
+  // replayed history frame from the hub's ring (reload/reconnect; 2026-11-13 report: F5 on a session
+  // piled every old card at the bottom): its card, left unplaced, is drawn properly — with arguments,
+  // badges and the result link — by the entry that owns it, and a card for an entry above the window
+  // should stay invisible until that entry is drawn, not squat at the newest end of the transcript.
+  // (`d.entryId` names the owner exactly, and since 2026-11-13 the daemon writes it on every frame
+  // of a call — RunInfo.EntryID, a dead field resurrected. mayTail stays for frames from an older
+  // daemon and for hosts outside the window: entryId aims the card, mayTail only decides whether a
+  // miss may still fall back to the tail.)
+  attach(card, d.entryId, d.status === 'running' && state.status?.phase === 'running');
 }
 
-// attach hangs a card under the entry it belongs to, or at the end of the transcript when that entry
-// is not on screen (a progress event can beat the entry that owns it).
-function attach(card, entryId) {
+// attach hangs a card under the entry it belongs to, or — only while that call is the live edge of a
+// running turn (mayTail) — at the end of the transcript, where a progress event that beat its entry
+// still lands where the reader is looking.
+function attach(card, entryId, mayTail) {
   if (card.attached) return;
   const target = state.entries.get(entryId);
   // Below the window is not a future home either: replayed progress frames for calls whose entries are
@@ -255,6 +268,7 @@ function attach(card, entryId) {
   // marked attached, so if the reader pages back and the entry gets drawn, the entry's own render finds
   // the card object by call id and places it where it belongs.
   if (!target && entryId && state.win?.oldest && numId(entryId) <= numId(state.win.oldest)) return;
+  if (!target && !mayTail) return;
   (target || logEl()).appendChild(card.el);
   card.attached = true;
 }
