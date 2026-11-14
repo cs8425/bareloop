@@ -190,6 +190,16 @@ function onEntry(e, streamId) {
     if (s) retireStream(s);
     return;
   }
+  // News from below the window is not news: this transcript appends what it is given, and the hub's replay
+  // ring (400 frames) outlives the page (dozens of entries), so a reconnect's catch-up carries entries older
+  // than the window's oldest end. Drawing one puts an old message after the newest one and its card beside
+  // it — the 2026-11-13 F5 report, entries 2830/2831 filed after 2877 — and neither is where they belong,
+  // which is above the fold this page does not show. Skipping loses nothing: the page already holds what it
+  // holds, and any tip move in either direction arrives on the `tip` event and re-reads the window.
+  if (e.id && state.win?.oldest && numId(e.id) <= numId(state.win.oldest)) {
+    if (s) retireStream(s); // the D99 rule again: a preview of a reply the page will not draw is no preview
+    return;
+  }
   if (s && e.kind === 'assistant') claimStream(s, e);
   else entryNode(e);
   if (e.kind === 'user') {
@@ -239,6 +249,12 @@ function onToolProgress(d, isResult) {
 function attach(card, entryId) {
   if (card.attached) return;
   const target = state.entries.get(entryId);
+  // Below the window is not a future home either: replayed progress frames for calls whose entries are
+  // older than this page would orphan their cards at the tail, mid-conversation (same 2026-11-13 report
+  // as onEntry — "and in between, tool cards from entries that aren't even here"). The card is not
+  // marked attached, so if the reader pages back and the entry gets drawn, the entry's own render finds
+  // the card object by call id and places it where it belongs.
+  if (!target && entryId && state.win?.oldest && numId(entryId) <= numId(state.win.oldest)) return;
   (target || logEl()).appendChild(card.el);
   card.attached = true;
 }
