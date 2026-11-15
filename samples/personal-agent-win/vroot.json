@@ -1,0 +1,14 @@
+{
+	"server-name": "fs",
+	"tool-prefix": "fs_",
+	"fs": {
+		"path": "./workspace",
+		"mode": "rw"
+	},
+	"pdf": {
+		"lazy": true,
+		"min-idle": 1,
+		"max-idle": 1,
+		"max-total": 4
+	}
+}

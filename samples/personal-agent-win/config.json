@@ -1,0 +1,81 @@
+{
+	"addr": "127.0.0.1:8090",
+	"data": "data",
+	"auth-": {
+		"user": "bareloop",
+		"pass": "loopbare",
+		"rateLimit": {
+			"maxAttempts": 5,
+			"window": "15m"
+		}
+	},
+	"defaults": {
+		"name": "agent",
+		"systemPrompt": "You are a careful assistant on Windows, driving a real Chrome through the cdp_* tools. The window is visible on the operator's screen — move deliberately; they are watching. The fs_* file tools are jailed to this agent's workspace folder; write with them and read back what you wrote. Browser and file tools share one virtual tree rooted at /: a screenshot saved with saveAs as /shot.png is readable by fs_* at /shot.png, and the shared upload/download folder is /downloads — cdp_upload reads only from there, and cdp_download captures land there (physical folder: downloads inside the workspace). The workspace is the folder your fs_* tools see as /; its absolute path on this machine is written for you in /HERE.txt by the launcher (convert backslashes to forward slashes) - open pages you write in the browser as file:/// URLs built from it, e.g. file:///C:/path/to/workspace/index.html; verify in the browser before declaring a fix. Never close the last tab: it quits the shared Chrome and disconnects every cdp_* tool; tabs open in the background and select/new do not steal focus, so use them freely. Reply in the same language and the same script the user writes in.",
+		"llm": {
+			"kind": "openai",
+			"baseUrl": "http://127.0.0.1:8080/v1",
+			"apiKey": "none",
+			"model": "qwen3.6-27b",
+			"nCtx": 262144,
+			"pricing": {
+				"input": 0.2,
+				"cachedInput": 0.02,
+				"output": 1.2
+			}
+		},
+		"builtinTools": [
+			"get_datetime",
+			"wait"
+		],
+		"timezone": "Asia/Taipei",
+		"structuredContent": "auto",
+		"compact": {
+			"auto": true,
+			"inLoop": true,
+			"mode": "threshold-target",
+			"summaryMode": "prefix-stable",
+			"threshold": 70,
+			"summaryCap": 70,
+			"keepBudget": 20,
+			"minKeptUserTurns": 0,
+			"minKeptMessages": 0,
+			"minSummarizeTokens": 2000,
+			"maxAttempts": 3,
+			"temperature": 0.2
+		},
+		"mcp": [
+			{
+				"name": "chrome-cdp-go",
+				"type": "stdio",
+				"command": "./bin/chrome-mcp.exe",
+				"args": [
+					"-stdio",
+					"-root",
+					"./workspace",
+					"-browser-root",
+					"./workspace/Downloads",
+					"-browser-vroot",
+					"/Downloads",
+					"-cdp",
+					"127.0.0.1:9223"
+				],
+				"disabledTools": [
+					"window",
+					"raw_call"
+				],
+				"toolPrefix": "cdp_"
+			},
+			{
+				"name": "fs",
+				"type": "stdio",
+				"command": "./bin/mcp-vroot.exe",
+				"args": [
+					"-c",
+					"vroot.json",
+					"-stdio"
+				]
+			}
+		]
+	}
+}

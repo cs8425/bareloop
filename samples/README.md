@@ -13,7 +13,9 @@ and the environment falls back to sensible defaults, so first run needs zero fla
 No Docker? [`windows/`](windows/README.md) is the same idea for Windows boxes: two static
 binaries plus a config — one layout where the file tools and the browser share a folder,
 one where the file tools sit in an IIS site folder while the browser is sandboxed (and
-enforced to stay) outside it.
+enforced to stay) outside it. [`personal-agent-win/`](personal-agent-win/README.md) is
+that shared-folder layout distilled to one copyable folder: drop three .exe in `bin\`,
+run two .bat, and the agent's file tools and your real Chrome look at one workspace.
 
 The plain image (the root `Dockerfile`, no sample) carries no tools on purpose: give it
 tools through the mounted config instead — an `"http"` MCP URL, or a

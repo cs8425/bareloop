@@ -1,0 +1,6 @@
+# Windows batch files must be checked out with CRLF: cmd.exe's parser is unreliable
+# on LF-only files (goto labels and multi-line ( ) blocks are the classic casualties).
+# Editors and cross-platform copies can still produce LF, so the sample bats are also
+# written to survive LF: no labels, no blocks, no chaining - every line stands alone.
+*.bat text eol=crlf
+*.cmd text eol=crlf
