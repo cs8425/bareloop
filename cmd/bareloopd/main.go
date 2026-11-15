@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	bareloopd [-config config.json] [-addr 127.0.0.1:8090] [-data data] [-web web] [-pprof 127.0.0.1:6060]
+//	bareloopd [-config config.json] [-addr 127.0.0.1:8090] [-data data] [-web web] [-pprof 127.0.0.1:6060] [-version]
 //
 // Everything except the listen address, the data directory and the web directory comes from
 // the JSON config file, whose "defaults" block is inherited by every new session (each session
@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -38,6 +39,67 @@ import (
 	"bareloop/internal/server"
 	"bareloop/internal/store"
 )
+
+// Build stamp. The release workflow injects the first two with -X at link time
+// (the tag, and the sha it points at); date is deliberately never stamped — the
+// bytes of a tagged build should not depend on the clock. Whatever is left unset,
+// go build has already stamped into the binary by itself: since Go 1.18 every
+// build from a git checkout carries the VCS revision and time (and since 1.24
+// the version tag the commit points at) — debug.ReadBuildInfo reads them back
+// out, so even a plain local build can say who it is and whether the tree was
+// dirty at the time.
+var (
+	version = ""
+	commit  = ""
+	date    = ""
+)
+
+// versionString assembles the stamp for -version and the startup log: what -X
+// set first, the embedded VCS facts filling whatever gaps remain.
+func versionString() string {
+	v, c, d, modified := version, commit, date, ""
+	if bi, _ := debug.ReadBuildInfo(); bi != nil {
+		if v == "" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			v = bi.Main.Version // set for builds made with go install pkg@version
+		}
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.version":
+				if v == "" {
+					v = s.Value // the tag this commit is, when there is one
+				}
+			case "vcs.revision":
+				if c == "" {
+					c = s.Value
+					if len(c) > 12 {
+						c = c[:12]
+					}
+				}
+			case "vcs.time":
+				if d == "" {
+					d = s.Value
+				}
+			case "vcs.modified":
+				modified = s.Value
+			}
+		}
+	}
+	if v == "" {
+		v = "dev"
+	}
+	if modified == "true" {
+		v += "-dirty" // built from a working tree with uncommitted changes
+	}
+	switch {
+	case c != "" && d != "":
+		return fmt.Sprintf("%s commit %s built %s", v, c, d)
+	case c != "":
+		return fmt.Sprintf("%s commit %s", v, c)
+	case d != "":
+		return fmt.Sprintf("%s built %s", v, d)
+	}
+	return v
+}
 
 // fileConfig is the on-disk configuration.
 type fileConfig struct {
@@ -145,10 +207,17 @@ func main() {
 		zdictPath = flag.String("zdict", "", "zstd dictionary file: new zstd payloads are stamped with it — the file is data, not a toggle: frames it writes need it to read back forever")
 		zstdSlots = flag.Int("zstd-slots", 2, `resident zstd encoder pool depth, ~10MB of tables per slot; 0 or -1 means auto: one slot per CPU core (80MB+ of RAM that never leaves on an 8-core box, 300MB+ on a 32-core one — the depth only matters when several sessions write at once, which the per-store lock serializes anyway)`)
 	)
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.Lmsgprefix)
 	logf := logger.Printf
+	logf("bareloopd %s", versionString())
 
 	// The compression knob is set before any store opens — it speaks to new writes only,
 	// and every store still reads every store whichever codec wrote it.

@@ -44,6 +44,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # The tag is the version and the version lives in main.version via -X;
+          # commit and time are stamped into every git-built binary by go build
+          # itself (main.go reads them back through debug.ReadBuildInfo), and no
+          # date is injected on purpose — a tagged build stays byte-reproducible.
+          stamp=""
+          case "$GITHUB_REF" in
+            refs/tags/v*) stamp="-X main.version=$GITHUB_REF_NAME" ;;
+          esac
           #   goos:goarch:exe-suffix
           # To add a target, append one string. Future macOS / arm64 lines would be:
           #   "darwin:arm64:" "darwin:amd64:" "linux:arm64:"
@@ -51,7 +59,7 @@ jobs:
             IFS=: read -r goos goarch ext <<<"$t"
             echo "building bareloopd-$goos-$goarch$ext"
             GOOS=$goos GOARCH=$goarch \
-              go build -trimpath -ldflags="-s -w" \
+              go build -trimpath -ldflags="-s -w $stamp" \
               -o "dist/bareloopd-$goos-$goarch$ext" ./cmd/bareloopd
           done
           (cd dist && sha256sum bareloopd-* > SHA256SUMS.txt)
