@@ -35,6 +35,7 @@
     "maxTokens": 0,
     "maxTurns": 0,
     "reasoningEffort": "",
+    "extra": {},
 
     "asm": {
       "sendReasoning": true,

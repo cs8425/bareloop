@@ -200,7 +200,7 @@ its own copy in `data/<id>/config.json`.
 | `defaults.timezone` | the zone the time tools answer in when a call names none: an IANA name (`Asia/Taipei`), a fixed offset (`+08:00`, `UTC+8`), `Local` for the machine's own - and nothing at all means UTC ([the daemon's own two tools](#the-daemons-own-two-tools)) |
 | `defaults.compact` | compaction parameters (see below): `auto` is off by default, `inLoop` is **on** by default |
 | `defaults.asm` | payload options: `sendReasoning` (**on** by default), `sendImages` (**on**), `omitToolResultName` (off) |
-| `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults (see below) |
+| `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults, and `extra` for the request-body fields bareloop does not model (see below) |
 | `sessions[]` | optional sessions to create at startup |
 | `mcpLock` | freezes every session's MCP server set over the API: sessions may enable, disable and re-policy the servers of `defaults.mcp` and nothing else about them ([locking the server set](#locking-the-server-set)) |
 | `bind` | how the listener presents itself: `tls.cert`/`tls.key` (paths — serve https, and the startup line says so), `trustedProxies` (CIDRs whose `X-Forwarded-For` the login gate may believe about who a client was) ([behind a login](#keeping-the-daemon-behind-a-login)) |
@@ -238,6 +238,7 @@ default:
 | `maxTokens` | `0` or absent | `> 0` (`max_tokens`) |
 | `reasoningEffort` | `""` or absent | non-empty (`minimal`/`low`/`medium`/`high`) |
 | `maxTurns` | `0` or absent = **no cap**: a run ends when the model stops asking for tools | `> 0` = hard cap per agentic run |
+| `extra` | absent or `{}` = nothing is added to the body — and over the API an empty object is the zero value like any other, meaning **keep what is stored**, so the only way back to unset is to stop the daemon and edit `data/<id>/config.json` | any JSON object: its keys are merged into every request body this session sends — the summary request included — **as you wrote them**, and a key naming a field bareloop already sets wins over it, so `{"temperature": 0}` beats `temperature`. Nothing is checked, which is the whole point: it is the escape hatch for a knob nobody modeled (`{"top_k": 20, "chat_template_kwargs": {"thinking": false}}`), not a second control panel beside the ones above. Two prices are paid silently. Overriding `messages`/`tools`/`stream` makes the logged payload disagree with the bytes that actually went out, and compaction is measured over those bytes. And because the merged body *is* the request identity, editing `extra` costs the provider its whole KV prefix once, exactly like editing the system prompt |
 | `compact.auto` | absent = off (compaction after a turn) | `true` |
 | `compact.inLoop` | absent = **on** (compaction between turns) | `false` turns it off |
 | `compact.summaryMode` | absent = `prefix-stable` (the summary request is cut from the payload bytes the loop sent, so the provider reads its own cache; a region those bytes cannot carry goes out as one flat transcript, oversized messages clipped and marked) | `"transcript"` asks with no cache affinity — always the flat shape; any other word means `prefix-stable` (the old chain modes `"iterative"` and `"map-reduce"` are gone: replay replaced the chain) |
