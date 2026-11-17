@@ -83,6 +83,20 @@ export async function openSettings() {
   fld(f, 'minKeptUserTurns').value = cfg.compact?.minKeptUserTurns ?? 4;
   fld(f, 'minSummarizeTokens').value = cfg.compact?.minSummarizeTokens ?? 2000;
   fld(f, 'maxTurns').value = cfg.maxTurns || '';
+  // Sampling, and the reason temperature reads with ?? where maxTokens does too but maxTurns above does not:
+  // for those two, 0 is an answer rather than the absence of one - temperature's 0 is greedy decoding, and
+  // maxTokens' 0 is "no ceiling of ours" - so a config that says 0 has to show 0, not the empty box that
+  // means "nobody ever said". maxTurns has no such third state: 0 there is no cap and no answer, so the
+  // blank and the zero may keep meaning the same thing.
+  fld(f, 'temperature').value = cfg.temperature ?? '';
+  fld(f, 'maxTokens').value = cfg.maxTokens ?? '';
+  // The select cannot come back empty the way a text box can, so the first option is the words "unchanged"
+  // rather than a blank: choosing it sends nothing, and a level already stored can only be written over.
+  fld(f, 'reasoningEffort').value = cfg.reasoningEffort || '';
+  // The raw body fields, shown as the server echoed them. An object with nothing in it is the same absence,
+  // so it shows an empty box rather than {} — filling it in would imply that saving it back clears a stored
+  // object, and it does not: empty means unchanged here as it does for the three above it.
+  fld(f, 'extra').value = cfg.extra && Object.keys(cfg.extra).length ? JSON.stringify(cfg.extra, null, 2) : '';
   // The redraw rate is not config — it is this browser's preference — but it lives in this dialog
   // because it is a knob people only reach for once and then forget. Show what is actually in force
   // (URL wins over storage), so the row never lies about the current tab.
@@ -97,7 +111,7 @@ export async function openSettings() {
   // Same trick as the redraw rate: show what is in force (a ?enter= in the address bar wins), and name
   // the mode the user is reading, not just the word "auto".
   fld(f, 'enterSends').value = resolveEnterMode();
-  fld(f, 'auto').checked = cfg.compact?.auto === true; // off unless explicitly on
+  fld(f, 'auto').checked = cfg.compact?.auto !== false; // on unless explicitly off (default flipped 2026-11-16)
   fld(f, 'inLoop').checked = cfg.compact?.inLoop !== false; // on unless explicitly off
   // Both assembler switches are on unless the config says otherwise, so the checkboxes start from
   // "not false" rather than from "true".
@@ -278,9 +292,51 @@ export async function saveSettings() {
     // field's hint says so rather than letting an empty box look like a reset.
     ...(fld(f, 'timezone').value.trim() ? { timezone: fld(f, 'timezone').value.trim() } : {}),
   };
-  // Fields this dialog does not have are dropped rather than guessed at: absent means "unchanged",
-  // while sending a zero here would look like an answer.
-  delete body.temperature;
+  // Sampling follows the API's rule rather than the arithmetic above: an empty box is not an answer, so its
+  // key goes back out of the body and the server keeps what it had. A typed value is an answer, temperature 0
+  // included — that one is greedy decoding, not a blank, so it may not be dropped on the way out.
+  const tempBox = fld(f, 'temperature').value.trim();
+  if (tempBox === '') {
+    delete body.temperature;
+  } else {
+    const t = Number(tempBox);
+    if (!Number.isFinite(t) || t < 0) throw new Error('temperature has to be a number, 0 or above — 0 is greedy decoding, and an empty box means unchanged');
+    body.temperature = t;
+  }
+  // The difference between a blank box and a typed 0 is kept on purpose, because the field carries three
+  // answers and the box is the only place they can be told apart: blank sends no key and leaves a stored
+  // ceiling alone, 0 goes out and is the owner asking for no ceiling of ours - the way back, and the reason
+  // the server keeps this number in a pointer. Both mean "no max_tokens on the wire" once the request is
+  // built; what differs is what the config remembers afterwards.
+  const maxTokensBox = fld(f, 'maxTokens').value.trim();
+  if (maxTokensBox === '') delete body.maxTokens;
+  else {
+    const n = Number(maxTokensBox);
+    if (!Number.isInteger(n) || n < 0) throw new Error('max tokens has to be a whole number, 0 or above — 0 asks for no ceiling of ours, a blank box asks nothing at all');
+    body.maxTokens = n;
+  }
+  if (fld(f, 'reasoningEffort').value) body.reasoningEffort = fld(f, 'reasoningEffort').value;
+  else delete body.reasoningEffort;
+  // Extra is hand-typed JSON going straight onto the wire, so a body that does not parse is refused with the
+  // parser's own words rather than saved as "no change" (or, worse, as whatever the previous keystrokes
+  // happened to mean). Same handling the MCP array above it gets, for the same reason.
+  const extraBox = fld(f, 'extra').value.trim();
+  if (extraBox === '') delete body.extra;
+  else {
+    let extra;
+    try {
+      extra = JSON.parse(extraBox);
+    } catch (err) {
+      note(`extra is not valid JSON: ${err.message}`, 'error');
+      throw err;
+    }
+    // An array or a bare value has no keys to merge, and sending one would put the daemon's own envelope in
+    // front of a body the operator believes they wrote — so say what shape was meant.
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) {
+      throw new Error('extra has to be a JSON object of body fields, like {"top_k": 20}');
+    }
+    body.extra = extra;
+  }
   // Prices: all three or none. Half a price would mis-bill every request quietly, and this API has no
   // way back from "priced" to "unpriced" — an absent block means "unchanged", and an explicit null
   // decodes to the same absent — so clearing three fields that held numbers is refused with the reason

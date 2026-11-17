@@ -235,6 +235,50 @@
             placeholder="unchanged when empty" /></label>
           <label>n_ctx <input name="nCtx" type="number" min="0" placeholder="0 = probe the server" /></label>
           <label>max turns <input name="maxTurns" type="number" min="0" placeholder="0 = unlimited" /></label>
+          <!-- Sampling sits with the endpoint above it and not with compaction below, because these change what
+               one request asks for, not how a window is managed. The rule on every box here is the API's rule:
+               an empty box is not a zero, it says nothing, and whatever is stored stays stored. That is also the
+               price of each of them - a value once written cannot be put back to "nobody ever answered" from
+               this dialog, only written over (the same row timezone pays for). Where 0 is a real value the
+               placeholder has to say it, because the box cannot - and where a blank and a zero mean two
+               different things the box has to keep them apart instead of reading both as zero, which is how
+               max tokens behaves: a blank asks nothing of the config, a 0 asks for no ceiling of ours.
+          -->
+          <label title="sampling temperature. Empty leaves the stored answer alone; 0 is not a blank, it is greedy decoding. It lands after the prompt, so changing it costs the provider no cache: the prefix it computed for this conversation is still its own.">
+            temperature
+            <input name="temperature" type="number" min="0" step="any" placeholder="unchanged when empty — 0 is greedy" />
+          </label>
+          <label title="max_tokens of one reply. An empty box leaves a stored ceiling alone; writing 0 is the way back to no ceiling of ours, which sends no max_tokens at all and lets the endpoint's own answer stand. It is a ceiling over the answer, so on a thinking model it has to leave room for the thinking too.">
+            max tokens
+            <input name="maxTokens" type="number" min="0" placeholder="empty = unchanged — 0 = no cap of ours" />
+          </label>
+          <!-- These two are the ones that cost money rather than tokens of headroom: they ride in front of the
+               answer, and a provider keys its KV cache on the bytes of the request. Changing either one means
+               the next turn re-computes what it had cached, billed as uncached. That belongs on the row, not in
+               someone's bill.
+          -->
+          <label title="the thinking level, for servers that take reasoning_effort. Empty leaves the stored answer alone, and a level once stored cannot be cleared from here — only written over. It costs more than it looks: the level is part of the bytes the provider caches a prefix from, so changing it throws that prefix away and the next turn re-computes the whole conversation. Pick one level per session and leave it.">
+            reasoning effort
+            <select name="reasoningEffort">
+              <option value="">— unchanged —</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label class="span3">
+            extra request-body fields (JSON)
+            <textarea name="extra" rows="3" spellcheck="false" placeholder='empty = unchanged — e.g. {"top_k": 20, "chat_template_kwargs": {"thinking": false}}'></textarea>
+            <!-- The honest sentence about a box that passes bytes straight through: this object is merged into
+                 every request this session sends, its summary requests included, a key naming one of the fields
+                 above wins over that field, and nothing is checked before it goes out. It is parsed on save, so
+                 half a body is refused rather than guessed at. Empty means unchanged, which is also why an empty
+                 box does not clear a stored object - that one move is a hand edit of data/&lt;id&gt;/config.json.
+                 And like the level above it, every byte of it is part of the cached prefix: edit it and the next
+                 turn re-computes.
+            -->
+          </label>
           <!-- Prices live with the endpoint they price, which is why they are here and not per model.
                Three numbers or none: a half-entered price would quietly mis-bill every request. -->
           <label>
@@ -287,6 +331,9 @@
           <p class="hint span3" id="compact-math"></p>
           <label class="check">
             <input name="auto" type="checkbox" role="switch" /> automatic compaction
+            <!-- On unless switched off: a session that never answered is better off compacting than dying at
+                 the window. Switching it off is the answer that holds — a stored false survives every restart.
+            -->
           </label>
           <label class="check">
             <input name="inLoop" type="checkbox" role="switch" /> allow compaction between tool calls (T2)
