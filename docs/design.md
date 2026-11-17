@@ -276,6 +276,19 @@ owing one forever. A provider that answers 500 reliably then produces a storm - 
 round, each with a payload line and an error event, forever. As the belt to those braces, a round that
 committed nothing stops the run instead of starting another round.
 
+What was sent rides along with the failure, because it is the one thing that cannot be reconstructed later:
+a provider that refuses a body usually says nothing about it — llama.cpp answers a body over its HTTP
+layer's size cap with an empty one, a proxy with HTML — and the next turn is a different payload. So every
+non-2xx carries the message count and the size of the finished body (images base64 by then, structured caps
+applied, `extra` merged in), and the turn adds the entries that payload was assembled from:
+
+    [generation failed: llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MB sent, 12 tools]
+                         [entries 0000003–0000146 (141) +system]]
+
+An id range rather than the ids, because a payload is the path or a window onto it and the range is the thing
+a person opens in the transcript. The summariser's own request gets the first half (it is assembled from a
+cut of the path whose range the compaction lines already report around it).
+
 ### A certificate nobody trusts
 
 An https endpoint whose certificate the system trust store cannot check — a llama.cpp box with a

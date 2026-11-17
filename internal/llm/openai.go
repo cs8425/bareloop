@@ -214,7 +214,7 @@ func (p *openai) Stream(ctx context.Context, req Request) (<-chan Event, error) 
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("llm: %s: %s", resp.Status, drain(resp))
+		return nil, fmt.Errorf("llm: %s: %s %s", resp.Status, drain(resp), requestBrief(req, body))
 	}
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/event-stream") {
@@ -317,7 +317,7 @@ func (p *openai) Complete(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("llm: %s: %.500s", resp.Status, string(raw))
+		return nil, fmt.Errorf("llm: %s: %.500s %s", resp.Status, string(raw), requestBrief(req, body))
 	}
 	var cr completionResponse
 	if err := json.Unmarshal(raw, &cr); err != nil {
@@ -406,6 +406,38 @@ func asInt(v any) (int, bool) {
 		return i, err == nil
 	}
 	return 0, false
+}
+
+// requestBrief is the answer to the only question anybody has after a provider refuses a request: what did
+// we send. It goes on the end of every non-2xx error because what comes back is often nothing at all -
+// llama.cpp rejects a body over its HTTP layer's cap with an empty one, a proxy answers with HTML nobody
+// reads - and because the payload cannot be recovered afterwards: the next turn is a different payload.
+//
+// The byte count is taken on the finished body, which is the only number with any claim to being what the
+// provider saw: images are base64 by then, the structured caps have applied, and `extra` has been merged
+// in. Counting the log instead would price a picture at its stored bytes and call a 118 MB request 4 MB.
+func requestBrief(req Request, body []byte) string {
+	brief := fmt.Sprintf("%d msgs, %s sent", len(req.Messages), humanBytes(len(body)))
+	if n := len(req.Tools); n > 0 {
+		brief += fmt.Sprintf(", %d tools", n)
+	}
+	return "[" + brief + "]"
+}
+
+// humanBytes says a size the way someone compares one: 512 B, 18.4 KB, 118.4 MB. "124151703 bytes" is a
+// number nobody holds in their head while deciding what to trim off a request.
+func humanBytes(n int) string {
+	const unit = 1024
+	switch {
+	case n < unit:
+		return fmt.Sprintf("%d B", n)
+	case n < unit*unit:
+		return fmt.Sprintf("%.1f KB", float64(n)/unit)
+	case n < unit*unit*unit:
+		return fmt.Sprintf("%.1f MB", float64(n)/(unit*unit))
+	default:
+		return fmt.Sprintf("%.1f GB", float64(n)/(unit*unit*unit))
+	}
 }
 
 func drain(resp *http.Response) string {

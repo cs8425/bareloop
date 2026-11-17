@@ -629,6 +629,50 @@ func (s *Session) turnCount() int {
 // a broken request to fix itself.
 const maxLLMRetries = 2
 
+// payloadBrief names the entries a payload was assembled from, for the errors that outlive it.
+//
+// A provider says "413" and, more often than not, nothing else: llama.cpp refuses an oversized body at its
+// HTTP layer with an empty one, a proxy answers with HTML nobody reads. By the time anyone reads the
+// transcript line the payload is gone — the next turn is a different payload — so the request describes
+// itself while it is still here: which entries it carried and how many, with the system head named when
+// there is one. An id range rather than the ids, because a payload is the path or a window onto it, so
+// "0000003–0000146" is the fact and a list of 144 ids is a search.
+//
+// The count beside the range counts entries, not messages: the provider's own brief counts messages (system
+// head and all), and the two come apart by exactly the repair that dropped an orphan and the tool results
+// this session synthesised to keep the payload legal. Saying which is which is why both are printed.
+func payloadBrief(built *asm.Built) string {
+	if built == nil {
+		return ""
+	}
+	var first, last string
+	for _, e := range built.Entries {
+		if e == nil || e.ID == "" {
+			continue
+		}
+		if first == "" {
+			first = e.ID
+		}
+		last = e.ID
+	}
+	out := "no entries"
+	switch {
+	case first != "" && first != last:
+		out = "entries " + first + "–" + last
+	case first != "":
+		out = "entry " + first
+	}
+	if n := len(built.Entries); n > 0 {
+		out += fmt.Sprintf(" (%d)", n)
+	}
+	if built.System != "" {
+		out += " +system"
+	}
+	// Tools are counted by the other half of the sentence, because it counts the same slice this session
+	// handed the provider: two numbers for one thing is two numbers that can grow apart.
+	return out
+}
+
 // transientLLMError sorts a provider failure into "ask again" and "do not ask again". A transport
 // error never reached the model, and the 5xx family plus 429 say the server could not serve this
 // request just now. A 4xx that describes the request itself — bad JSON, too long, bad key — is
@@ -717,7 +761,7 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	// change the conversation the cached prefix was measured over.
 	msgs, expandErr := asm.ExpandMessages(built.All(), logBlobs{log: s.log})
 	if expandErr != nil {
-		s.logf("turn %d: payload cannot be sent: %v", turn, expandErr)
+		s.logf("turn %d: payload cannot be sent: %v (%s)", turn, expandErr, payloadBrief(built))
 		s.emit(Event{Type: EvtError, Info: "payload: " + expandErr.Error()})
 		// The same entry a terminal provider failure writes: the turn gets an
 		// (honest) answer, the loop moves on, and no request carries half a
@@ -744,6 +788,14 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	)
 	for attempt := 0; ; attempt++ {
 		ch, err = s.provider.Stream(ctx, req)
+		if err != nil {
+			// Name the payload the provider refused, while the one that was refused is still in hand.
+			// The retry log gets the same sentence, which is the point: three attempts of one 413 are
+			// one story about one payload, and the story has to survive being read in the log later.
+			if brief := payloadBrief(built); brief != "" {
+				err = fmt.Errorf("%w [%s]", err, brief)
+			}
+		}
 		if err == nil || ctx.Err() != nil || attempt >= maxLLMRetries || !transientLLMError(err) {
 			break
 		}
