@@ -32,6 +32,20 @@ const (
 	ModeTranscript = "transcript"
 )
 
+// How far a summary request reaches (§3.1). These are two answers to different questions, and only one
+// of them has field evidence behind it: with the narrower rule the summaries came out of the summariser
+// without the surviving tail in front of them, and the agent's behaviour over a long session got
+// measurably worse to watch — a summary written while blindfolded to the part of the conversation that
+// is still standing writes down what the dropped part was, not where the work is.
+const (
+	// ScopePath asks about the whole path this round is looking at — the payload as it stands, plus the
+	// instruction — which also makes the request the exact prefix of what the conversation is sending.
+	ScopePath = "path"
+	// ScopeRegion stops the request at the cut: the summariser sees only what the round replaces, and
+	// the surviving tail is read later, at the round that replaces it.
+	ScopeRegion = "region"
+)
+
 // DefaultMarker is written into the summary entry's content when the entry is created —
 // never inside the assembler, which must stay WYSIWYG (§3.6).
 const DefaultMarker = "[Conversation summary — earlier messages were compacted]"
@@ -54,6 +68,11 @@ type Params struct {
 	Mode string `json:"mode"`
 	// SummaryMode selects the summary request shape (§3.1).
 	SummaryMode string `json:"summaryMode"`
+	// SummaryScope selects how far that shape reaches (§3.1): "path" (the default) hands the summariser
+	// the whole path this round is looking at, "region" stops at the cut. It is a knob about what gets
+	// read and nothing else — the boundary still decides what a compaction replaces (§7.1), and the
+	// overlap it lets appear between the summary and the verbatim tail is the point, not a leak.
+	SummaryScope string `json:"summaryScope,omitempty"`
 	// ThresholdPct is the trigger point: real context usage above it asks for a compaction.
 	ThresholdPct int `json:"threshold"`
 	// SummaryCapPct is the summary's one number, answering both of its questions: the
@@ -104,6 +123,7 @@ func DefaultParams() Params {
 	return Params{
 		Mode:               "threshold-target",
 		SummaryMode:        ModePrefixStable,
+		SummaryScope:       ScopePath,
 		ThresholdPct:       70,
 		SummaryCapPct:      70,
 		KeepBudgetPct:      intp(defaultKeepBudgetPct),
@@ -123,6 +143,12 @@ func (p Params) UseAuto() bool { return p.Auto == nil || *p.Auto }
 
 // UseInLoop is the effective value of InLoop: on unless explicitly disabled (T2, §1.1).
 func (p Params) UseInLoop() bool { return p.InLoop == nil || *p.InLoop }
+
+// ReadsWholePath is the effective scope. It is a method rather than a field read because the zero value
+// has to answer: a Params nobody normalised — a config that never mentioned the key, a fixture built
+// field by field — asks about the whole path, which is the default. Only an explicit "region" narrows
+// it back to the cut.
+func (p Params) ReadsWholePath() bool { return p.SummaryScope != ScopeRegion }
 
 // Normalise fills in blanks and clamps nonsense, by one rule with two halves. A field whose 0 would
 // be destructive (threshold, summaryCap, minSummarizeTokens) or is not a real answer
@@ -176,6 +202,11 @@ func (p Params) Normalise() Params {
 		// replaced by replay (the compactor now re-runs the normal compaction until the path fits
 		// again), so an old config asking for them gets the default and nothing else.
 		p.SummaryMode = ModePrefixStable
+	}
+	// The narrow rule is only ever on purpose, so it is the only value kept; an absent one, and one
+	// nobody recognises, get the path.
+	if p.SummaryScope != ScopeRegion {
+		p.SummaryScope = ScopePath
 	}
 	if p.Mode == "" {
 		p.Mode = "threshold-target"

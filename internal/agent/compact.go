@@ -628,43 +628,53 @@ func summaryRequest(cfg Config, call compact.SummaryCall) llm.Request {
 }
 
 // summarize performs one summary attempt of the replay round with the complete (non-streaming)
-// call of §3.5. The request is cut from the round's virtual path: the payload bytes up to the
-// plan's cut — [head?][cmp0?][...msgX][instruction] — so the model is asked about exactly what the
-// round chose to replace, in the bytes the provider has cached where they are warm, and the entries
-// behind the cut are neither sent nor paid for twice. Where those bytes cannot carry the question
-// the region goes as a flat transcript instead, which is lossy but honest. record sees every
-// summariser call this attempt made — kept, refused or broken — because the money was spent per
+// call of §3.5. The request is the round's own path (§3.1's scope): by default every byte this round
+// is looking at — [head?][cmp0?][…the whole way…] — with the instruction appended, which is the request
+// the conversation itself would have been making at this moment plus one question. The summary is
+// therefore written with the surviving tail in front of the summariser, and the tail then goes out
+// verbatim beside it: the two describe the same stretch on purpose. Where those bytes cannot carry the
+// question the same stretch goes as a flat transcript instead, which is lossy but honest. record sees
+// every summariser call this attempt made — kept, refused or broken — because the money was spent per
 // call, not per kept text.
 func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, plan *compact.Plan,
 	virt []*ir.Entry, vsizes *asm.Sizes, refs payloadRefs, extra string, attempt int, round int, record func(ir.SummaryAttempt)) (string, int, error) {
 
 	nctx := s.nctxLocked()
-	sumRegion := virt[:plan.Cut]
+	// How far the round is asked. The narrow rule (the cut alone) stays spellable through
+	// summaryScope:"region"; it is the one that lost the thread, because a summariser that never sees the
+	// part of the conversation still standing writes down what was dropped instead of where the work is.
+	// Nothing else follows this: the boundary still decides what the compaction replaces (§7.1).
+	scope := len(virt)
+	if !p.ReadsWholePath() {
+		scope = plan.Cut
+	}
+	asked := virt[:scope]
 	instrTok := compact.TextTokens(p.SummaryInstruction(plan.Split)) + compact.TextTokens(extra)
 
-	// The round's conversation is the planning path's own byte prefix, ending at the cut.
-	prefix, sliced := refs.through(plan.Cut)
+	// The round's conversation is the planning path's own bytes, as far as the scope reaches.
+	prefix, sliced := refs.through(scope)
 	call := p.BuildRequest(nctx, prefix, refs.tools, plan.Split, extra)
 	if p.SummaryMode != compact.ModePrefixStable || !sliced || vsizes.Total()+instrTok > nctx {
 		// Three roads to the flat transcript, all of them "these bytes cannot carry this question".
 		// Shape B (mode "transcript") asks with no cache affinity, so the region itself is the payload
 		// (spec §3.1). A payload whose ids did not describe its messages has nothing that may be
-		// sliced at any boundary. And a planning path that still overfits the window when cut from
-		// bytes — one pasted document larger than the window is enough — can only be asked about
-		// flattened. Left alone, the last two are a request of two messages — a system prompt and
-		// "compress the conversation above" — over a conversation the model was never given, and the
-		// answer would pass acceptance and replace the path with a fiction. The transcript is lossy
-		// (structuredContent is not in it); a summary of nothing is not lossy, it is wrong.
+		// sliced at any boundary. And a planning path that still overfits the window when read as bytes —
+		// under the default scope this is the request itself, and under the narrow one it is the widest
+		// the request could be — can only be asked about flattened. Left alone, the last two are a
+		// request of two messages — a system prompt and "compress the conversation above" — over a
+		// conversation the model was never given, and the answer would pass acceptance and replace the
+		// path with a fiction. The transcript is lossy (structuredContent is not in it); a summary of
+		// nothing is not lossy, it is wrong.
 		call = p.BuildRequest(nctx, nil, refs.tools, plan.Split, extra)
-		src := sumRegion
+		src := asked
 		if sliced && vsizes.Total()+instrTok > nctx {
-			// Every entry bigger than what one request could read is clipped to its beginning and end;
-			// a path that overfits without any single oversized entry can only hope the flattening
-			// itself saved enough — the structuredContent a transcript drops is all it has to give.
+			// Every entry bigger than what one request could read is clipped to its beginning and end; a
+			// path that overfits without any single oversized entry can only hope the flattening itself
+			// saved enough — the structuredContent a transcript drops is all it has to give.
 			free := (nctx - instrTok) / 2
 			var clipped int
-			src, clipped = compact.ClipOversized(sumRegion, free)
-			s.logf("compaction: the request cut from the payload bytes would be ~%d tokens against a %d-token window; %d entries go as a flat transcript (%d oversized messages read only at their beginning and end)",
+			src, clipped = compact.ClipOversized(asked, free)
+			s.logf("compaction: this round's path read as bytes would be ~%d tokens against a %d-token window; %d entries go as a flat transcript (%d oversized messages read only at their beginning and end)",
 				vsizes.Total()+instrTok, nctx, len(src), clipped)
 		} else if !sliced {
 			s.logf("compaction: the payload could not be sliced, so %d entries go to the summariser as a flat transcript", len(src))

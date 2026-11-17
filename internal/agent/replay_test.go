@@ -131,9 +131,9 @@ func TestReplayCompactOverAnOverwindowPath(t *testing.T) {
 }
 
 // TestReplayRoundOneIsABytePrefixOfTheSentPayload keeps the chain's dead spec alive where it was
-// right: round 1 is not a request about the conversation, it is the request the loop already made
-// with the instruction added — message-for-message the same bytes, ending where the round chose to
-// cut — and it is a cache hit only while that is true. And round 2 replays what the next turn
+// right: round 1 is not a request about the conversation, it is the request the loop already made with
+// the instruction added — message-for-message the same bytes, reaching as far as the round's own path
+// reaches — and it is a cache hit only while that is true. And round 2 replays what the next turn
 // would have done: it reopens with the entry round 1 committed.
 func TestReplayRoundOneIsABytePrefixOfTheSentPayload(t *testing.T) {
 	s, cp := chainFixture(t, "replay-prefix", 4096)
@@ -156,8 +156,10 @@ func TestReplayRoundOneIsABytePrefixOfTheSentPayload(t *testing.T) {
 
 	first := asks[0]
 	body := first.Messages[:len(first.Messages)-1]
-	if len(body) >= len(sent) {
-		t.Fatalf("round 1 carries %d of the payload's %d messages: a round asks about its cut, not the whole path",
+	// The round may stop short of the payload — its planning path is tipped short of the end here — but it
+	// may never reach past it: one byte ahead of what was sent is a prompt the provider never cached.
+	if len(body) > len(sent) {
+		t.Fatalf("round 1 carries %d messages over a payload of %d: nothing may be asked about ahead of the sent prefix",
 			len(body), len(sent))
 	}
 	for i, m := range body {

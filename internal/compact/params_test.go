@@ -173,6 +173,17 @@ func TestDefaultsMatchTheDocumentedTable(t *testing.T) {
 	if d.SummaryMode != ModePrefixStable {
 		t.Fatalf("summary mode = %q, want %q", d.SummaryMode, ModePrefixStable)
 	}
+	// The scope's default is the wide one, and it is the default in the zero value too: a config that
+	// never mentioned the key must not end up with the narrow rule that lost the thread.
+	if d.SummaryScope != ScopePath {
+		t.Fatalf("summary scope = %q, want %q", d.SummaryScope, ScopePath)
+	}
+	if !(Params{}).ReadsWholePath() {
+		t.Fatal("Params nobody normalised must read the whole path, as the default does")
+	}
+	if (Params{SummaryScope: ScopeRegion}).ReadsWholePath() {
+		t.Fatal("only an explicit region narrows the request to the cut")
+	}
 }
 
 // TestNormaliseFillsBlanksAndKeepsChoices pins Normalise's two halves: a field whose 0 would be
@@ -194,14 +205,17 @@ func TestNormaliseFillsBlanksAndKeepsChoices(t *testing.T) {
 		t.Fatalf("negative floors and keepBudget must clamp to 0, got %+v", neg)
 	}
 	kept := Params{ThresholdPct: 90, SummaryCapPct: 30, KeepBudgetPct: intp(33), MinKeptUserTurns: 0, MinKeptMessages: 6,
-		MinSummarizeTokens: 1, MaxAttempts: 1, SummaryMode: ModeTranscript, Marker: "X"}.Normalise()
+		MinSummarizeTokens: 1, MaxAttempts: 1, SummaryMode: ModeTranscript, SummaryScope: ScopeRegion, Marker: "X"}.Normalise()
 	if kept.ThresholdPct != 90 || kept.SummaryCapPct != 30 || kept.KeepBudgetPct == nil || *kept.KeepBudgetPct != 33 ||
 		kept.MinKeptMessages != 6 || kept.MinSummarizeTokens != 1 ||
-		kept.MaxAttempts != 1 || kept.SummaryMode != ModeTranscript || kept.Marker != "X" {
+		kept.MaxAttempts != 1 || kept.SummaryMode != ModeTranscript || kept.SummaryScope != ScopeRegion || kept.Marker != "X" {
 		t.Fatalf("explicit values were overwritten: %+v", kept)
 	}
 	if got := (Params{SummaryMode: "gibberish"}).Normalise().SummaryMode; got != ModePrefixStable {
 		t.Fatalf("unknown summary mode = %q, want the default", got)
+	}
+	if got := (Params{SummaryScope: "gibberish"}).Normalise().SummaryScope; got != ScopePath {
+		t.Fatalf("unknown summary scope = %q, want the default", got)
 	}
 	if got := (Params{MaxAttempts: -1}).Normalise().MaxAttempts; got != -1 {
 		t.Fatalf("maxAttempts -1 means forever, got %d", got)

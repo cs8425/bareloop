@@ -48,6 +48,7 @@
       "inLoop": true,
       "mode": "threshold-target",
       "summaryMode": "prefix-stable",
+      "summaryScope": "path",
       "threshold": 70,
       "summaryCap": 70,
       "keepBudget": 20,

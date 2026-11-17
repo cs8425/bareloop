@@ -156,10 +156,16 @@ Constraints, checked in this order:
 
 ```
  shape A "prefix-stable" (default):
-   [ system ][ m₁ ][ m₂ ] … [ m_{k-1} ][ user: instruction ]
-   └──────── byte-identical to the real conversation request through m_{k-1} ────────┘
-   k = the cut. The summary call REUSES the provider's prefix cache; it pays only for the
-   instruction + generation. Requirements: same model, same thinking/prompt-build flags
+   [ system ][ m₁ ][ m₂ ] … [ m_r ][ user: instruction ]
+   └──────── byte-identical to the real conversation request through m_r ────────┘
+   SCOPE: r = the end of the round's own path (`summaryScope: "path"`), not the cut. The summary
+   is written with the surviving tail in front of the summariser, and that tail is then kept
+   verbatim beside it — two accounts of one stretch, on purpose. The narrow rule
+   (`"region"`, r = the cut) ran from 2026-11-11 to 2026-11-17; long sessions got worse to watch
+   and the summariser was the thing that had been blindfolded, so the wide scope is the default
+   and the narrow one is now only a thing you can ask for.
+   The summary call REUSES the provider's prefix cache either way; it pays for the instruction +
+   generation. Requirements: same model, same thinking/prompt-build flags
    (ANY of them changes the prompt bytes and splits the cache), same serialization.
    Only temperature and max_tokens may differ (post-prompt sampling; they cannot split a
    prefix). If the payload is not provably a prefix of the conversation (edit, restart,
@@ -200,7 +206,7 @@ single iteration (the loop is invisible).
            shrinks the region; a max-rounds guard exists against broken sizes, not long
            chats).
 
- round-k request = the byte prefix of the round-(k−1) window through its cut
+ round-k request = the byte prefix of the round-(k−1) window through its scope (by default: the whole window)
            (= the payload the conversation would really have been sending at that point)
            → the prefix cache carries from round to round, as it would have in the world
            where compaction never slept.
@@ -226,7 +232,8 @@ single iteration (the loop is invisible).
 ## 7. Invariants (the ones that break harnesses when violated)
 
 ```
- 1. Never summarize: the system head, or anything after the boundary.
+ 1. Never REPLACE: the system head, or anything after the boundary. What the summary request may
+     *read* is §4's scope and a knob; being read has never made the tail replaced.
  2. A kept region never begins with a tool result; floors round outward, never inward.
  3. Real usage triggers; estimates only plan. (A trigger that guesses causes phantom
     rounds; an estimate used as a trigger costs a real model call.)
