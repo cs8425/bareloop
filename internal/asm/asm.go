@@ -455,6 +455,14 @@ type Built struct {
 	// that table (the pre-send guard, the compaction cut) charges a capped twenty kilobytes for what
 	// the server really sent.
 	StructuredCap int
+	// SendReasoning is the effective value of Options.SendReasoning for this payload: whether the
+	// model's own reasoning channel rides back out on the next request. It is on `Built` for the same
+	// reason StructuredCap is — a reader holding only the payload has to price the bytes the wire will
+	// actually carry, and on a thinking model that channel is routinely the largest part of an
+	// assistant turn (measured on a live session: three quarters of the difference between "what the
+	// log holds" and "what the body costs"). A `Built` from Assemble always carries the answer; a
+	// fixture built by hand has to say which world it is in.
+	SendReasoning bool
 	// Messages are the non-system messages, parallel to Entries.
 	Messages []Message
 	// Entries are the payload entries in send order. The compaction entry (summary) is
@@ -544,7 +552,7 @@ type Payload struct {
 
 // Assemble is the choke point. It must stay a pure function of (Payload, Options).
 func Assemble(p Payload, opts Options) *Built {
-	b := &Built{System: p.System, StructuredCap: opts.structuredMax()}
+	b := &Built{System: p.System, StructuredCap: opts.structuredMax(), SendReasoning: opts.SendReasoningOn()}
 	if p.Summary != nil {
 		s := *p.Summary
 		s.Role = "user" // spec §3.7: the summary travels with the user role

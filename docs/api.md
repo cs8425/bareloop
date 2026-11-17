@@ -232,16 +232,35 @@ completionMs, ...}`), `finishReason`, and a compaction's summary fields (`bounda
 
 What the next request would cost, per row and not per guess: the exact system head
 (`system`), per-message token rows (`messages[]`: `id`, `kind`, `role`, `tokens`, `real`
-(measured vs estimated), `bytes`, `head`, `inKept`), `nCtx`, `contextUsed`/`contextKnown`,
-`budget`, `summaryCap`, `boundaryId`/`boundaryBroken`, `totalBytes`, `syntheticToolResults`,
+(measured vs estimated), `bytes`, `wire`, `head`, `inKept`), `nCtx`, `contextUsed`/`contextKnown`,
+`budget`, `summaryCap`, `boundaryId`/`boundaryBroken`, `totalBytes`, the byte family
+(`envelopeBytes`, `wireBytes`, `requestBytes`, `wireMissing`), `syntheticToolResults`,
 the compaction `plan` and why it was or was not cut (`planReason`), and the tool names a
 request would carry. Sizes are estimates (`estimated: true`) until a real usage has anchored
 them. Nothing crosses the wire that the request itself would not carry — content lives on the
 next call.
 
+Two byte columns, because a server refuses a body over one and a log grows over the other.
+`bytes` / `totalBytes` are weight in the **log**, where an image is a 69-byte reference; `wire` /
+`wireBytes` are the estimated weight of the **request body**, where the same image is four thirds of
+its pixels in base64. `envelopeBytes` is the part of the body no message owns — model name, sampling
+fields, every tool schema, the system head — measured by the transport that would send it, not
+counted; `requestBytes` is `envelopeBytes + wireBytes`, the figure a body ceiling is decided against
+(a 413 arrives for bytes before any token is read, so no token number predicts it). A provider that
+cannot measure its own body leaves `envelopeBytes: 0` and no `requestBytes`: that is "no idea", not
+"free". `wireMissing` counts attachments this store cannot price. It is a tripwire, not a routine
+number: the log refuses to write an entry whose blob is absent, so a session's own payload always
+answers 0. When it is non-zero the payload arrived by another door — rows imported without their
+bytes — and the reading is not "small request" but "this body cannot be sent at all".
+
 ### `GET /api/session/{id}/payload`
 
-The exact body of the next request: `{system, messages, tools}`. Where `/inspect` sizes the
+The exact body of the next request: `{system, messages, tools}`, plus the same body measured three
+ways: `bytes` is the exact request body the transport would put on the wire for these messages, and
+where it can measure, `envelopeBytes` is that body with its conversation erased and `wireBytes` is
+the estimate `/inspect` decides on (`wireMissing` as on `/inspect`, a tripwire that stays 0 while the
+store wrote the payload). The estimate and the measurement are printed side by side on purpose: a
+number nobody compares is a number nobody audits. Where `/inspect` sizes the
 prompt, this shows it; nothing about the prompt is hidden behind a byte count. This is the
 debugging endpoint — it is what "what did the model actually see" reads.
 

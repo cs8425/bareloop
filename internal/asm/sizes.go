@@ -60,6 +60,9 @@ type Sizes struct {
 	per   map[string]Size
 	order []string
 	floor int // the head no request count attributes: system prompt and tool schemas
+	// missing counts the image references no resolver could price, which is what makes a Wire sum a
+	// floor rather than an estimate: the bytes are not small, they are unknown.
+	missing int
 }
 
 // DeriveSizes reads the size table of a payload: every entry's own measured number where a server
@@ -76,7 +79,9 @@ func DeriveSizes(b *Built, headFloor int, refs ...RefSizes) *Sizes {
 	}
 	s := &Sizes{per: map[string]Size{}, floor: headFloor}
 	for _, e := range b.Entries {
-		size := Size{Tokens: e.Tokens, Real: e.Tokens > 0, Bytes: entryBytes(e), Wire: entryWire(e, b.StructuredCap, r)}
+		wire, missing := entryWire(e, b, r)
+		s.missing += missing
+		size := Size{Tokens: e.Tokens, Real: e.Tokens > 0, Bytes: entryBytes(e), Wire: wire}
 		if !size.Real {
 			size.Tokens = Estimate(e, b.StructuredCap)
 		}
@@ -182,6 +187,14 @@ func (s *Sizes) WirePrefixes() []int {
 	return pre
 }
 
+// MissingRefs is how many image references in this payload no resolver could price. It is a tripwire
+// rather than a routine count: the log refuses to write an entry whose blob is not in the store
+// (store.go, tested in store_test.go), so a healthy session's own payload always answers zero. What
+// it does catch is a payload that arrived by another door — rows imported without their bytes — and
+// in that case the number is not "small request" but "this body cannot be sent at all", which is why
+// it travels beside the sum instead of inside it.
+func (s *Sizes) MissingRefs() int { return s.missing }
+
 // AnyEstimate reports whether any entry used the estimate (UI shows "est.").
 func (s *Sizes) AnyEstimate() bool {
 	for _, v := range s.per {
@@ -215,20 +228,44 @@ func entryBytes(e *ir.Entry) int {
 // struct that goes out — rather than letting this function count punctuation twice and get it wrong
 // twice.
 //
+// Two things are counted that a look at `Content` alone misses, and both were measured rather than
+// guessed. A thinking model's reasoning channel rides back out on the next request whenever the
+// payload's switch is on (`Built.SendReasoning`, on by default), and it is routinely the largest part
+// of an assistant turn — on a live session it was three quarters of the difference between the
+// payload's log weight and its body size. And a tool call's arguments are a JSON document smuggled
+// inside a JSON string, so their quotes arrive doubled (jsonQuoteCost).
+//
 // The one length that is not the answer on its own is an image part's. A part whose data is
 // "blob:<sha>" occupies 69 bytes in the log and 4/3rds of the blob's raw bytes on the wire inside a
 // data URL; a part whose data is already base64 occupies that many bytes both places. Priced from
 // the log column, an entry holding a 2 MB screenshot claims 69 bytes; the 413 that arrives for it
 // disagrees by a factor of forty thousand, which is the whole reason this column exists.
-func entryWire(e *ir.Entry, structuredCap int, refs RefSizes) int {
+//
+// The second result counts the references that could not be priced at all, so that a caller adding
+// these sums knows whether it is holding an estimate or a floor.
+//
+// What is deliberately not counted is a message's own scaffolding and the escaping of message
+// content. Measured against `llm.BodySizer` on live payloads the whole omission runs to 1.5% of the
+// body for a small one and 8% for a tool-heavy one, and what is left of it is dominated by tool
+// results whose content is itself quote-ridden text. That residual is the margin a caller keeps
+// between this sum and a byte ceiling — and it is why the decision to send is taken from the exact
+// body (`llm.BodySizer.BodyBytes` of the request about to go out) while this column is trusted only
+// with the relative question of where to cut.
+func entryWire(e *ir.Entry, b *Built, refs RefSizes) (int, int) {
 	n := len(e.Content)
-	for _, tc := range e.ToolCalls {
-		n += len(tc.Name) + len(tc.Args)
+	if b.SendReasoning {
+		n += len(e.Reasoning)
 	}
+	for _, tc := range e.ToolCalls {
+		n += len(tc.Name) + len(tc.Args) + jsonQuoteCost(tc.Args)
+	}
+	missing := 0
 	for _, p := range e.Parts {
 		n += len(p.Text)
 		if p.Data != "" {
-			n += partWire(p, refs)
+			bytes, unresolved := partWire(p, refs)
+			n += bytes
+			missing += unresolved
 		}
 	}
 	if raw := len(e.Structured); raw > 0 {
@@ -237,23 +274,47 @@ func entryWire(e *ir.Entry, structuredCap int, refs RefSizes) int {
 		// "never" is over-counted here by at most that ceiling: an estimate that guesses high about a
 		// byte wall fails safe, and the alternative is to consult the per-server mode table for a
 		// number this table never gets to decide.
-		n += structuredWireBytes(raw, structuredCap)
+		n += structuredWireBytes(raw, b.StructuredCap)
 	}
-	return n
+	return n, missing
 }
 
-// partWire is one attachment part's wire weight: the data URL the assembler wraps its bytes in
-// (counted by asking that one function what it would produce for empty data, so this cannot drift
-// from it), plus the payload itself — and the payload's size is the blob's, not the reference's.
-func partWire(p ir.Part, refs RefSizes) int {
+// jsonQuoteCost is what JSON string escaping adds to s. There are two tiers: a character with a short
+// escape (a quote, a backslash, \n, \t, ...) costs one more byte, and a control character without one
+// costs five more (0x01 is written \u0001). It is counted in one place only — a tool call's
+// arguments — because that is the one place a payload embeds structured text inside a string: the
+// arguments go to the server quoted, and a document full of field names is measurably bigger on the
+// wire than in the log. Content is not scanned the same way on purpose: doing so would walk every
+// byte of the conversation each time a size table is derived, and content is rarely the part that
+// doubles.
+func jsonQuoteCost(s []byte) int {
+	extra := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"', '\\', '\n', '\r', '\t', '\b', '\f':
+			extra++
+		default:
+			if s[i] < 0x20 {
+				extra += 5
+			}
+		}
+	}
+	return extra
+}
+
+// partWire is one attachment part's wire weight, and whether its payload had to be left out of it:
+// the data URL the assembler wraps the bytes in (counted by asking that one function what it would
+// produce for empty data, so this cannot drift from it), plus the payload itself — and the payload's
+// size is the blob's, not the reference's.
+func partWire(p ir.Part, refs RefSizes) (int, int) {
 	n := len(dataURL(p.MimeType, ""))
 	if sha, isRef := strings.CutPrefix(p.Data, ir.RefPrefix); isRef {
 		if refs != nil {
 			if raw, ok := refs.Size(sha); ok && raw > 0 {
-				n += 4 * ((raw + 2) / 3) // base64: four characters for every three bytes
+				return n + 4*((raw+2)/3), 0 // base64: four characters for every three bytes
 			}
 		}
-		return n
+		return n, 1
 	}
-	return n + len(p.Data)
+	return n + len(p.Data), 0
 }

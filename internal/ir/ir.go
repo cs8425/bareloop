@@ -159,7 +159,11 @@ type Entry struct {
 	// Role is the API role: user|assistant|tool. A compaction entry travels with role user.
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
-	// Reasoning is the model's chain-of-thought channel (never sent back to the model).
+	// Reasoning is the model's chain-of-thought channel. It is not message content — which is why it is
+	// its own field on the wire (`reasoning_content`) rather than a prefix of Content — and it is sent
+	// back on the next request unless the payload's one switch says otherwise
+	// (asm.Options.SendReasoning, on by default), because a thinking model whose thinking is withheld
+	// answers a different question than the one it was asked.
 	Reasoning string     `json:"reasoning,omitempty"`
 	Parts     []Part     `json:"parts,omitempty"`
 	ToolCalls []ToolCall `json:"toolCalls,omitempty"`

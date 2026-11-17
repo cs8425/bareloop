@@ -1543,16 +1543,30 @@ type Inspection struct {
 	SystemBytes  int          `json:"systemBytes"`
 	// System is the exact system head that will be sent. Empty means no system message is sent at
 	// all, which is the difference between a steered model and whatever the model defaults to.
-	System     string        `json:"system,omitempty"`
-	TotalBytes int           `json:"totalBytes"`
-	Synthetic  int           `json:"syntheticToolResults"`
-	Plan       *compact.Plan `json:"plan,omitempty"`
-	PlanReason string        `json:"planReason,omitempty"`
-	Estimated  bool          `json:"estimated"`
-	Tools      []string      `json:"tools,omitempty"`
+	System     string `json:"system,omitempty"`
+	TotalBytes int    `json:"totalBytes"`
+	// The byte family, which is what a server refuses a body over. `totalBytes` above stays the
+	// payload's weight in the log — where an image is a 69-byte reference — while `wireBytes` counts
+	// the base64 the wire would carry, and `envelopeBytes` is the body's fixed part (model name,
+	// sampling fields, every tool schema, this system head) that no message owns. `requestBytes` is
+	// the sum a byte ceiling is decided against, and 0 in `envelopeBytes` means the provider cannot
+	// measure a body, which is "no idea" rather than "free". `wireMissing` counts the attachments
+	// whose bytes this store does not hold, which makes `wireBytes` a floor: those payloads cannot be
+	// sent at all, so a large number here is not a small request.
+	EnvelopeBytes int           `json:"envelopeBytes"`
+	WireBytes     int           `json:"wireBytes"`
+	RequestBody   int           `json:"requestBytes,omitempty"`
+	WireMissing   int           `json:"wireMissing,omitempty"`
+	Synthetic     int           `json:"syntheticToolResults"`
+	Plan          *compact.Plan `json:"plan,omitempty"`
+	PlanReason    string        `json:"planReason,omitempty"`
+	Estimated     bool          `json:"estimated"`
+	Tools         []string      `json:"tools,omitempty"`
 }
 
-// InspectRow is one payload entry in the inspector.
+// InspectRow is one payload entry in the inspector. Bytes is the entry's weight in the log; Wire is
+// its estimated weight in the request body, which is the number an attachment moves — and the number
+// a 413 is about. See Inspection's byte family for what the two are for.
 type InspectRow struct {
 	ID     string `json:"id"`
 	Kind   string `json:"kind"`
@@ -1560,6 +1574,7 @@ type InspectRow struct {
 	Tokens int    `json:"tokens"`
 	Real   bool   `json:"real"`
 	Bytes  int    `json:"bytes"`
+	Wire   int    `json:"wire"`
 	Head   string `json:"head,omitempty"`
 	InKept bool   `json:"inKept"`
 }
@@ -1598,7 +1613,7 @@ func (s *Session) Inspect() *Inspection {
 	for _, e := range built.Entries {
 		row := InspectRow{ID: e.ID, Kind: e.Kind, Role: roleOf(e), InKept: true}
 		if sz, ok := sizes.Get(e.ID); ok {
-			row.Tokens, row.Real, row.Bytes = sz.Tokens, sz.Real, sz.Bytes
+			row.Tokens, row.Real, row.Bytes, row.Wire = sz.Tokens, sz.Real, sz.Bytes, sz.Wire
 			if !sz.Real {
 				ins.Estimated = true
 			}
@@ -1615,7 +1630,15 @@ func (s *Session) Inspect() *Inspection {
 	for _, e := range built.Entries {
 		if sz, ok := sizes.Get(e.ID); ok {
 			ins.TotalBytes += sz.Bytes
+			ins.WireBytes += sz.Wire
 		}
+	}
+	// The envelope is measured, not counted, and by the code that writes the body (llm.BodySizer); a
+	// provider that cannot do it leaves 0 and `requestBytes` unset rather than a sum missing its head.
+	ins.WireMissing = sizes.MissingRefs()
+	ins.EnvelopeBytes = s.envelopeBytes(built.System, tools)
+	if ins.EnvelopeBytes > 0 {
+		ins.RequestBody = ins.EnvelopeBytes + ins.WireBytes
 	}
 	// The plan is computed from the very slice the assembler produced (§4). Select does not know
 	// which trigger would run it, so this is also the cut an automatic compaction makes: what it
@@ -1640,7 +1663,7 @@ func (s *Session) Inspect() *Inspection {
 // and what would go on the wire carries base64, not references. The expansion lives and dies
 // here — the session keeps holding references.
 func (s *Session) Payload() (map[string]any, error) {
-	built, _, tools, err := s.build()
+	built, sizes, tools, err := s.build()
 	if err != nil {
 		return nil, err
 	}
@@ -1648,11 +1671,33 @@ func (s *Session) Payload() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	out := map[string]any{
 		"system":   built.System,
 		"messages": msgs,
 		"tools":    tools,
-	}, nil
+	}
+	// The body measured three ways, beside the thing it is made of. `bytes` is the exact body the
+	// transport would put on the wire for these messages — the number a body ceiling is argued with.
+	// `envelopeBytes` is the same body with its conversation erased, and `wireBytes` is the estimate
+	// the compaction decides on. The last two are here next to the first on purpose: an estimate
+	// printed beside the measurement gets audited, and one printed alone gets believed.
+	if sizer, ok := s.provider.(llm.BodySizer); ok {
+		req := requestIdentity(s.Config())
+		req.Tools = tools
+		req.Stream = true
+		req.Messages = msgs
+		if n, err := sizer.BodyBytes(req); err == nil {
+			out["bytes"] = n
+		}
+	}
+	if n := s.envelopeBytes(built.System, tools); n > 0 {
+		out["envelopeBytes"] = n
+	}
+	out["wireBytes"] = sizes.WireTotal()
+	if missing := sizes.MissingRefs(); missing > 0 {
+		out["wireMissing"] = missing
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------- spine endpoints

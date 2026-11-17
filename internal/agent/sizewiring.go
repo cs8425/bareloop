@@ -82,14 +82,19 @@ type envelopeCache struct {
 // turns does not touch this number; enabling a tool, editing a schema or changing the thinking level
 // does. A provider that cannot measure itself — every test double — gives 0, and callers must read 0
 // as "no idea", never as "free".
-func (s *Session) envelopeBytes(tools []llm.Tool) int {
+//
+// system is the head that will actually be sent — the assembler's `built.System`, not the config
+// field it started from — because this number joins the sums of a payload that carries the former.
+// Passing the config's own prompt would measure a body nobody sends whenever an asm block is in
+// front of it.
+func (s *Session) envelopeBytes(system string, tools []llm.Tool) int {
 	sizer, ok := s.provider.(llm.BodySizer)
 	if !ok {
 		return 0
 	}
 	cfg := s.Config()
 	req := requestIdentity(cfg)
-	fp := envelopeFingerprint(req, cfg.SystemPrompt, tools)
+	fp := envelopeFingerprint(req, system, tools)
 
 	c := s.env
 	c.mu.Lock()
@@ -99,7 +104,7 @@ func (s *Session) envelopeBytes(tools []llm.Tool) int {
 	}
 	req.Tools = tools
 	req.Stream = true // the conversation sends streams, and stream_options is on the body too
-	req.Messages = []asm.Message{{Role: "system", Content: cfg.SystemPrompt}}
+	req.Messages = []asm.Message{{Role: "system", Content: system}}
 	n, err := sizer.EnvelopeBytes(req)
 	if err != nil || n <= 0 {
 		return 0

@@ -1,6 +1,7 @@
 package asm
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -71,6 +72,11 @@ func TestWireCountsEveryImageAndRepeatsTheOnesSentTwice(t *testing.T) {
 	if got.Wire != want {
 		t.Fatalf("Wire = %d, want %d", got.Wire, want)
 	}
+	// Exactly the one never-stored sha is unpriced, and the table says so rather than letting the sum
+	// read as a complete answer.
+	if got := sizes.MissingRefs(); got != 1 {
+		t.Fatalf("MissingRefs = %d, want the one reference no resolver answered", got)
+	}
 }
 
 func TestWireOfInlineBytesIsItsOwnLength(t *testing.T) {
@@ -98,6 +104,14 @@ func TestWithoutAResolverAReferencePricesAtItsWrapper(t *testing.T) {
 	if withRefs.Wire <= noRefs.Wire {
 		t.Fatalf("the resolver changed nothing: %d vs %d", withRefs.Wire, noRefs.Wire)
 	}
+	// And the table admits it: a reference nothing answered is counted, whether the resolver said "not
+	// in here" or there was no resolver to ask. The sum is a floor, and this is the field that says so.
+	if got := DeriveSizes(&Built{Entries: []*ir.Entry{e}}, 0, sizesRefs{}).MissingRefs(); got != 1 {
+		t.Fatalf("MissingRefs = %d, want the reference a resolver refused to price", got)
+	}
+	if got := DeriveSizes(&Built{Entries: []*ir.Entry{e}}, 0).MissingRefs(); got != 1 {
+		t.Fatalf("MissingRefs without any resolver = %d, want 1: nothing was priced, so nothing is known", got)
+	}
 }
 
 func TestWireCutsTheStructuredContentAtItsWireCeiling(t *testing.T) {
@@ -119,6 +133,64 @@ func TestWireCutsTheStructuredContentAtItsWireCeiling(t *testing.T) {
 	if b.Bytes <= b.Wire {
 		t.Fatalf("Bytes = %d and Wire = %d: the log column should carry the whole document the wire truncates",
 			b.Bytes, b.Wire)
+	}
+}
+
+// A thinking model's reasoning channel is on the next request, so it is on the body's bill. This is
+// not a rounding detail: on a live session it was three quarters of the bytes the log column did not
+// see, which is the same blind spot as the image reference and forty times as common.
+func TestWirePricesTheReasoningChannelWhenItIsSent(t *testing.T) {
+	hmm := strings.Repeat("let me think about this ", 40)
+	e := &ir.Entry{ID: "think", Kind: ir.KindAssistant, Role: "assistant", Content: "yes", Reasoning: hmm}
+
+	on, _ := DeriveSizes(&Built{Entries: []*ir.Entry{e}, SendReasoning: true}, 0).Get("think")
+	if on.Wire != len("yes")+len(hmm) {
+		t.Fatalf("Wire with reasoning = %d, want its %d bytes counted beside the answer's 3",
+			on.Wire, len("yes")+len(hmm))
+	}
+	off, _ := DeriveSizes(&Built{Entries: []*ir.Entry{e}}, 0).Get("think")
+	if off.Wire != 3 {
+		t.Fatalf("Wire with the switch off = %d, want the answer alone: a channel the payload does not "+
+			"send must not be charged to it", off.Wire)
+	}
+	// The log column never saw either version of the channel, which is exactly the disagreement this
+	// table exists to make visible.
+	if off.Bytes > on.Wire {
+		t.Fatalf("Bytes = %d and the reasoning-free Wire = %d: the log column has swallowed a channel the "+
+			"wire may not even carry", off.Bytes, on.Wire)
+	}
+}
+
+// A tool call's arguments reach the server quoted: the JSON document inside the JSON string pays one
+// extra byte per quote, and on an argument-heavy path that is most of the difference.
+func TestWirePricesTheQuotingOfToolArguments(t *testing.T) {
+	args := `{"path":"/tmp/a","deep":true}`
+	quotes := 0
+	for i := 0; i < len(args); i++ {
+		if args[i] == '"' {
+			quotes++
+		}
+	}
+	e := &ir.Entry{ID: "call", Kind: ir.KindAssistant, Role: "assistant",
+		ToolCalls: []ir.ToolCall{{Name: "fs_read", Args: json.RawMessage(args)}}}
+	got, _ := DeriveSizes(&Built{Entries: []*ir.Entry{e}}, 0).Get("call")
+	if want := len("fs_read") + len(args) + quotes; got.Wire != want {
+		t.Fatalf("Wire = %d, want %d (the arguments' own %d bytes plus the %d escapes their quotes cost)",
+			got.Wire, want, len(args), quotes)
+	}
+	// Escaping has two tiers, and both are on the wire: the characters with a short form cost one
+	// more byte (\n is written \n), and the ones without it cost five more (0x01 is written \u0001).
+	short := &ir.Entry{ID: "nl", Kind: ir.KindAssistant, Role: "assistant",
+		ToolCalls: []ir.ToolCall{{Name: "x", Args: json.RawMessage("a\nb")}}}
+	nl, _ := DeriveSizes(&Built{Entries: []*ir.Entry{short}}, 0).Get("nl")
+	if want := len("x") + 3 + 1; nl.Wire != want {
+		t.Fatalf("Wire = %d, want %d: a newline is two bytes on the wire and one in the log", nl.Wire, want)
+	}
+	long := &ir.Entry{ID: "ctl", Kind: ir.KindAssistant, Role: "assistant",
+		ToolCalls: []ir.ToolCall{{Name: "x", Args: json.RawMessage("a\u0001b")}}}
+	ctl, _ := DeriveSizes(&Built{Entries: []*ir.Entry{long}}, 0).Get("ctl")
+	if want := len("x") + 3 + 5; ctl.Wire != want {
+		t.Fatalf("Wire = %d, want %d: a bare control character is \\u0001 by the time it lands", ctl.Wire, want)
 	}
 }
 

@@ -443,6 +443,15 @@ to everything it was asked for the rest of its life over a payload of 16 384 byt
 ceiling — while the per-entry `entryBytes` of `inspect` goes on counting what is **stored**: one figure
 is what the disk holds and the other is what the wire can cost, and merging them would make both wrong.
 
+The wire's half is now a column of its own rather than an argument. An inspect row carries `wire` beside
+`bytes`, priced from the blob table's own size column — a `blob:<sha>` reference is 69 bytes in the log
+and four thirds of that blob's bytes inside a data URL on the wire, so the two columns disagree by a
+factor of forty thousand exactly where it matters, which is a screenshot-heavy path a server refuses
+with 413 for being a body too large before it has read a token. `envelopeBytes` is the body's fixed part
+(model name, sampling fields, every tool schema, the system head) measured by the transport that writes
+it, because a hand count of JSON punctuation drifts the day a field is added. `bytes` has not moved:
+a number that has always meant "what the disk holds" is worth more kept than repurposed.
+
 ### The name builtin is taken
 
 The tools this daemon answers itself go through the same registry as MCP tools and are recorded under the
