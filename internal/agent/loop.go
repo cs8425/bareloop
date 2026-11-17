@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -254,7 +255,12 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 	defer func() {
 		if r := recover(); r != nil {
 			s.emit(Event{Type: EvtError, Info: fmt.Sprintf("panic in run: %v", r)})
-			s.logf("panic in run: %v", r)
+			// The stack goes to the log and not to the client: a panic is this daemon's bug, and the
+			// sentence is all a caller can act on. Without it a nil dereference left one line behind —
+			// "panic in run: runtime error: invalid memory address or nil pointer dereference" — which
+			// names no value's owner, no frame, and no way forward; that is what made deleting a busy
+			// session a guessing game.
+			s.logf("panic in run: %v\n%s", r, debug.Stack())
 		}
 		cancel(nil)
 		// A tool policy that waited for this run is applied here, before the session reports itself

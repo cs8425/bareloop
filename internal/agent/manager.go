@@ -599,10 +599,29 @@ func (m *Manager) LoadAll(ctx context.Context) error {
 }
 
 // Remove closes a session and deletes its directory.
+//
+// A session with a run or a summary in flight is refused the way Unload refuses one, and here that is not
+// a matter of taste: RemoveAll takes the directory — log, index, blobs — out from under a goroutine that
+// is still writing through it. What that costs was watched happening: deleting a session mid-run produced
+// a nil-pointer panic whose entire trace was "panic in run: runtime error: invalid memory address or nil
+// pointer dereference", because the guard around a run printed the value and no stack, and the follow-up
+// lines were "tool uses:" and "run error: store: log is closed" arriving where nothing expected them.
+// Stop is the verb that ends a run and delete is the one that gives the conversation back; a caller who
+// wants both presses them in that order, and the sentence says so.
+//
+// The check runs against the instance this call found, asked outside m.mu for the reason Unload gives —
+// a session answers questions about itself behind whatever it is busy with, and the map lock is not the
+// place to wait for that. The window left open, a run starting between the check and the close, is the
+// same one Unload leaves: closing an idle session's store is exactly what Close is built for.
 func (m *Manager) Remove(id string) error {
 	// The route hands us {id} straight from the URL, and this is a RemoveAll: validate before deleting.
 	if err := validID(id); err != nil {
 		return err
+	}
+	if s, ok := m.Peek(id); ok {
+		if p := s.phaseNow(); p != phaseIdle {
+			return fmt.Errorf("agent: session %q is %s; stop it before deleting", id, phaseToString(p))
+		}
 	}
 	m.mu.Lock()
 	s, ok := m.sessions[id]

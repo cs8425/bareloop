@@ -91,7 +91,7 @@ there is TLS, so a laptop that reconnects on a new address cannot walk past a lo
 | POST | `/api/sessions/import` | create a session from a transcript file — bareloop's own export or a llama-ui one |
 | GET | `/api/session/{id}` | the transcript endpoint: config, status, a page of the path — or `?config=1` / `?usage=1` |
 | PATCH | `/api/session/{id}` | update the config (refused while a run is active) |
-| DELETE | `/api/session/{id}` | close and delete the session and its directory |
+| DELETE | `/api/session/{id}` | close and delete the session and its directory (refused while a run is active) |
 | POST | `/api/session/{id}/unload` | close the session, touch nothing on disk |
 | POST | `/api/session/{id}/fork` | copy the session — one path or the whole tree — into a new session |
 | GET | `/api/session/{id}/export` | the transcript as one downloadable file, compressed or not |
@@ -405,7 +405,7 @@ message). A message that arrives while the path is not free is **held in memory*
 | `POST /api/sessions/import` | the transcript file itself | `{id, format, entries, status}` | create a session from a file — see the import section under Reads; one transaction or nothing |
 | `POST .../flags` | `{pinned, archived}`, either pointer | `{ok, session}` | pin/archive **without opening** the session (pinning is four bytes of config.json, opening is reading a transcript). Both-true is a change of mind, and the flag just asked for wins. The answer carries the row this produced, `closed: true` included |
 | `PATCH /api/session/{id}` | a config (partial) | `{ok, status}` | a field the body does not carry is kept, not cleared; refused while a run is active. The name is a config field, so this is also how a session is renamed |
-| `DELETE /api/session/{id}` | — | `{ok}` | close and delete the directory |
+| `DELETE /api/session/{id}` | — | `{ok}` | close and delete the session, its log and its blobs. A run or summary in flight is refused with a 400 naming the phase — `/stop` first, then delete — because `RemoveAll` takes the directory out from under a goroutine still writing through it. Unlike unload, an id with nothing behind it answers `{ok}`: that is already the state a delete wanted, and a client that retries a delete it already made should not have to know it |
 
 ## Events
 
