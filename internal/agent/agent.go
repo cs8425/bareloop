@@ -315,7 +315,13 @@ type Config struct {
 	Compact     compact.Params `json:"compact"`
 	ASM         asm.Options    `json:"asm,omitempty"`
 	Temperature *float64       `json:"temperature,omitempty"`
-	MaxTokens   int            `json:"maxTokens,omitempty"`
+	// MaxTokens is `max_tokens` of one reply, and it is a pointer for the reason Temperature is: three
+	// answers have to survive a PATCH and a plain int carries two. nil = nobody answered, so a body that
+	// leaves the key out changes nothing; &0 = the answer is "no ceiling of ours", which is the only way
+	// back from a stored number and the reason the field cannot be an int; &4096 = that ceiling. On the wire
+	// the first two are the same thing - no `max_tokens` goes out - so llm.Request keeps its plain int and
+	// the two collapse there (requestIdentity), rather than every caller having to tell them apart.
+	MaxTokens *int `json:"maxTokens,omitempty"`
 	// MaxTurns caps one agentic run (0 = no cap).
 	MaxTurns int `json:"maxTurns,omitempty"`
 	// Extra is merged into every LLM request body (provider-specific kwargs).

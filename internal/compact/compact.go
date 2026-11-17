@@ -38,10 +38,17 @@ const DefaultMarker = "[Conversation summary — earlier messages were compacted
 
 // Params are the user-facing compaction parameters (§7).
 type Params struct {
-	// Auto is the master switch (T1) and defaults to off (spec §1.1). InLoop enables T2
-	// (between agentic turns) and defaults to ON: a nil pointer means the key was omitted,
-	// and only an explicit false turns it off.
-	Auto   bool  `json:"auto"`
+	// Auto is the master switch (T1); InLoop enables T2 (between agentic turns). **Both default to
+	// ON**: a nil pointer means the key was omitted, and only an explicit false turns it off.
+	//
+	// T1 was off by default while the compactor was young (spec §1.1 as first written). It is on by
+	// default since 2026-11-16, because the field evidence runs the other way: a session without it
+	// does not degrade gracefully, it dies at the window, while the summary path has become the
+	// boring part. The type is not decoration — a plain bool cannot separate "omitted" from "false",
+	// and a default of on needs both answers so that false stays spellable. Consequence worth knowing:
+	// every data/<id>/config.json an older build wrote carries an explicit auto (true or false), so
+	// this flips nobody that already answered; it reaches a config that never mentioned the key.
+	Auto   *bool `json:"auto,omitempty"`
 	InLoop *bool `json:"inLoop,omitempty"`
 	// Mode is the policy for future cut decisions; compaction entries are mode-agnostic (§2.6).
 	Mode string `json:"mode"`
@@ -90,11 +97,11 @@ const defaultKeepBudgetPct = 20
 
 func intp(v int) *int { return &v }
 
-// DefaultParams returns the documented defaults (§7): auto compaction off, in-loop compaction
-// on (InLoop stays nil, which means "on unless explicitly disabled").
+// DefaultParams returns the documented defaults (§7). The two switches stay nil, which is what
+// "on unless explicitly disabled" means in this struct: the default lives in the pointer, so
+// Normalise(), a fresh Params{} and a config that never mentioned either key all agree.
 func DefaultParams() Params {
 	return Params{
-		Auto:               false,
 		Mode:               "threshold-target",
 		SummaryMode:        ModePrefixStable,
 		ThresholdPct:       70,
@@ -108,6 +115,11 @@ func DefaultParams() Params {
 		Marker:             DefaultMarker,
 	}
 }
+
+// UseAuto is the effective value of Auto: on unless explicitly disabled (T1, §1.1). On since
+// 2026-11-16 — before that a nil pointer meant off, which is why every caller reads this function
+// instead of the field and the flip is one edit rather than an audit.
+func (p Params) UseAuto() bool { return p.Auto == nil || *p.Auto }
 
 // UseInLoop is the effective value of InLoop: on unless explicitly disabled (T2, §1.1).
 func (p Params) UseInLoop() bool { return p.InLoop == nil || *p.InLoop }
@@ -217,18 +229,19 @@ func (p Params) TriggerLevel(nctx int) int {
 // ShouldTrigger implements §1.3. contextUsed must be the REAL value; when it is not
 // available the caller must not even check (no guessing).
 func (p Params) ShouldTrigger(nctx, contextUsed int, available bool) bool {
-	return p.Auto && nctx > 0 && available && contextUsed > p.TriggerLevel(nctx)
+	return p.UseAuto() && nctx > 0 && available && contextUsed > p.TriggerLevel(nctx)
 }
 
 // Trigger identifies which of the three triggers asked for a compaction (spec §1.1).
 type Trigger string
 
 const (
-	// TriggerEndOfTurn is T1: after a turn ends normally. The only automatic trigger by
-	// default, because between turns the assistant message never has dangling tool calls.
+	// TriggerEndOfTurn is T1: after a turn ends normally — the calmest place to cut, because between
+	// turns the assistant message never has dangling tool calls. On by default; compact.auto=false
+	// turns automatic compaction off, which is both automatic triggers.
 	TriggerEndOfTurn Trigger = "end_of_turn"
-	// TriggerInLoop is T2: before sending, inside the loop. On by default (compact.inLoop=false
-	// turns it off).
+	// TriggerInLoop is T2: before sending, inside the loop. Also on by default (compact.inLoop=false
+	// turns this one off, and it has never overridden an auto of false).
 	TriggerInLoop Trigger = "in_loop"
 	// TriggerManual is T3: the user pressed the button. It bypasses the trigger condition and
 	// the need for real usage, never the safety floors, and never the geometry of the cut (§1.1, §2.3).

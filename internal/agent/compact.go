@@ -64,7 +64,7 @@ func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force b
 	cfg := s.Config()
 	manual := trig == compact.TriggerManual
 	res := CompactResult{Trigger: trig, Manual: manual}
-	if !manual && !cfg.Compact.Auto {
+	if !manual && !cfg.Compact.UseAuto() {
 		res.Noop = true
 		res.Skipped = string(compact.ReasonAutoOff)
 		return res
@@ -586,6 +586,15 @@ func (r payloadRefs) through(hi int) ([]asm.Message, bool) {
 // conversation may differ in these fields by accident — which cannot be guaranteed from call sites
 // that each build their own request, so there is one source and everything is cut from it.
 
+// or0 reads a number that keeps its absence apart from its zero. An unset output cap and an explicit 0 are
+// the same request on the wire - neither sends `max_tokens` - so they meet here instead of at every caller.
+func or0(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
 // requestIdentity is the part of an llm.Request that must not vary between calls of one session: the
 // model, the sampling, and above all the thinking switch and its level — here that is
 // `reasoning_effort` plus whatever thinking knob the endpoint takes through `extra`.
@@ -593,7 +602,7 @@ func requestIdentity(cfg Config) llm.Request {
 	return llm.Request{
 		Model:           cfg.LLM.Model,
 		Temperature:     cfg.Temperature,
-		MaxTokens:       cfg.MaxTokens,
+		MaxTokens:       or0(cfg.MaxTokens),
 		ReasoningEffort: cfg.ReasoningEffort,
 		Extra:           cfg.Extra,
 	}

@@ -56,6 +56,22 @@ func endpointPolicies(cfg Config) []endpointPolicy {
 // reported to the person who typed it rather than surfacing as a failed request an hour later. The proxy is
 // parsed and not dialled: a proxy that is unreachable is an outage to report when it is needed, while a proxy
 // whose address was typed wrong is a bug in a file, and only the second one is worth refusing to save.
+
+// validateMaxTokens refuses a negative output cap, at the two doors a config comes in through.
+//
+// The field is a pointer so that "nobody answered" and "no ceiling of ours" stay two answers. A negative
+// is the third thing a typed body or a hand-edited file can hold, and it is the one nobody can honour: the
+// encoder omits 0 and not -1, so it goes out as "max_tokens": -1 and comes back a refusal that names the
+// model's own arithmetic rather than the typo. 0 already means "the endpoint decides", so nothing anybody
+// meant is refused here. Same argument asm.ValidateStructuredMax makes one field over, and the same reason
+// it is read off the body: before a merge can hide it and before anything is written.
+func validateMaxTokens(p *int) error {
+	if p != nil && *p < 0 {
+		return fmt.Errorf("maxTokens is %d: it is a ceiling in tokens or it is nothing — 0 asks the endpoint to keep its own answer, and to stop capping it there is no number to type", *p)
+	}
+	return nil
+}
+
 func validatePolicy(cfg Config) error {
 	for _, p := range endpointPolicies(cfg) {
 		if p.unreachable {

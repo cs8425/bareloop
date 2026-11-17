@@ -131,7 +131,7 @@ func (m *Manager) MergeDefaults(cfg Config) Config {
 	if cfg.Temperature == nil {
 		cfg.Temperature = m.defaults.Temperature
 	}
-	if cfg.MaxTokens == 0 {
+	if cfg.MaxTokens == nil {
 		cfg.MaxTokens = m.defaults.MaxTokens
 	}
 	if cfg.MaxTurns == 0 {
@@ -379,6 +379,11 @@ func (m *Manager) create(ctx context.Context, cfg Config, mcpFromClient bool) (*
 	// negative, which is what people type for "no limit" and what this process then reads back as the
 	// default. A ceiling typed too small is a visible mistake one PATCH wide, not a stored lie, so it stays.
 	if err := asm.ValidateStructuredMax(cfg.StructuredMaxBytes); err != nil {
+		return nil, err
+	}
+	// The output cap is refused on the same grounds, and after MergeDefaults on purpose: a negative sitting
+	// in the daemon's own defaults is the same broken request waiting to happen, just for every session.
+	if err := validateMaxTokens(cfg.MaxTokens); err != nil {
 		return nil, err
 	}
 	for _, mc := range cfg.MCP {

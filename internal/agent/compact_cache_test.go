@@ -162,11 +162,12 @@ func TestSummaryPayloadRefusesToSliceAPayloadItCannotRead(t *testing.T) {
 
 func identityFixture() Config {
 	temp := 0.7
+	out := 2048
 	return Config{
 		ID:              "identity",
 		LLM:             llm.Config{Model: "a-reasoning-model", NCTX: 4096},
 		Temperature:     &temp,
-		MaxTokens:       2048,
+		MaxTokens:       &out,
 		ReasoningEffort: "high",
 		Extra:           map[string]any{"enable_thinking": true, "chat_template_kwargs": map[string]any{"thinking": true}},
 	}
@@ -197,8 +198,17 @@ func TestSummaryRequestKeepsTheThinkingLevelOfTheTurn(t *testing.T) {
 	if got.Model != wants.Model || got.Model != "a-reasoning-model" {
 		t.Fatalf("model = %q, want the session's model", got.Model)
 	}
-	if wants.MaxTokens != cfg.MaxTokens {
+	if wants.MaxTokens != or0(cfg.MaxTokens) {
 		t.Fatal("the loop's own request has to carry the session's output cap, or identity means nothing")
+	}
+	// The third state, told apart from the first only inside the config: a session that answers "no ceiling
+	// of ours" with a 0 must send exactly what an unanswered one sends — nothing — rather than a key that
+	// tells the provider to answer with zero tokens.
+	noCap := 0
+	asked := cfg
+	asked.MaxTokens = &noCap
+	if r := requestIdentity(asked); r.MaxTokens != 0 {
+		t.Fatalf("an explicit 0 reached the request as max_tokens %d: 0 and unset are the same ask", r.MaxTokens)
 	}
 	if got.Temperature == nil || *got.Temperature != 0.2 {
 		t.Fatal("the summariser is asked to be more deterministic than the conversation it reads (§3.5)")

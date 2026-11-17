@@ -701,7 +701,7 @@ func (s *Session) Status() *Status {
 		Entries:      entries,
 		Summary:      cmp != nil,
 		Turn:         turn,
-		AutoCompact:  cfg.Compact.Auto,
+		AutoCompact:  cfg.Compact.UseAuto(),
 		InLoop:       cfg.Compact.UseInLoop(),
 		Tools:        published,
 		ToolsEnabled: enabled,
@@ -1046,6 +1046,13 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	if err := asm.ValidateStructuredMax(patch.StructuredMaxBytes); err != nil {
 		return err
 	}
+	// And the output cap goes through the same door for the same reason: a negative is not omitted by the
+	// encoder the way 0 is, so a stored one is every request of this session answering a 400 about a number
+	// nobody can point at. The body is read before the merge below, which would otherwise let a patch that
+	// never mentioned maxTokens look like the reason.
+	if err := validateMaxTokens(patch.MaxTokens); err != nil {
+		return err
+	}
 	for _, mc := range patch.MCP {
 		if _, err := asm.ParseStructuredMode(mc.StructuredContent); err != nil {
 			return fmt.Errorf("mcp server %q: %w", mc.Name, err)
@@ -1185,6 +1192,15 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 	patch.Compact = patch.Compact.Normalise()
 	if patch.MaxTurns == 0 {
 		patch.MaxTurns = old.MaxTurns
+	}
+	// maxTokens is a pointer for this one line. Before it was one, an absent key decoded to 0 with no keep-old
+	// rule beside MaxTurns, so the documented way to set one field from a terminal — PATCH {"extra":{"top_k":20}}
+	// — silently reset whatever output cap the session had, and the next request simply stopped carrying it.
+	// The three answers are now: no key = unchanged, 0 = the owner asking for no ceiling of ours (the way back,
+	// which a plain int could not spell), any other number = that ceiling. Same arithmetic as Temperature above,
+	// same reason; TestAnUnrelatedPatchKeepsEverySamplingField is the pin.
+	if patch.MaxTokens == nil {
+		patch.MaxTokens = old.MaxTokens
 	}
 	if patch.Temperature == nil {
 		patch.Temperature = old.Temperature

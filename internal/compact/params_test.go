@@ -90,7 +90,7 @@ func TestNothingIsInventedWithoutAnNCtx(t *testing.T) {
 
 // TestShouldTriggerIsStrictAndNeverGuesses covers spec §1.3.
 func TestShouldTriggerIsStrictAndNeverGuesses(t *testing.T) {
-	p := Params{Auto: true, ThresholdPct: 70}
+	p := Params{ThresholdPct: 70} // auto omitted, which is the default: on (2026-11-16)
 	const nctx = 40960
 	level := p.TriggerLevel(nctx) // 28672
 	cases := []struct {
@@ -110,10 +110,27 @@ func TestShouldTriggerIsStrictAndNeverGuesses(t *testing.T) {
 	}
 	for _, c := range cases {
 		pp := p
-		pp.Auto = c.auto
+		auto := c.auto
+		pp.Auto = &auto
 		if got := pp.ShouldTrigger(c.ctx, c.used, c.good); got != c.want {
 			t.Errorf("%s: ShouldTrigger(%d, %d, %v) = %v, want %v", c.what, c.ctx, c.used, c.good, got, c.want)
 		}
+	}
+}
+
+// TestAutoIsOnUnlessExplicitlyDisabled covers the pointer semantics of T1 after the default flipped:
+// an omitted key is not a false, and an explicit false must still be an answer that holds.
+func TestAutoIsOnUnlessExplicitlyDisabled(t *testing.T) {
+	yes := true
+	no := false
+	if !(Params{}).UseAuto() {
+		t.Fatal("an omitted auto must mean on: a session that never answered must not die at the window")
+	}
+	if !(Params{Auto: &yes}).UseAuto() {
+		t.Fatal("auto true must be on")
+	}
+	if (Params{Auto: &no}).UseAuto() {
+		t.Fatal("an explicit auto false must be off — that is why the field is a pointer")
 	}
 }
 
@@ -133,12 +150,15 @@ func TestInLoopIsOnUnlessExplicitlyDisabled(t *testing.T) {
 	}
 }
 
-// TestDefaultsMatchTheDocumentedTable (spec §7): auto is off, in-loop is on, and the marker is the
-// one that later tells a summary entry apart in the log.
+// TestDefaultsMatchTheDocumentedTable (spec §7): both automatic switches are on — `auto` since
+// 2026-11-16 — and the marker is the one that later tells a summary entry apart in the log.
 func TestDefaultsMatchTheDocumentedTable(t *testing.T) {
 	d := DefaultParams()
-	if d.Auto {
-		t.Fatal("spec §1.1: automatic compaction is off by default")
+	if !d.UseAuto() {
+		t.Fatal("spec §1.1: automatic compaction is on by default")
+	}
+	if d.Auto != nil {
+		t.Fatal("the default must stay nil, so an explicit auto:false keeps reading as an answer rather than as the default")
 	}
 	if !d.UseInLoop() {
 		t.Fatal("spec §1.1: in-loop compaction is on by default")
