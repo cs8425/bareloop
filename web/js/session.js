@@ -1153,14 +1153,19 @@ function renderRing(st) {
   ring.classList.toggle('ring-warm', warm && pct < 95);
   ring.classList.toggle('ring-hot', nctx > 0 && known && pct >= 95);
   ring.classList.toggle('ring-off', !(nctx > 0 && known));
+  // A session the endpoint has actually refused is a different animal from one that is merely full: the
+  // fill above is token arithmetic and cannot see the bytes a screenshot costs, so this marker is the only
+  // thing on the top bar that says requests can fail here without the gauge moving.
+  ring.classList.toggle('ring-wall', (st.bodyRefusedBytes || 0) > 0);
   $('#ring-nums').textContent = nctx > 0 ? `${fmtN(used)} / ${fmtN(nctx)}` : `${fmtN(used)} tokens`;
   $('#ring-bar').style.width = pct.toFixed(1) + '%';
   $('#ring-note').textContent =
-    nctx > 0
+    (nctx > 0
       ? known
         ? `${pct.toFixed(0)}% used · ${fmtN(Math.max(nctx - used, 0))} remaining · compaction past ${st.thresholdPct ?? '-'}%${st.summary ? ' · summary' : ''}${st.boundaryBroken ? ' · boundary missing' : ''}`
         : `no real measurement${st.summary ? ' since the last compaction' : ' yet'} — click for the window's arithmetic`
-      : 'n_ctx unknown: set it in Settings, and the ring gets a window to measure';
+      : 'n_ctx unknown: set it in Settings, and the ring gets a window to measure') +
+    (st.bodyCeiling ? ` · ${fmtBytes(st.bodyCeiling)} body wall` : '');
 }
 
 function resetRing() {
@@ -1168,7 +1173,7 @@ function resetRing() {
   if (!ring) return;
   const arc = ring.querySelector('.arc');
   if (arc) arc.style.strokeDashoffset = RING_C.toFixed(2);
-  ring.classList.remove('ring-warm', 'ring-hot');
+  ring.classList.remove('ring-warm', 'ring-hot', 'ring-wall');
   ring.classList.add('ring-off');
   $('#ring-nums').textContent = '– / –';
   $('#ring-bar').style.width = '0%';

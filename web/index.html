@@ -234,6 +234,19 @@
           <label>API key <input name="apiKey" type="password" spellcheck="false" autocomplete="off"
             placeholder="unchanged when empty" /></label>
           <label>n_ctx <input name="nCtx" type="number" min="0" placeholder="0 = probe the server" /></label>
+          <!-- The other ceiling, and it is worth saying why it is a separate field at all: an endpoint
+               refuses a BODY, not a context, and the two ceilings have nothing to do with each other — a
+               screenshot is a few hundred tokens and megabytes. 0 or empty sends no limit, and unlike
+               temperature an empty box here is an answer: saving it removes a limit that was set. The
+               number a wall is worth is not linear either — below roughly 0.6x of a normal request the
+               compaction stops working rather than slowing down, because the summary question no longer
+               fits and every round ships the same oversized body again. -->
+          <label
+            title="largest request body this endpoint takes, in bytes (your llama.cpp -bs, or a proxy's limit). Empty or 0 means no limit — and an empty box saved removes a limit that was set. Keep it above about 0.6x of a normal request: below that the summary question itself stops fitting and compaction cannot save the round."          >
+            body limit
+            <input name="maxRequestBodyBytes" type="number" min="0" placeholder="0 = no limit" />
+            bytes
+          </label>
           <label>max turns <input name="maxTurns" type="number" min="0" placeholder="0 = unlimited" /></label>
           <!-- Sampling sits with the endpoint above it and not with compaction below, because these change what
                one request asks for, not how a window is managed. The rule on every box here is the API's rule:

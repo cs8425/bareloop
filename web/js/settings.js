@@ -67,6 +67,9 @@ export async function openSettings() {
   fld(f, 'baseUrl').value = cfg.llm?.baseUrl || '';
   fld(f, 'apiKey').value = ''; // there is nothing to show, and empty means "keep the stored key"
   fld(f, 'nCtx').value = cfg.llm?.nCtx || '';
+  // A wall that was only MEASURED (a request this size was refused) is not config, so it correctly loads
+  // empty: the box shows what the operator typed, never what the endpoint happened to answer.
+  fld(f, 'maxRequestBodyBytes').value = cfg.llm?.maxRequestBodyBytes || '';
   fld(f, 'threshold').value = cfg.compact?.threshold ?? 70;
   // The summary's one number: it sizes the summary request and grades its answer.
   fld(f, 'summaryCap').value = cfg.compact?.summaryCap ?? 70;
@@ -248,6 +251,10 @@ export async function saveSettings() {
       baseUrl: fld(f, 'baseUrl').value,
       apiKey: fld(f, 'apiKey').value,
       nCtx: Number(fld(f, 'nCtx').value) || 0,
+      // 0 is an answer here, not a blank: the daemon reads a zero as "no wall", and saving an empty box
+      // therefore removes a limit that was set. There is no "unchanged" reading for this field, so a
+      // session that was never given a wall keeps one it never had — which is the same thing.
+      maxRequestBodyBytes: Number(fld(f, 'maxRequestBodyBytes').value || 0),
     },
     compact: {
       ...(cfg.compact || {}),

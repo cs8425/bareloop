@@ -333,6 +333,15 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 }
 #ctx-ring .ring-pop .dim { font-size: var(--t-0); }
 
+/* A request this endpoint refused. The fill above answers "how full is the window" in tokens, and a byte
+   refusal can happen at any value of that gauge, so this outline is the only thing on the top bar that
+   says a round can fail here without the ring moving. It outlines the ring instead of recolouring the
+   arc, because the arc's colour belongs to the window's thirds and nothing else. */
+#ctx-ring.ring-wall {
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(163, 66, 56, 0.6);
+}
+
 /* The transcript is the only thing that grows: #log-wrap takes the remaining height and #log
    scrolls inside it. Without min-height: 0 a flex item refuses to shrink below its content, the
    whole document starts scrolling and the composer is pushed off screen. */
@@ -627,6 +636,10 @@ button.inline-icon { display: inline-flex; align-items: center; gap: 5px; }
 #panel-body table { width: 100%; border-collapse: collapse; }
 #panel-body td, #panel-body th { border-bottom: 1px solid var(--border); padding: 3px 5px; text-align: left; vertical-align: top; }
 #panel-body .num { text-align: right; font-family: var(--mono); }
+/* The wire column is one figure and has to be read as one: "23.6" stacked over "MB" doubles the row's
+   height on an image path, which is exactly the path where this column earns its keep. Narrow on purpose
+   — nowrap on every .num would stretch the usage table's "1515 / 59" cells sideways instead. */
+#panel-body td.wire { white-space: nowrap; }
 #panel-body .head { color: var(--muted); max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #panel-body pre { white-space: pre-wrap; word-break: break-word; font: var(--t-1) var(--mono); }
 /* The context tab is a wall of same-rung lines, so it gets paragraph marks: the measurement a size up

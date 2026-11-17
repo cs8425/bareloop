@@ -9,7 +9,7 @@
 //
 // The three tabs share one mode variable, so a module can ask "am I open?" without watching the DOM,
 // and opening one closes the others by construction rather than by remembering to.
-import { $, el, fmtN } from './util.js';
+import { $, el, fmtN, fmtBytes } from './util.js';
 import { icon } from './icons.js';
 import { state } from './state.js';
 import { get } from './api.js';
@@ -202,7 +202,23 @@ async function renderContext(body) {
     el(
       'div',
       'dim',
-      `budget ${fmtN(data.budget)} · summary cap ${fmtN(data.summaryCap)} · ${data.systemBytes} bytes of system prompt · ${data.totalBytes} bytes total${data.syntheticToolResults ? ` · ${data.syntheticToolResults} synthetic tool result(s)` : ''}`,
+      `budget ${fmtN(data.budget)} · summary cap ${fmtN(data.summaryCap)} · ${data.systemBytes} bytes of system prompt · ${data.totalBytes} bytes total in the log${data.syntheticToolResults ? ` · ${data.syntheticToolResults} synthetic tool result(s)` : ''}`,
+    ),
+  );
+  // The body wall, and why it is spelled out here rather than left to the ring: the ring's fill is token
+  // arithmetic, and a screenshot is about five hundred tokens and six megabytes, so a conversation can sit
+  // at forty per cent of its window and still be refused outright. This line is the only place a 413
+  // leaves a trace for anyone who is not reading the daemon's log. The three byte figures in status are
+  // omitempty, so an absent field and a zero mean the same thing — no wall — and the sentence about where
+  // the number came from is the server's own words, not a second opinion computed here.
+  const wall = state.status?.bodyCeiling || 0;
+  const wallWhy = state.status?.bodyCeilingSource || '';
+  body.appendChild(
+    el(
+      'div',
+      'dim',
+      `${wall ? `body wall ${fmtBytes(wall)}` : 'no body wall set'} · ${wallWhy || 'unknown: set llm.maxRequestBodyBytes'}` +
+        (data.requestBytes ? ` · next request ${fmtBytes(data.requestBytes)}` : ''),
     ),
   );
   if (data.boundaryId) body.appendChild(el('div', 'dim', `boundary ${data.boundaryId}${data.boundaryBroken ? ' (missing!)' : ''}`));
@@ -254,11 +270,20 @@ async function renderInspect(body) {
   body.appendChild(el('div', 'lbl', `${rows.length} messages would be sent`));
   const table = el('table');
   const tr = el('tr');
-  for (const h of ['id', 'role', 'tokens', 'head']) tr.appendChild(el('th', '', h));
+  // `wire` is a column of its own because the two byte numbers answer different questions, and only one of
+  // them is the question a refused request was asking: tokens is what the window holds, wire is what the
+  // body pays. A row can be 2,500 tokens and 30 MB, and on an image path that is the normal case.
+  for (const h of ['id', 'role', 'tokens', 'wire', 'head']) tr.appendChild(el('th', '', h));
   table.appendChild(tr);
   for (const r of rows) {
     const row = el('tr');
-    row.append(el('td', '', r.id || '(synthetic)'), el('td', '', r.role), el('td', 'num', fmtN(r.tokens)), el('td', 'head', r.head || ''));
+    row.append(
+      el('td', '', r.id || '(synthetic)'),
+      el('td', '', r.role),
+      el('td', 'num', fmtN(r.tokens)),
+      el('td', 'num wire', r.wire ? fmtBytes(r.wire) : '–'),
+      el('td', 'head', r.head || ''),
+    );
     // Summarised away, or a synthetic empty tool result the assembler had to invent.
     if (!r.inKept) row.style.opacity = 0.45;
     if (!r.real) row.style.fontStyle = 'italic';
@@ -291,7 +316,13 @@ async function renderInspect(body) {
   actions.append(toggle, el('span', 'dim', `or GET /api/session/${state.id}/payload`));
   body.appendChild(actions);
   body.appendChild(raw);
-  body.appendChild(el('div', 'dim', 'dimmed rows are summarised away; italic tokens are byte/4 estimates'));
+  body.appendChild(
+    el(
+      'div',
+      'dim',
+      'dimmed rows are summarised away; italic tokens are bytes/4 estimates; wire is what a request pays for that row, and it is the ruler a 413 is measured on',
+    ),
+  );
 }
 
 // planLine spells out the cut: how much of the path becomes a summary, what stays raw, and where the
