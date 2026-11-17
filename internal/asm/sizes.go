@@ -14,8 +14,20 @@ package asm
 // every request, so the first request's prompt contains them and no subtraction can separate them
 // from the first message. The caller who can see both hands that floor in as headFloor; it is an
 // estimate, it is kept separate from every entry, and it is the only estimated part of a Total.
+//
+// The Wire column answers a question no token column can: what does this entry cost in **bytes**,
+// which is what a server refuses with 413 before it has read a single token. It is an estimate by
+// summing lengths, and its one non-obvious case is an image: an entry carries a 69-byte reference
+// where the wire carries megabytes of base64, so the reference is priced from the blob's stored byte
+// count (RefSizes) rather than from its own length. Bytes, the older column, stays what it always
+// was — the entry's weight in the log — because those two numbers are used for two different things
+// and neither should be quietly redefined as the other.
 
-import "bareloop/internal/ir"
+import (
+	"strings"
+
+	"bareloop/internal/ir"
+)
 
 // TokensOf is the bytes/4 estimate of text nobody has counted.
 func TokensOf(s string) int { return (len(s) + 3) / 4 }
@@ -25,6 +37,22 @@ type Size struct {
 	Tokens int  // measured when Real, otherwise the bytes/4 estimate
 	Real   bool // counted by a server
 	Bytes  int  // helper column only
+	// Wire is the entry's estimated weight in a request body — the column a byte ceiling is cut
+	// against. Estimated (see entryWire), never measured: no server reports the size of a body it
+	// refused to read.
+	Wire int
+}
+
+// RefSizes answers what a stored blob weighs in raw bytes, by the content address its bytes spell.
+// The store answers from a size column and moves no bytes (store.Log.BlobSize), which is the entire
+// reason this is affordable to ask once per reference while deriving a table. A caller may cache
+// forever: a sha's byte count is a fact about the universe, not about a row.
+//
+// found=false — a blob this store has never seen — prices the reference at nothing. That is not the
+// table pretending an oversized attachment is free; it is a payload that cannot be sent at all, and
+// ExpandMessages is the code that says so out loud when the bytes are owed.
+type RefSizes interface {
+	Size(sha string) (bytes int, found bool)
 }
 
 // Sizes is the size table of one built payload.
@@ -37,10 +65,18 @@ type Sizes struct {
 // DeriveSizes reads the size table of a payload: every entry's own measured number where a server
 // counted one (see Stamp), an estimate of its bytes where nobody has. headFloor is the estimate of
 // the system prompt and tool schemas in front of it, which no entry can carry.
-func DeriveSizes(b *Built, headFloor int) *Sizes {
+//
+// The optional RefSizes is what lets the Wire column price image references honestly; without it
+// every reference prices at its own 69 bytes, which is the answer for a payload of text and a
+// forty-thousand-fold lie for one carrying a screenshot. At most one resolver is read.
+func DeriveSizes(b *Built, headFloor int, refs ...RefSizes) *Sizes {
+	var r RefSizes
+	if len(refs) > 0 {
+		r = refs[0]
+	}
 	s := &Sizes{per: map[string]Size{}, floor: headFloor}
 	for _, e := range b.Entries {
-		size := Size{Tokens: e.Tokens, Real: e.Tokens > 0, Bytes: entryBytes(e)}
+		size := Size{Tokens: e.Tokens, Real: e.Tokens > 0, Bytes: entryBytes(e), Wire: entryWire(e, b.StructuredCap, r)}
 		if !size.Real {
 			size.Tokens = Estimate(e, b.StructuredCap)
 		}
@@ -108,6 +144,44 @@ func (s *Sizes) Suffix() ([]int, []string) {
 	return suf, s.order
 }
 
+// WireTotal is the entries' share of a request body, in bytes: what a server counts before it
+// refuses a body for being a body too large. The envelope in front of it — model name, sampling
+// fields, tool schemas, the system prompt — is nobody's message and is measured by the package that
+// owns the serialized shape (llm.Request); adding the two is the estimate to compare against a
+// ceiling.
+func (s *Sizes) WireTotal() int {
+	n := 0
+	for _, id := range s.order {
+		n += s.per[id].Wire
+	}
+	return n
+}
+
+// WirePrefix is the same sum over the first i entries in send order, which is the question a byte
+// ceiling asks: stop before entry i and the body is the envelope plus this. Monotone by
+// construction, so a caller may walk it outward from the front and stop at the first i that no
+// longer fits.
+func (s *Sizes) WirePrefix(i int) int {
+	if i > len(s.order) {
+		i = len(s.order)
+	}
+	n := 0
+	for _, id := range s.order[:i] {
+		n += s.per[id].Wire
+	}
+	return n
+}
+
+// WirePrefixes is the whole walk at once: prefixes[i] = WirePrefix(i), for a caller deciding where
+// to cut by looking at every position rather than one.
+func (s *Sizes) WirePrefixes() []int {
+	pre := make([]int, len(s.order)+1)
+	for i, id := range s.order {
+		pre[i+1] = pre[i] + s.per[id].Wire
+	}
+	return pre
+}
+
 // AnyEstimate reports whether any entry used the estimate (UI shows "est.").
 func (s *Sizes) AnyEstimate() bool {
 	for _, v := range s.per {
@@ -132,4 +206,54 @@ func entryBytes(e *ir.Entry) int {
 	// which is the one the guard and the compaction cut read.
 	n += len(e.Structured)
 	return n
+}
+
+// entryWire estimates what one entry adds to a request body, by summing the lengths of everything
+// that goes on it. It deliberately does not try to be a serialization: the JSON scaffolding around
+// a message (its role, the field names, the commas) is a constant per message and belongs with the
+// envelope's fixed cost, which the llm package measures by marshaling its own struct — the same
+// struct that goes out — rather than letting this function count punctuation twice and get it wrong
+// twice.
+//
+// The one length that is not the answer on its own is an image part's. A part whose data is
+// "blob:<sha>" occupies 69 bytes in the log and 4/3rds of the blob's raw bytes on the wire inside a
+// data URL; a part whose data is already base64 occupies that many bytes both places. Priced from
+// the log column, an entry holding a 2 MB screenshot claims 69 bytes; the 413 that arrives for it
+// disagrees by a factor of forty thousand, which is the whole reason this column exists.
+func entryWire(e *ir.Entry, structuredCap int, refs RefSizes) int {
+	n := len(e.Content)
+	for _, tc := range e.ToolCalls {
+		n += len(tc.Name) + len(tc.Args)
+	}
+	for _, p := range e.Parts {
+		n += len(p.Text)
+		if p.Data != "" {
+			n += partWire(p, refs)
+		}
+	}
+	if raw := len(e.Structured); raw > 0 {
+		// structuredWireBytes is the assembler's own arithmetic on what a tool result's JSON puts on
+		// the wire, cap and truncation note included. It prices the ceiling, so a server whose mode is
+		// "never" is over-counted here by at most that ceiling: an estimate that guesses high about a
+		// byte wall fails safe, and the alternative is to consult the per-server mode table for a
+		// number this table never gets to decide.
+		n += structuredWireBytes(raw, structuredCap)
+	}
+	return n
+}
+
+// partWire is one attachment part's wire weight: the data URL the assembler wraps its bytes in
+// (counted by asking that one function what it would produce for empty data, so this cannot drift
+// from it), plus the payload itself — and the payload's size is the blob's, not the reference's.
+func partWire(p ir.Part, refs RefSizes) int {
+	n := len(dataURL(p.MimeType, ""))
+	if sha, isRef := strings.CutPrefix(p.Data, ir.RefPrefix); isRef {
+		if refs != nil {
+			if raw, ok := refs.Size(sha); ok && raw > 0 {
+				n += 4 * ((raw + 2) / 3) // base64: four characters for every three bytes
+			}
+		}
+		return n
+	}
+	return n + len(p.Data)
 }

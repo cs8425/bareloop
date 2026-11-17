@@ -56,6 +56,13 @@ type Session struct {
 
 	log *store.Log
 
+	// blobs answers "how big is this image" for the size table's Wire column, from the blob table's
+	// size column, cached for the session's life (see refSizes). env holds the envelope: what one of
+	// this session's requests costs before any conversation message goes into it. Both are byte
+	// numbers, and bytes are the only thing a body ceiling is measured in.
+	blobs *refSizes
+	env   *envelopeCache
+
 	mu sync.Mutex
 	// tr is the resident half of the tree: the spine of every entry plus the facts
 	// a compaction leaves on it (ir.Meta). The conversation itself lives on disk and
@@ -213,6 +220,8 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 		cfg:           cfg,
 		tr:            st,
 		provider:      prov,
+		blobs:         newRefSizes(log),
+		env:           &envelopeCache{},
 		pendingElicit: map[string]chan mcp.ElicitResponse{},
 	}
 	s.reg = newRegistry(s.emit, s.logf, cfg.NotifyTools)
@@ -490,7 +499,7 @@ func (s *Session) build() (*asm.Built, *asm.Sizes, []llm.Tool, error) {
 		// The assembler copied the summary before it was stamped; the size table reads that copy.
 		built.Summary.Tokens = cmp.Tokens
 	}
-	sizes := asm.DeriveSizes(built, head)
+	sizes := asm.DeriveSizes(built, head, s.blobs)
 	s.mu.Unlock()
 	return built, sizes, tools, nil
 }

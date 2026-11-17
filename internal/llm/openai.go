@@ -95,6 +95,28 @@ type chatRequest struct {
 	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 }
 
+// toolDefs is how the tool array reaches the wire: every schema under a "function" wrapper, and an
+// empty parameter list spelled out for the servers that reject a tool with no schema. It is a
+// function rather than a loop inside encodeBody because the byte cost of this array is worth knowing
+// before a request is sent (EnvelopeBytes), and the only honest way to know it is to build the array
+// and measure the same struct the transport measures.
+func toolDefs(tools []Tool) []toolDefJSON {
+	if len(tools) == 0 {
+		return nil
+	}
+	defs := make([]toolDefJSON, 0, len(tools))
+	for _, t := range tools {
+		params := t.Parameters
+		if len(params) == 0 {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		defs = append(defs, toolDefJSON{Type: "function", Function: functionDef{
+			Name: t.Name, Description: t.Description, Parameters: params,
+		}})
+	}
+	return defs
+}
+
 func (p *openai) encodeBody(req Request, stream bool) ([]byte, error) {
 	body := chatRequest{
 		Model:           or(req.Model, p.cfg.Model),
@@ -108,15 +130,7 @@ func (p *openai) encodeBody(req Request, stream bool) ([]byte, error) {
 	if stream {
 		body.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
-	for _, t := range req.Tools {
-		params := t.Parameters
-		if len(params) == 0 {
-			params = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
-		body.Tools = append(body.Tools, toolDefJSON{Type: "function", Function: functionDef{
-			Name: t.Name, Description: t.Description, Parameters: params,
-		}})
-	}
+	body.Tools = toolDefs(req.Tools)
 	extra := req.Extra
 	if len(extra) == 0 {
 		return jsonv2.Marshal(body)
