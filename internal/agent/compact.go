@@ -289,6 +289,13 @@ const maxReplayRounds = 100
 func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual bool, instruction string, round int, res CompactResult) (CompactResult, bool) {
 	cfg := s.Config()
 	p := cfg.Compact
+	// The body ceiling gets a vote on where the cut lands, and only in the direction of cutting deeper
+	// (compact.Params.MaxWireBytes). Without it a path of images is planned as if history were free in
+	// bytes: the token budget happily keeps twenty-five screenshots because they are twelve thousand
+	// tokens, while the endpoint refuses the request they serialize into, and every turn then pays a
+	// compaction that could not have rescued it. Derived from the session's ceiling rather than the
+	// config because the ceiling is half learned — it is a measured refusal most of the time.
+	p.MaxWireBytes = s.keptWireBudget()
 
 	// Planning input = assembler input: both come out of the single choke point (§3.2).
 	built, sizes, tools, err := s.build()
@@ -412,6 +419,12 @@ func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual 
 			text, size, err = s.summarize(ctx, cfg, p, plan, virt, vsizes, refs, extra, attempt, round, record)
 			if err != nil {
 				s.logf("compaction (%s): attempt %d failed: %v", trig, attempt, err)
+				if errors.Is(err, errBodyCeiling) {
+					// Measured, not guessed: the request does not fit and there is nothing left to cut, so a
+					// second attempt would upload the same bytes for the same refusal. The round ends here
+					// with the two numbers in its skip reason.
+					break
+				}
 				extra = ""
 				continue
 			}
@@ -648,52 +661,106 @@ func (s *Session) summarize(ctx context.Context, cfg Config, p compact.Params, p
 	if !p.ReadsWholePath() {
 		scope = plan.Cut
 	}
-	asked := virt[:scope]
 	instrTok := compact.TextTokens(p.SummaryInstruction(plan.Split)) + compact.TextTokens(extra)
 
-	// The round's conversation is the planning path's own bytes, as far as the scope reaches.
-	prefix, sliced := refs.through(scope)
-	call := p.BuildRequest(nctx, prefix, refs.tools, plan.Split, extra)
-	if p.SummaryMode != compact.ModePrefixStable || !sliced || vsizes.Total()+instrTok > nctx {
-		// Three roads to the flat transcript, all of them "these bytes cannot carry this question".
-		// Shape B (mode "transcript") asks with no cache affinity, so the region itself is the payload
-		// (spec §3.1). A payload whose ids did not describe its messages has nothing that may be
-		// sliced at any boundary. And a planning path that still overfits the window when read as bytes —
-		// under the default scope this is the request itself, and under the narrow one it is the widest
-		// the request could be — can only be asked about flattened. Left alone, the last two are a
-		// request of two messages — a system prompt and "compress the conversation above" — over a
-		// conversation the model was never given, and the answer would pass acceptance and replace the
-		// path with a fiction. The transcript is lossy (structuredContent is not in it); a summary of
-		// nothing is not lossy, it is wrong.
-		call = p.BuildRequest(nctx, nil, refs.tools, plan.Split, extra)
-		src := asked
-		if sliced && vsizes.Total()+instrTok > nctx {
-			// Every entry bigger than what one request could read is clipped to its beginning and end; a
-			// path that overfits without any single oversized entry can only hope the flattening itself
-			// saved enough — the structuredContent a transcript drops is all it has to give.
-			free := (nctx - instrTok) / 2
-			var clipped int
-			src, clipped = compact.ClipOversized(asked, free)
-			s.logf("compaction: this round's path read as bytes would be ~%d tokens against a %d-token window; %d entries go as a flat transcript (%d oversized messages read only at their beginning and end)",
-				vsizes.Total()+instrTok, nctx, len(src), clipped)
-		} else if !sliced {
-			s.logf("compaction: the payload could not be sliced, so %d entries go to the summariser as a flat transcript", len(src))
+	// The byte wall, cut here rather than discovered later (maxbytes.go). The summary request reads the
+	// whole path, which makes it about as big as the conversation it is being asked to shrink: on a
+	// session that has just been refused for size, the rescue request is refused too, and a session
+	// cannot be saved by anything it is able to send. So the question is cut to fit before it goes out.
+	//
+	// It is cut from the near end, not the far one: `asked` is a prefix of the path, and a prefix is what
+	// the whole cache-affinity design rests on — drop the oldest and every byte after it moves, which
+	// re-prefills the conversation to save an upload. Dropping the newest costs less than it sounds:
+	// those entries are the kept tail, and they survive the compaction verbatim, so the only thing the
+	// summariser loses is a second copy of something still standing next to the summary.
+	ceil := s.bodyCeiling()
+	var req llm.Request
+	for cuts := 0; ; cuts++ {
+		asked := virt[:scope]
+		// The round's conversation is the planning path's own bytes, as far as the scope reaches.
+		prefix, sliced := refs.through(scope)
+		call := p.BuildRequest(nctx, prefix, refs.tools, plan.Split, extra)
+		if p.SummaryMode != compact.ModePrefixStable || !sliced || vsizes.Total()+instrTok > nctx {
+			// Three roads to the flat transcript, all of them "these bytes cannot carry this question".
+			// Shape B (mode "transcript") asks with no cache affinity, so the region itself is the payload
+			// (spec §3.1). A payload whose ids did not describe its messages has nothing that may be
+			// sliced at any boundary. And a planning path that still overfits the window when read as bytes —
+			// under the default scope this is the request itself, and under the narrow one it is the widest
+			// the request could be — can only be asked about flattened. Left alone, the last two are a
+			// request of two messages — a system prompt and "compress the conversation above" — over a
+			// conversation the model was never given, and the answer would pass acceptance and replace the
+			// path with a fiction. The transcript is lossy (structuredContent is not in it); a summary of
+			// nothing is not lossy, it is wrong.
+			call = p.BuildRequest(nctx, nil, refs.tools, plan.Split, extra)
+			src := asked
+			if sliced && vsizes.Total()+instrTok > nctx {
+				// Every entry bigger than what one request could read is clipped to its beginning and end; a
+				// path that overfits without any single oversized entry can only hope the flattening itself
+				// saved enough — the structuredContent a transcript drops is all it has to give.
+				free := (nctx - instrTok) / 2
+				var clipped int
+				src, clipped = compact.ClipOversized(asked, free)
+				s.logf("compaction: this round's path read as bytes would be ~%d tokens against a %d-token window; %d entries go as a flat transcript (%d oversized messages read only at their beginning and end)",
+					vsizes.Total()+instrTok, nctx, len(src), clipped)
+			} else if !sliced {
+				s.logf("compaction: the payload could not be sliced, so %d entries go to the summariser as a flat transcript", len(src))
+			}
+			call.Messages = append(call.Messages, asm.Message{
+				Role:    "user",
+				Content: "Conversation to compress:\n\n" + compact.Transcript(src),
+			})
 		}
-		call.Messages = append(call.Messages, asm.Message{
-			Role:    "user",
-			Content: "Conversation to compress:\n\n" + compact.Transcript(src),
-		})
+		req = summaryRequest(cfg, call)
+		// The summary's prefix arrives as references — what this process remembers
+		// sending — and owes the same expansion the main send does: byte-identical
+		// pixels, or a refusal that says which blob is gone.
+		wireMsgs, err := asm.ExpandMessages(req.Messages, logBlobs{log: s.log})
+		if err != nil {
+			record(ir.SummaryAttempt{Attempt: attempt, Failed: err.Error()})
+			return "", 0, err
+		}
+		req.Messages = wireMsgs
+
+		if ceil <= 0 {
+			break // nobody has said where the wall is: ask as planned, and learn from a refusal
+		}
+		n := s.bodyBytesOf(req)
+		if n == 0 {
+			break // this provider cannot size a request, so the wall cannot be checked before sending
+		}
+		if n <= ceil {
+			if cuts > 0 {
+				s.logf("compaction: the summary request fits after cutting: %s against a %s limit, reading %d of %d entries",
+					humanBytes(n), humanBytes(ceil), scope, len(virt))
+			}
+			break
+		}
+		if scope <= plan.Cut {
+			// The floor is the cut: a summariser may read less of the path than the round replaces, but
+			// then it is writing down a region it was never shown. Below that line the honest answer is
+			// not to ask at all, and not to ask twice — the size is measured, so re-sending is re-uploading
+			// bytes this server has already refused.
+			msg := fmt.Sprintf("the narrowest summary this round can ask is %s and this endpoint takes %s: raise llm.maxRequestBodyBytes, or shrink what the round keeps (keepBudget, minKeptMessages)",
+				humanBytes(n), humanBytes(ceil))
+			s.logf("compaction: %s (reading %d entries, which is the floor the round cannot go below)", msg, scope)
+			record(ir.SummaryAttempt{Attempt: attempt, Failed: "not sent: " + msg})
+			return "", 0, fmt.Errorf("%w: %s", errBodyCeiling, msg)
+		}
+		// What the request holds besides the entries (the skeleton, the instruction, and whatever the
+		// estimate leaves out) is measured at this scope and treated as fixed while the search picks how
+		// many entries survive: it is a few percent of a request this size, and deriving it exactly for
+		// every candidate would mean building the request again for each one.
+		fixed := n - vsizes.WirePrefix(scope)
+		want := fitScope(vsizes, plan.Cut, scope-1, ceil-fixed)
+		stay := "stay"
+		if scope-want == 1 {
+			stay = "stays"
+		}
+		s.logf("compaction: the summary request is %s against a %s limit, so the round is asked about %d of %d entries (%d of the kept tail %s out of the question)",
+			humanBytes(n), humanBytes(ceil), want, len(virt), scope-want, stay)
+		scope = want
 	}
-	req := summaryRequest(cfg, call)
-	// The summary's prefix arrives as references — what this process remembers
-	// sending — and owes the same expansion the main send does: byte-identical
-	// pixels, or a refusal that says which blob is gone.
-	wireMsgs, err := asm.ExpandMessages(req.Messages, logBlobs{log: s.log})
-	if err != nil {
-		record(ir.SummaryAttempt{Attempt: attempt, Failed: err.Error()})
-		return "", 0, err
-	}
-	req.Messages = wireMsgs
+
 	s.emit(Event{Type: EvtCompact, Data: map[string]any{"stage": "summarizing", "attempt": attempt, "round": round}})
 	started := time.Now()
 	res, err := s.provider.Complete(ctx, req)

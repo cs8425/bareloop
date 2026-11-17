@@ -142,17 +142,25 @@ type Status struct {
 	// is the ceiling this session was configured with. The gap between the two is the drift an
 	// operator has to see: a configured window larger than the server's is silently clamped, and a
 	// session with no number at all can neither compact nor check that a request fits.
-	NCTXSource   string `json:"nCtxSource,omitempty"`
-	NCTXConfig   int    `json:"nCtxConfig,omitempty"`
-	ContextUsed  int    `json:"contextUsed"`
-	ContextKnown bool   `json:"contextKnown"`
-	ThresholdPct int    `json:"thresholdPct"`
-	UsedPct      int    `json:"usedPct"`
-	Tip          string `json:"tip,omitempty"`
-	Entries      int    `json:"entries"`
-	Summary      bool   `json:"summary,omitempty"`
-	Broken       bool   `json:"boundaryBroken,omitempty"`
-	Pending      int    `json:"pending,omitempty"`
+	NCTXSource string `json:"nCtxSource,omitempty"`
+	NCTXConfig int    `json:"nCtxConfig,omitempty"`
+	// BodyCeiling is the byte wall of the request body (see NCTX's twin above, and maxbytes.go for why
+	// a second wall needs a second number: 413 arrives before a token is counted, so the window says
+	// nothing about it). BodyCeilingSource explains which of the two inputs won, and BodyRefused is the
+	// size of a body this endpoint has sent back as too large — the measurement behind the ceiling when
+	// the config is silent, and the number that says how far the last refusal was from the limit.
+	BodyCeiling       int    `json:"bodyCeiling,omitempty"`
+	BodyCeilingSource string `json:"bodyCeilingSource,omitempty"`
+	BodyRefused       int    `json:"bodyRefusedBytes,omitempty"`
+	ContextUsed       int    `json:"contextUsed"`
+	ContextKnown      bool   `json:"contextKnown"`
+	ThresholdPct      int    `json:"thresholdPct"`
+	UsedPct           int    `json:"usedPct"`
+	Tip               string `json:"tip,omitempty"`
+	Entries           int    `json:"entries"`
+	Summary           bool   `json:"summary,omitempty"`
+	Broken            bool   `json:"boundaryBroken,omitempty"`
+	Pending           int    `json:"pending,omitempty"`
 	// WakeAt is the moment a scheduled wait is due (UTC, RFC3339), and Queued counts what the user
 	// sent while waiting for it. They are the only sign that a "running" session has no run in it:
 	// a parked session says "running" on purpose (the composer's Enter must keep meaning "queue",

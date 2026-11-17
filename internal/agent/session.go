@@ -137,6 +137,15 @@ type Session struct {
 	nctxServer  int
 	nctxProbed  bool // asked since this process started
 	nctxProbing bool // probe in flight (they are cheap but they are HTTP)
+	// bodyCfg is llm.maxRequestBodyBytes as configured and bodyRefused the size of a body this endpoint
+	// sent back as too large. They are the two numbers of the byte wall, which is a different wall from
+	// the window above (maxbytes.go); the effective one is resolved from them on every read, never
+	// persisted. bodyEnv is the request skeleton — system prompt, tool schemas, sampling — that the
+	// transport measured on the last send: the path estimate counts entries, not the envelope, so the
+	// pre-send byte check (guardBody) adds this to get a figure for the request as it would go out.
+	bodyCfg     int
+	bodyRefused int
+	bodyEnv     int
 	updated_at  time.Time
 
 	// compaction lock (§1.4): taken before the first await, covers summary + gate wait.
@@ -235,6 +244,9 @@ func openSession(ctx context.Context, mgr *Manager, id string, cfg Config) (*Ses
 	// written back to config.json.
 	s.nctxCfg = cfg.LLM.NCTX
 	s.nctx = cfg.LLM.NCTX
+	// The byte wall needs no probe: a server does not advertise client_max_body_size, so an unset
+	// config means "unknown until something is refused" rather than "ask".
+	s.bodyCfg = cfg.LLM.MaxBodyBytes
 	// MCP servers are started in the background: a slow or broken server must not block
 	// opening a session, and the tools appear as soon as they are ready.
 	go func() {
@@ -673,6 +685,7 @@ func (s *Session) Status() *Status {
 	turn := s.turn
 	used, known := s.ctxUsed, s.ctxKnown
 	nctx, cfgN, srvN := s.nctx, s.nctxCfg, s.nctxServer
+	bcfg, brefused := s.bodyCfg, s.bodyRefused
 	var (
 		waiting bool
 		wakeAt  time.Time
@@ -696,29 +709,34 @@ func (s *Session) Status() *Status {
 		used, known = s.usageNow()
 	}
 	st := &Status{
-		Session:      s.ID,
-		Phase:        phase,
-		Name:         cfg.Name,
-		Model:        cfg.LLM.Model,
-		NCTX:         nctx,
-		NCTXSource:   nctxSource(cfgN, srvN),
-		NCTXConfig:   cfgN,
-		ContextUsed:  used,
-		ContextKnown: known,
-		ThresholdPct: cfg.Compact.ThresholdPct,
-		Tip:          tip,
-		Entries:      entries,
-		Summary:      cmp != nil,
-		Turn:         turn,
-		AutoCompact:  cfg.Compact.UseAuto(),
-		InLoop:       cfg.Compact.UseInLoop(),
-		Tools:        published,
-		ToolsEnabled: enabled,
-		ToolsTotal:   total,
-		ToolsPending: pendingTools,
-		Queued:       queued,
-		Servers:      s.reg.statusSnapshot(),
-		UpdatedAt:    time.Now().UTC(),
+		Session:    s.ID,
+		Phase:      phase,
+		Name:       cfg.Name,
+		Model:      cfg.LLM.Model,
+		NCTX:       nctx,
+		NCTXSource: nctxSource(cfgN, srvN),
+		NCTXConfig: cfgN,
+		// The byte wall beside the window: two numbers that fail in two different places, and an operator
+		// staring at a 413 needs to see which one the session thinks it is hitting.
+		BodyCeiling:       resolveBodyCeiling(bcfg, brefused),
+		BodyCeilingSource: bodyCeilingSource(bcfg, brefused),
+		BodyRefused:       brefused,
+		ContextUsed:       used,
+		ContextKnown:      known,
+		ThresholdPct:      cfg.Compact.ThresholdPct,
+		Tip:               tip,
+		Entries:           entries,
+		Summary:           cmp != nil,
+		Turn:              turn,
+		AutoCompact:       cfg.Compact.UseAuto(),
+		InLoop:            cfg.Compact.UseInLoop(),
+		Tools:             published,
+		ToolsEnabled:      enabled,
+		ToolsTotal:        total,
+		ToolsPending:      pendingTools,
+		Queued:            queued,
+		Servers:           s.reg.statusSnapshot(),
+		UpdatedAt:         time.Now().UTC(),
 	}
 	if waiting && !wakeAt.IsZero() {
 		// UTC whatever the session's timezone is: this is a moment the UI renders in the reader's own
@@ -1271,6 +1289,10 @@ func (s *Session) UpdateConfig(ctx context.Context, patch Config) error {
 		// A new endpoint may be a different server: forget what the old one reported and ask again
 		// before the next send. The probe is deliberately not done here, so PATCH stays fast.
 		s.nctxServer, s.nctxProbed, s.nctxProbing = 0, false, false
+		// Same reasoning for the byte wall, which has no probe to re-run: a refusal measured against the
+		// old endpoint says nothing about this one, so it is forgotten rather than carried over — and with
+		// it the skeleton, which is a figure about a request this provider builds, not about the path.
+		s.bodyCfg, s.bodyRefused, s.bodyEnv = patch.LLM.MaxBodyBytes, 0, 0
 		s.mu.Unlock()
 	}
 	if reconnectMCP {

@@ -253,6 +253,14 @@ number: the log refuses to write an entry whose blob is absent, so a session's o
 answers 0. When it is non-zero the payload arrived by another door — rows imported without their
 bytes — and the reading is not "small request" but "this body cannot be sent at all".
 
+The wall those bytes are weighed against is `llm.maxRequestBodyBytes` — your llama.cpp `-bs`, your
+proxy's `client_max_body_size`. It is a byte ceiling rather than a token one, so `nCtx` says nothing
+about it: a session with a 262k window is refused at 32 MB of screenshot. `status.bodyCeiling` is the
+number in use, `bodyCeilingSource` says whether it came from config or from a refusal (the smaller of
+the two always wins — a body the server sent back is evidence), and `bodyRefusedBytes` is the size
+that last refusal carried. With neither number the ceiling is unknown: nothing is cut in advance, and
+the first 413 both records the wall and triggers the compaction that cuts to it.
+
 ### `GET /api/session/{id}/payload`
 
 The exact body of the next request: `{system, messages, tools}`, plus the same body measured three

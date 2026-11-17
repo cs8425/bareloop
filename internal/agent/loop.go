@@ -452,6 +452,12 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		if !shrunk {
+			// The other wall gets the same contract, and only the second look: guardFit has just asked for
+			// a compaction of its own if it moved the path, and one turn should not spend two forced
+			// summaries before it even sends (maxbytes.go).
+			shrunk = s.guardBody(ctx, sizes)
+		}
 		if shrunk {
 			// The fit check had to compact, so this turn's payload describes a path that no longer exists:
 			// it was measured before the boundary, and sending it anyway would send exactly the request the
@@ -484,6 +490,9 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 				shrunk, err := s.guardFit(ctx, sizes)
 				if err != nil {
 					return false, err
+				}
+				if !shrunk {
+					shrunk = s.guardBody(ctx, sizes) // the byte wall, same contract as the window's
 				}
 				if shrunk {
 					// Again: the check shrank the path after this payload was assembled.
@@ -569,6 +578,32 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			// minSummarizeTokens above the whole conversation is the one I have seen do it in person.
 			return false, fmt.Errorf("request does not fit the model window (%d tokens) and compaction could not shrink it (%s): trim the input, or lower what stopped it (minSummarizeTokens, minKeptMessages, minKeptUserTurns)",
 				window, skip)
+		}
+
+		// The other wall, in bytes: the request never arrived, so nothing was read and no token count
+		// explains the failure (maxbytes.go). Compaction is still the only lever that makes the path
+		// smaller, and this time the summary request cuts itself to fit, so the rescue works even when
+		// the conversation is bigger than the wall — which is precisely the case that used to brick a
+		// session: the turn could not be sent, and neither could the request that would have shrunk it.
+		if entry.Label == "llm error" && isBodyTooLarge(entry.Content) {
+			ceil := s.bodyCeiling()
+			sent := s.lastRefusedBody()
+			sentText := "unknown"
+			if sent > 0 {
+				sentText = humanBytes(sent)
+			}
+			res := s.compactHere(ctx, compact.TriggerInLoop, true)
+			if res.Committed {
+				s.emit(Event{Type: EvtCompact, Data: res})
+				return false, fmt.Errorf("request body (%s) is over this endpoint's limit (%s): the context was compacted, please send again",
+					sentText, bodyLimitPhrase(ceil, sent))
+			}
+			skip := res.Skipped
+			if skip == "" {
+				skip = "nothing left to summarize"
+			}
+			return false, fmt.Errorf("request body (%s) is over this endpoint's limit (%s) and compaction did not shrink the path (%s): raise llm.maxRequestBodyBytes or drop the largest entry",
+				sentText, bodyLimitPhrase(ceil, sent), skip)
 		}
 
 		if aborted {
@@ -779,6 +814,10 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 	req.Messages = msgs
 	req.Tools = tools
 	req.Stream = true
+	// The envelope is the part of the body the path estimate cannot see, and this is the one moment it
+	// can be had exactly and cheaply. It is recorded every send so the *next* turn's pre-send byte check
+	// (guardBody) is comparing a figure for the whole request, not just for the conversation.
+	s.noteEnvelopeBytes(req)
 	// Ask the provider, retrying only what a retry can fix. Two extra attempts cover a busy
 	// llama.cpp or a dropped connection; a request the server rejected (400, 401, 413 …) is not
 	// retried, because the same bytes will keep failing the same way.
@@ -809,6 +848,12 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 		}
 	}
 	if err != nil {
+		// A refusal for size is a measurement of the wall, taken while the request that caused it is still
+		// in hand: the transport can say exactly how many bytes it wrote. Recording it here is what lets
+		// the next compaction cut in advance instead of meeting the same wall a second time.
+		if isBodyTooLarge(err.Error()) {
+			s.noteBodyRefused(s.bodyBytesOf(req))
+		}
 		s.emit(Event{Type: EvtError, Info: "llm: " + err.Error()})
 		s.logf("turn %d: llm request failed: %v", turn, err)
 		if ctx.Err() != nil {

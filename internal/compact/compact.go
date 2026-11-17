@@ -82,6 +82,21 @@ type Params struct {
 	// reasoning model the answer's share is whatever the thinking leaves — so the default (70)
 	// sizes the call for the thinking too.
 	SummaryCapPct int `json:"summaryCap"`
+	// MaxWireBytes is the body ceiling's vote on where the cut lands, in bytes, and it is a bound on the
+	// cut's depth rather than a second budget: whatever the plan leaves in the tail must weigh no more
+	// than this, so it can only ever push the boundary outward (keep less) and never pull it back. It
+	// exists because the two rulers disagree about images — one entry is a few hundred tokens and several
+	// megabytes — so a path of screenshots can sit comfortably inside a 20%-of-window token budget while
+	// weighing more than the endpoint's body limit, and a plan made by tokens alone then replaces two
+	// entries and still sends 117 MB. Zero means no ceiling is known: pure token planning, exactly the
+	// behaviour before bytes were in the picture.
+	//
+	// why it is a candidate filter and not a rewrite of the token cap: it is a different unit, and the
+	// floors have to stay able to overrule it. A tail the floors demand that the wall cannot hold is a
+	// real refusal — the turn ships and is refused — and folding bytes into allowed would trade the floor
+	// away instead of reporting the conflict.
+	MaxWireBytes int `json:"-"`
+
 	// KeepBudgetPct is the cap on the kept tail as a share of n_ctx. It stands apart from
 	// summaryCap on purpose: how short the summariser must write and how much raw history the
 	// session keeps are two questions, and while the tail was the trigger minus the summary
@@ -385,6 +400,25 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 		}
 		return true
 	}
+
+	// The byte bound, when there is one, is a floor on how deep the cut may be — and because both
+	// searches below take the first candidate that passes, it is enough to know the shallowest position
+	// whose kept tail is light enough and refuse anything before it. WirePrefixes is indexed by position
+	// like the path, so the tail is the difference of two prefix sums; clamped to len(path) because the
+	// planning path may be shorter than the table it was sized from. j == n is the end of the walk and
+	// weighs nothing, so the bound always has a legal answer and cannot on its own produce "no boundary":
+	// when a cut deep enough is refused it is a floor doing it, which is the refusal the reader can act on.
+	minWire := 0
+	if p.MaxWireBytes > 0 {
+		pre := sizes.WirePrefixes()
+		keep := n
+		if len(pre)-1 < keep {
+			keep = len(pre) - 1
+		}
+		for minWire < n && pre[keep]-pre[minWire] > p.MaxWireBytes {
+			minWire++
+		}
+	}
 	userTurnsOK := func(j int) bool {
 		if p.MinKeptUserTurns <= 0 {
 			return true
@@ -405,6 +439,9 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 		}
 		if suffix[j] > allowed {
 			continue
+		}
+		if j < minWire {
+			continue // the wall cannot hold a tail this heavy
 		}
 		if !floors(j) || !userTurnsOK(j) {
 			continue
@@ -430,6 +467,9 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 		}
 		if suffix[j] > allowed {
 			continue
+		}
+		if j < minWire {
+			continue // the wall cannot hold a tail this heavy
 		}
 		if !floors(j) {
 			continue

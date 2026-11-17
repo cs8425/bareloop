@@ -211,3 +211,78 @@ func TestFloorCutRoundsOutward(t *testing.T) {
 		t.Errorf("no legal boundary that far back: cut = %d, want -1", got)
 	}
 }
+
+// TestTheByteBoundOnlyPushesTheCutDeeper is the wall's only entry into the plan, and these cases pin
+// what it can and cannot do. The budget speaks tokens, the wall speaks bytes, and the two disagree
+// loudest on images — a few hundred tokens for several megabytes — so a path of screenshots can be
+// inside its token budget while over its ceiling. MaxWireBytes may then push the cut deeper; it may
+// not pull one shallower, and it never outranks a floor. selPath's entries are identical, so the
+// numbers below are read out of the size table rather than written by hand.
+func TestTheByteBoundOnlyPushesTheCutDeeper(t *testing.T) {
+	path := selPath()
+	sizes := selSizes(path)
+	pre := sizes.WirePrefixes()
+	n := len(path)
+	kept := func(j int) int { return pre[n] - pre[j] }
+
+	// The token answer for this path: a 250-token tail cap and no floors past minSummarizeTokens.
+	tok := Params{ThresholdPct: 65, KeepBudgetPct: intp(25), MinSummarizeTokens: 50}
+	if plan, ok := Select(path, sizes, selNCtx, tok); !ok || plan.Cut != 2 {
+		t.Fatalf("control: token-only cut = %d (ok %v, reason %q), want 2", plan.Cut, ok, plan.Reason)
+	}
+
+	cases := []struct {
+		maxWire int
+		cut     int
+		empty   bool
+		what    string
+	}{
+		{0, 2, false, "no ceiling known: bytes have no vote and the token answer stands"},
+		{1 << 30, 2, false, "a wall with room to spare does not move the token answer"},
+		{kept(2), 2, false, "a tail weighing exactly the budget fits: the bound is over, not at-or-over"},
+		{kept(2) - 1, 3, false, "one byte over and the cut goes a position deeper"},
+		{kept(3) - 1, 4, true, "a wall nothing but an empty tail can hold compact everything"},
+		{1, n, true, "a wall no message can cross is still a cut, not a refusal"},
+	}
+	for _, c := range cases {
+		p := tok
+		p.MaxWireBytes = c.maxWire
+		plan, ok := Select(path, sizes, selNCtx, p)
+		if !ok || plan.Cut != c.cut || plan.Empty != c.empty {
+			t.Errorf("%s: cut = %d empty = %v (ok %v, reason %q), want cut %d empty %v",
+				c.what, plan.Cut, plan.Empty, ok, plan.Reason, c.cut, c.empty)
+		}
+		if ok && plan.Cut < 2 {
+			t.Errorf("%s: the byte bound pulled the cut shallower than the token answer, which it may not do", c.what)
+		}
+	}
+}
+
+// TestAFloorStillOutranksTheByteBound pins the other half of the bargain: the wall asks for a deeper
+// cut, but MinKeptMessages is the user saying how little raw history they will accept, and a request
+// that cannot be made to fit without breaking that still has to answer with the floors' refusal
+// rather than quietly trading the floor for bytes.
+func TestAFloorStillOutranksTheByteBound(t *testing.T) {
+	path := selPath()
+	sizes := selSizes(path)
+	pre := sizes.WirePrefixes()
+	n := len(path)
+
+	p := Params{ThresholdPct: 65, KeepBudgetPct: intp(25), MinSummarizeTokens: 50, MinKeptMessages: 3}
+	// Control: without the wall this path compacts at the floor's own answer — the floor raises the tail
+	// cap to the cost of three entries, and the search takes the shallowest legal cut that fits it, so the
+	// boundary sits at 1. Whatever the case below then refuses can only be refused by the floor meeting
+	// the wall, not by the floor alone.
+	if plan, ok := Select(path, sizes, selNCtx, p); !ok || plan.Cut != 1 {
+		t.Fatalf("control: floor 3 without a wall should cut at 1, got %d (ok %v, reason %q)",
+			plan.Cut, ok, plan.Reason)
+	}
+	p.MaxWireBytes = pre[n] - pre[n-1] - 1 // fits only if the tail is emptied, which floor 3 forbids
+	plan, ok := Select(path, sizes, selNCtx, p)
+	if ok {
+		t.Fatalf("a floor of 3 was walked past to satisfy bytes: cut = %d empty = %v", plan.Cut, plan.Empty)
+	}
+	if plan.Reason != ReasonNoBoundary {
+		t.Fatalf("refusal should come from the floors, got reason %q", plan.Reason)
+	}
+}

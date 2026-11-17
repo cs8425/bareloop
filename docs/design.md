@@ -140,6 +140,57 @@ false` and `compact.inLoop: false` still refuse and say what to do instead; and 
 `status.contextUsed` reports `0` / `contextKnown: false` until the next successful turn, because there is
 no measurement yet and pretending otherwise would drive the trigger off a guess.
 
+## The body wall (413)
+
+The window is not the only ceiling. `llm.maxRequestBodyBytes` bounds the **bytes** of a request, and a
+server that hits it answers `413` before it has read a single token — so no prompt count, nobody's
+estimate, predicts the refusal, and the repair is a different arithmetic. 32 MB of screenshot is 32 MB
+however few tokens the text around it is worth.
+
+The effective ceiling is the same expression as the window's — the smaller of the values that exist:
+config when it is the only number, a refusal when it was lower (a body the server sent back is
+evidence, and honouring a claim over it means tripping the same wall again and again). It is runtime
+state: never written back to config, and forgotten when the endpoint changes, because a wall measured
+against one server says nothing about the next.
+
+What the number is used for is the one request that has to survive: the summary. It reads the whole
+path, which makes it about as big as the conversation nobody can send — so before this, an oversized
+session could not be rescued, because the rescue request was refused too. The question is now cut to
+fit **before** it goes out, from the near end: the summariser stops being shown the newest entries
+rather than the oldest, because `asked` is a prefix and a prefix is what the cache affinity rests on —
+and because those newest entries are the kept tail, which survives the compaction verbatim anyway. The
+floor is the cut: a summariser may read less of the path than the round replaces, but not less than
+the region it is writing down.
+
+And a request measured over the wall with nothing left to cut is **not sent**. The size is known
+exactly, so three attempts would be three uploads of the same refused bytes; the round ends with both
+numbers in its skip reason instead (`the narrowest summary this round can ask is 13.2 KB and this
+endpoint takes 8.0 KB: raise llm.maxRequestBodyBytes…`).
+
+The turn's own request is handled from the other two ends. A `413` that did happen is a **measurement**:
+the transport knows exactly how many bytes it wrote, so the refusal moves the ceiling on the spot, and the
+loop turns the dead end into a sentence with numbers in it (`request body (119.4 MB) is over this
+endpoint's limit…`) rather than a run that cannot start. And a request already over the wall is not
+uploaded in order to find out: the pre-send check beside `guardFit` compares the path's wire estimate plus
+the measured skeleton against the ceiling and spends one forced compaction while there is still something
+to win. It acts at ninety percent of the wall, for two reasons that were seen in one sentence: the estimate
+reads low (0.001% on a path of nothing but images, several percent once tool results start quoting text),
+and a refusal sets the ceiling to the size it refused — which is a size the endpoint has already sent back.
+A bare comparison therefore lets the same-shaped request estimate a few bytes under a ceiling it is going
+to breach, upload it, and be refused again with the guard never once firing. It stops there — it does not
+refuse the send. That ruler is an estimate, and an estimate is trusted
+with *where to cut*, not with *whether it fits*; refusing on a residual of 8% would invent a way for a
+session to fail at a size it could have shipped, to save one round trip.
+
+The ceiling is a bound on where the cut lands as well as on whether the send happens: the planner caps
+the kept tail in bytes too, and only ever in the direction of cutting deeper. It has to, because the two
+rulers disagree about images by two orders of magnitude — an entry is a few hundred tokens and several
+megabytes — so a path of screenshots sits inside a twentieth-of-the-window token budget while weighing
+twice the ceiling, and a plan made by tokens alone replaces two entries and then sends 117 MB anyway and
+is refused again. Bytes raise the floor under the cut and never the roof over it, and the floors a user
+sets outrank them: when the tail `minKeptMessages` demands cannot be held by the wall, the turn ships and
+is refused, which is the honest report of a conflict no planner can settle.
+
 **Where a size comes from.** A server counts one request, never one message, so a message's own cost is
 only ever a difference: the prompt of the next counted request, less the answer in between, less the
 prompt before. `asm.Stamp` walks the path in the order the requests were actually made, does that

@@ -130,6 +130,13 @@ type Config struct {
 	Headers map[string]string `json:"headers"`
 	// NCTX is the model context window; 0 = ask the server / unknown.
 	NCTX int `json:"nCtx"`
+	// MaxBodyBytes is the largest request body this endpoint takes: the operator's llama.cpp -bs, or
+	// the proxy's client_max_body_size, or the server box's default. It is a byte wall and not a token
+	// wall — a server that hits it answers 413 before it has read a single token — so no window size
+	// predicts it and nothing in the conversation does either: 32 MB of screenshot is 32 MB however
+	// few tokens the text around it is worth. 0 = nobody said, so the number has to be learned from a
+	// refusal (see agent's maxbytes.go), and until it is learned nothing can be cut in advance.
+	MaxBodyBytes int `json:"maxRequestBodyBytes,omitempty"`
 	// Path overrides the endpoint path (default /chat/completions).
 	Path string `json:"path"`
 	// InsecureTLS skips certificate verification for this endpoint. It is a pointer so the three
@@ -176,7 +183,7 @@ type Config struct {
 // out "false" does not rebuild a provider and does not warn about a KV cache nothing changed.
 func (c Config) Same(o Config) bool {
 	if c.Kind != o.Kind || c.BaseURL != o.BaseURL || c.APIKey != o.APIKey || c.Model != o.Model ||
-		c.Path != o.Path || c.NCTX != o.NCTX {
+		c.Path != o.Path || c.NCTX != o.NCTX || c.MaxBodyBytes != o.MaxBodyBytes {
 		return false
 	}
 	if a, b := c.Policy(), o.Policy(); a.Insecure() != b.Insecure() || a.CAFile != b.CAFile || a.Proxy != b.Proxy {
