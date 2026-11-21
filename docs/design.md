@@ -182,14 +182,26 @@ refuse the send. That ruler is an estimate, and an estimate is trusted
 with *where to cut*, not with *whether it fits*; refusing on a residual of 8% would invent a way for a
 session to fail at a size it could have shipped, to save one round trip.
 
-The ceiling is a bound on where the cut lands as well as on whether the send happens: the planner caps
-the kept tail in bytes too, and only ever in the direction of cutting deeper. It has to, because the two
-rulers disagree about images by two orders of magnitude — an entry is a few hundred tokens and several
-megabytes — so a path of screenshots sits inside a twentieth-of-the-window token budget while weighing
-twice the ceiling, and a plan made by tokens alone replaces two entries and then sends 117 MB anyway and
-is refused again. Bytes raise the floor under the cut and never the roof over it, and the floors a user
-sets outrank them: when the tail `minKeptMessages` demands cannot be held by the wall, the turn ships and
-is refused, which is the honest report of a conflict no planner can settle.
+The ceiling is a bound on where the cut lands as well as on whether the send happens — and which ruler
+bounds it depends on how the ceiling was arrived at. The two rulers disagree about images by two orders
+of magnitude — an entry is a few hundred tokens and several megabytes — so a path of screenshots sits
+inside a twentieth-of-the-window token budget while weighing twice the ceiling, and a plan priced by
+tokens alone replaces two entries, sends 117 MB anyway, and is refused again.
+
+While the wall is **predicted** — by the pre-send guard, and by every round the window starts — bytes
+only veto: they raise the floor under the cut and never the roof over it, because there the byte count is
+a guess about a number nobody has measured, and the rule about guesses applies.
+
+Once the wall is **measured**, that round pays in its own currency. A refusal is the endpoint answering
+in the unit the payload is counted in, so the kept tail is capped at `keepBudget%` of what the path
+actually weighs rather than of the window: keep a fifth of what you have, not as much as the ceiling
+happens to admit. The point is margin. The shallowest position a wall will fit is a cut with no headroom
+in it — the next turn grows and trips the same refusal — while the byte cap cuts once and lands clear,
+which is what the resend budget is for. Nothing else moves: the phases still prefer a user boundary, the
+floors a user set still outrank the cap, and when `minKeptMessages` asks for a tail the cap cannot hold
+the round says so rather than quietly widening it. `Plan` carries both readings (`wireBudget`,
+`keptWire`) and the log names the currency in use ("this round sizes the kept tail in bytes — 21.5 MB of
+the 107.5 MB the path weighs"), because the same numbers mean opposite things under the two rulers.
 
 **Where a size comes from.** A server counts one request, never one message, so a message's own cost is
 only ever a difference: the prompt of the next counted request, less the answer in between, less the

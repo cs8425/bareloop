@@ -37,7 +37,13 @@ type CompactResult struct {
 	Replaced   int  `json:"replaced,omitempty"`
 	Summarized int  `json:"summarizeTokens,omitempty"`
 	Kept       int  `json:"keptTokens,omitempty"`
-	Attempts   int  `json:"attempts,omitempty"`
+	// KeptWire is what the kept tail weighs, and WireBudget the byte cap the cut was graded against.
+	// WireBudget is 0 whenever the token cap did the work, so a non-zero one is the mark of a round the
+	// wall itself planned — and KeptWire is the column that shows whether the cut bought headroom or only
+	// cleared the floor by a few megabytes.
+	KeptWire   int `json:"keptWire,omitempty"`
+	WireBudget int `json:"wireBudget,omitempty"`
+	Attempts   int `json:"attempts,omitempty"`
 	// SummaryUsage is every summariser call this compaction made, failures included —
 	// the line items behind the committed entry's usage total, and the whole record for a
 	// round that committed nothing (a stop has no entry to attach a bill to).
@@ -58,9 +64,27 @@ type CompactResult struct {
 	Rounds int `json:"rounds,omitempty"`
 }
 
+// byteRound is the option that grades a round's kept tail in BYTES instead of tokens. Only the 413 rescue
+// passes it, because that is the one place the wall is a measurement rather than a prediction: the unit
+// that failed is the unit the plan has to answer in (compact.Params.WireBudgetBytes). The pre-send guard
+// acts on the same wall without it — reaching 90% of a ceiling is not the same claim as being refused by
+// it, and a byte cap sized from the path is far more aggressive than the token cap it replaces.
+type byteRound bool
+
+const planInBytes = byteRound(true)
+
+func wantsBytes(opts []byteRound) bool {
+	for _, o := range opts {
+		if o {
+			return true
+		}
+	}
+	return false
+}
+
 // compactHere is the entry point used by the loop (T1/T2) and by the pre-send guard.
 // It performs the cheap checks that keep the caller from taking the lock at all.
-func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force bool) CompactResult {
+func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force bool, opts ...byteRound) CompactResult {
 	cfg := s.Config()
 	manual := trig == compact.TriggerManual
 	res := CompactResult{Trigger: trig, Manual: manual}
@@ -105,7 +129,7 @@ func (s *Session) compactHere(ctx context.Context, trig compact.Trigger, force b
 			return res
 		}
 	}
-	return s.doCompact(ctx, trig, manual, "")
+	return s.doCompact(ctx, trig, manual, "", opts...)
 }
 
 // CompactNow is trigger T3: the user pressed the button. Manual compaction bypasses the
@@ -239,7 +263,7 @@ func (s *Session) leaveCompaction() {
 }
 
 // doCompact wraps runCompact with the lock.
-func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string) CompactResult {
+func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string, opts ...byteRound) CompactResult {
 	if !s.enterCompaction() {
 		r := CompactResult{Trigger: trig, Manual: manual}
 		r.Skipped = string(compact.ReasonAlreadyActive)
@@ -247,7 +271,7 @@ func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual bo
 		return r
 	}
 	defer s.leaveCompaction()
-	return s.runCompact(ctx, trig, manual, instruction)
+	return s.runCompact(ctx, trig, manual, instruction, opts...)
 }
 
 // runCompact is the whole compaction run: plan, summarise, gate, commit — replayed until the
@@ -265,11 +289,11 @@ func (s *Session) doCompact(ctx context.Context, trig compact.Trigger, manual bo
 // as if it were the only one. A gate skip aborts the whole replay: the rounds already committed are
 // real compactions and stay, which is what a stop mid-catch-up meant in the one-message-at-a-time
 // world this replays.
-func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string) CompactResult {
+func (s *Session) runCompact(ctx context.Context, trig compact.Trigger, manual bool, instruction string, opts ...byteRound) CompactResult {
 	res := CompactResult{Trigger: trig, Manual: manual}
 	for round := 1; ; round++ {
 		var more bool
-		res, more = s.compactOnce(ctx, trig, manual, instruction, round, res)
+		res, more = s.compactOnce(ctx, trig, manual, instruction, round, wantsBytes(opts), res)
 		if !more {
 			return res
 		}
@@ -286,15 +310,20 @@ const maxReplayRounds = 100
 // is still over the line, commitRound). res carries across rounds and the report aggregates: the
 // per-round fields describe the last round, SummaryUsage is every round's bill — while each
 // committed entry carries only what its own round spent, never the run's running total.
-func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual bool, instruction string, round int, res CompactResult) (CompactResult, bool) {
+func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual bool, instruction string, round int, wire bool, res CompactResult) (CompactResult, bool) {
 	cfg := s.Config()
 	p := cfg.Compact
-	// The body ceiling gets a vote on where the cut lands, and only in the direction of cutting deeper
-	// (compact.Params.MaxWireBytes). Without it a path of images is planned as if history were free in
-	// bytes: the token budget happily keeps twenty-five screenshots because they are twelve thousand
-	// tokens, while the endpoint refuses the request they serialize into, and every turn then pays a
-	// compaction that could not have rescued it. Derived from the session's ceiling rather than the
-	// config because the ceiling is half learned — it is a measured refusal most of the time.
+	// The body ceiling gets a vote on where the cut lands, and outside a 413 round only in the direction
+	// of cutting deeper (compact.Params.MaxWireBytes). Without it a path of images is planned as if
+	// history were free in bytes: the token budget happily keeps twenty-five screenshots because they are
+	// twelve thousand tokens, while the endpoint refuses the request they serialize into, and every turn
+	// then pays a compaction that could not have rescued it. Derived from the session's ceiling rather
+	// than the config because the ceiling is half learned — it is a measured refusal most of the time.
+	//
+	// A round the wall actually refused (wire) does not stop there: it moves the ceiling from a veto into
+	// the cap itself, sized from the bytes the path weighs (see below), because "the shallowest cut that
+	// still fits" leaves no headroom for a turn that is still growing — measured: three compactions in
+	// ninety seconds, the request parked at 95 MB against a 102 MB wall the whole time.
 	p.MaxWireBytes = s.keptWireBudget()
 
 	// Planning input = assembler input: both come out of the single choke point (§3.2).
@@ -308,6 +337,18 @@ func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual 
 		return res, false
 	}
 	region := built.Entries
+	// The cap swap, for the round a measured wall refused: the kept tail is then graded against a fifth
+	// of what the path weighs instead of a fifth of the window. Both numbers are the same percentage of
+	// "what there is to keep", which is the whole point — the token one is meaningless when the thing that
+	// just failed was a byte count, and the two disagree by four orders of magnitude on a path of images
+	// (an entry the provider bills at 505 tokens can carry 3.7 MB of base64).
+	if wire {
+		if pct := p.KeepPct(); pct > 0 {
+			p.WireBudgetBytes = sizes.WireTotal() * pct / 100
+			s.logf("compaction: this round sizes the kept tail in bytes — %s of the %s the path weighs (keepBudget %d%%), because the wall was measured and not predicted",
+				humanBytes(p.WireBudgetBytes), humanBytes(sizes.WireTotal()), pct)
+		}
+	}
 	nctx := s.nctxLocked()
 	res.Model = cfg.LLM.Model
 	if nctx <= 0 {
@@ -346,6 +387,8 @@ func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual 
 		res.Replaced = plan.Replaced
 		res.Summarized = plan.SummarizeTokens
 		res.Kept = plan.KeptTokens
+		res.KeptWire = plan.KeptWire
+		res.WireBudget = plan.WireBudget
 		res.Split = plan.Split
 		res.Empty = plan.Empty
 		if plan.BoundaryID != nil {
@@ -365,6 +408,13 @@ func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual 
 		// instead of the floor they set.
 		s.logf("compaction (%s): kept tail %d tokens over its %d-token budget (minKeptMessages %d wins over the cap)",
 			trig, plan.KeptTokens, plan.Budget, p.MinKeptMessages)
+	}
+	if plan.WireBudget > 0 && plan.KeptWire > plan.WireBudget {
+		// The same honesty in the other currency: a byte cap can be overruled by the floors too, and a
+		// reader who then compares the tail with the byte number in the log line above finds no
+		// configuration that explains it.
+		s.logf("compaction (%s): kept tail %s over its %s byte cap (minKeptMessages %d wins over the cap)",
+			trig, humanBytes(plan.KeptWire), humanBytes(plan.WireBudget), p.MinKeptMessages)
 	}
 
 	// The summary request is cut from the last payload actually sent (§5.2), because that is the byte

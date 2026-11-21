@@ -247,7 +247,7 @@ default:
 | `compact.summaryScope` | absent = `path` — the summary request reaches the end of the round's own path, so the summary is written with the surviving tail in front of the summariser and that tail is then kept verbatim beside it: two accounts of one stretch, on purpose | `"region"` stops the request at the cut (the rule that ran from 2026-11-11 to 2026-11-17, kept spellable because it is cheap to ask for). Either way the key moves only what gets *read*: the boundary, and therefore what a compaction replaces, is untouched |
 | `compact.threshold` `summaryCap` `minSummarizeTokens` | `0`, negative or absent = the default (70 / 70 / 2000) — 0 here would be a budget of nothing, which is not an answer anyone means | `> 0`: percentages of `n_ctx`, and a token count for `minSummarizeTokens`. `summaryCap` is the summary's one number: max_tokens of its request and the limit its answer is graded against (the old `keepTarget` and `summaryMax` keys, folded into one; neither is read anymore) |
 | `compact.minKeptUserTurns` `minKeptMessages` | **`0` is a real answer = no floor**, and an omitted key decodes to that 0 — so the 4 that a *new* session starts with is not reachable by leaving the key out | `> 0` is the floor; a negative clamps to 0, never to the shipped default |
-| `compact.keepBudget` | absent = 20 (the tail's share of `n_ctx` — set apart from `summaryCap` so tightening the summary no longer resizes the tail); **an explicit `0` is a real answer = keep nothing but the summary**, the same floor rule as the two above | `> 0`: the percentage of `n_ctx` the kept tail may occupy; a negative clamps to 0 |
+| `compact.keepBudget` | absent = 20 (the tail's share of `n_ctx` — set apart from `summaryCap` so tightening the summary no longer resizes the tail); **an explicit `0` is a real answer = keep nothing but the summary**, the same floor rule as the two above | `> 0`: the percentage of `n_ctx` the kept tail may occupy; a negative clamps to 0. One round is priced in another currency: the round that fires because the endpoint refused a `413` takes that percentage of **what the path actually weighs in bytes**, not of the window, so the rescue lands clear instead of merely fitting ([the body wall](docs/design.md#the-body-wall-413)) |
 | `compact.maxAttempts` | `0` or absent = 3 tries for one summary | `> 0` tries; **a negative keeps trying until the summary fits** |
 | `asm.sendReasoning` | absent = **on** (assistant `reasoning_content` is re-sent) | `false` turns it off |
 | `asm.sendImages` | absent = **on** (images go as `image_url` data URLs) | `false` sends one line about the image instead of its bytes |
@@ -259,11 +259,21 @@ default:
 | `llm.caFile` | absent = the system trust store | a PEM bundle to verify against — and the only thing it is verified against |
 | `proxy` | absent = what the environment says (`HTTP_PROXY`, `NO_PROXY`) | `socks5://`, `socks5h://`, `http://` or `https://` — this session's answer for every endpoint that names none; `direct` means no proxy at all. An endpoint's own `proxy` wins over it ([through a proxy](#reaching-an-endpoint-through-a-proxy)) |
 | `llm.proxy` | absent = the session's `proxy` | the same address, for this one endpoint |
+| `llm.maxRequestBodyBytes` | absent or `0` = **no byte ceiling of ours**: nothing is held back before the send, and the first `413` teaches the endpoint its real limit | any byte count. What the guard uses is the smaller of this and what a refusal measured; it acts at ninety percent of that, and it never refuses a send on the estimate alone. The learned half is runtime state — not written back, and forgotten when the endpoint changes — so `status.bodyCeiling` / `bodyCeilingSource` are where you see which number is in charge ([the body wall](docs/design.md#the-body-wall-413)) |
 
 `llm.nCtx` is a ceiling you set, not a fact about the server: the number used is the smaller of it and
 what the server reports, and `status.nCtx` / `nCtxSource` tell you which won. Leave it unset and the
 server is asked; if neither knows, compaction stays off until you fill it in
 ([the five cases](docs/design.md#the-context-window)).
+
+The byte wall is the same shape with the other ruler, and it matters most where the first ruler goes
+blind: a `413` arrives before a token is counted, so no prompt estimate predicts it, and 32 MB of
+screenshot is 32 MB however few tokens the text around it is worth. While the ceiling is only what config
+claims or what an estimate says, bytes may **veto** a cut and never enlarge one. Once a refusal has
+**measured** the wall, the round it triggers switches currency — the kept tail gets `keepBudget%` of what
+the path actually weighs, because the shallowest position a wall will fit is a cut with no headroom in it
+and the next turn trips the same refusal. The floors a user set still outrank that cap, and say so when
+they do ([the body wall](docs/design.md#the-body-wall-413)).
 
 ### Reaching an endpoint no trust store knows
 
@@ -603,7 +613,9 @@ A turn is folded away when `contextUsed > n_ctx × threshold%`: everything befor
 that fits `keepBudget%` of the window becomes one summary message. The kept tail is that
 budget or the newest `minKeptMessages` messages, whichever is greater, rounded outward so the cut never
 lands inside a tool span, and `minKeptUserTurns` — how many whole user turns it should prefer to hold —
-is held when a boundary can hold it and given up by moving the cut inside a turn when none can. The old
+is held when a boundary can hold it and given up by moving the cut inside a turn when none can. One round
+is priced differently, in bytes of the path rather than tokens of the window: the one that fires because
+the endpoint refused a `413` ([the body wall](docs/design.md#the-body-wall-413)). The old
 branch stays in the log, so a compaction can be undone by moving the tip back. Failures fall open - the
 worst case is a session that keeps more context, never one that loses it
 ([details](docs/design.md#compaction-in-one-paragraph)).

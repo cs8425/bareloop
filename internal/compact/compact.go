@@ -94,8 +94,25 @@ type Params struct {
 	// why it is a candidate filter and not a rewrite of the token cap: it is a different unit, and the
 	// floors have to stay able to overrule it. A tail the floors demand that the wall cannot hold is a
 	// real refusal — the turn ships and is refused — and folding bytes into allowed would trade the floor
-	// away instead of reporting the conflict.
+	// away instead of reporting the conflict. The exception is the round the wall actually refused
+	// (WireBudgetBytes below): there the byte rule is not a second opinion on a token plan, it is the
+	// subject of the question, and a cap that only vetoes left every later turn parked just under the
+	// wall, compacting again on the next image.
 	MaxWireBytes int `json:"-"`
+	// WireBudgetBytes grades the kept tail in BYTES instead of tokens: when it is set, the search below
+	// asks "does the tail weigh at most this" rather than "does the tail cost at most keepBudget% of the
+	// window". It is the 413 rescue's unit — the failure arrived in bytes, so 20% of an 81,920-token
+	// window is not an answer to it: that budget happily keeps twenty-three screenshots (twelve thousand
+	// tokens, 135 MB) the endpoint has just refused, and the round then buys back a few megabytes per
+	// summary while the turn keeps growing. The caller sizes it from the path itself (the bytes it
+	// weighs now, times keepBudget%) so the same percentage means the same thing in either currency:
+	// keep a fifth of what you have. Zero leaves the token planner untouched.
+	//
+	// what does NOT change with it: the phases, the preference for the shallowest legal user boundary,
+	// and the floors — MinKeptMessages raises this cap outward exactly as it raises the token one, while
+	// MinSummarizeTokens stays in tokens because whether a summary call is worth making is a question
+	// about the summary, not about the wall.
+	WireBudgetBytes int `json:"-"`
 
 	// KeepBudgetPct is the cap on the kept tail as a share of n_ctx. It stands apart from
 	// summaryCap on purpose: how short the summariser must write and how much raw history the
@@ -252,6 +269,21 @@ func (p Params) Budget(nctx int) int {
 	return nctx * pct / 100
 }
 
+// KeepPct is the kept-tail percentage on its own, for a caller that applies it to something other than
+// n_ctx: the 413 rescue applies it to the bytes the path weighs, because that is the quantity that just
+// failed (Params.WireBudgetBytes). Same nil-means-default and same clamp-to-0 as Budget, so "keep 0%" is
+// the same legal answer in both currencies.
+func (p Params) KeepPct() int {
+	pct := defaultKeepBudgetPct
+	if p.KeepBudgetPct != nil {
+		pct = *p.KeepBudgetPct
+	}
+	if pct < 0 {
+		return 0
+	}
+	return pct
+}
+
 // SummaryCap is the summary's number: summaryCap% × n_ctx. It is both the acceptance limit
 // for the finished summary (§3.4) and max_tokens of the call that writes it (§3.5) — one
 // number, because a request should not be graded against a limit other than the one it was
@@ -333,8 +365,14 @@ type Plan struct {
 	KeptTokens      int
 	// KeptUserTurns counts user messages in the kept region.
 	KeptUserTurns int
-	// Budget is the value the cut had to fit.
+	// Budget is the value the cut had to fit — tokens, unless the round was planned in bytes, in which
+	// case it still reports the token cap and WireBudget carries the one that bound the cut.
 	Budget int
+	// WireBudget is the byte cap the cut had to fit, 0 when the token cap decided it.
+	WireBudget int `json:"wireBudget,omitempty"`
+	// KeptWire is what the kept tail weighs, reported in every mode: it is the number a byte refusal was
+	// about, and the one column that shows whether a cut actually bought headroom.
+	KeptWire int `json:"keptWire,omitempty"`
 	// Replaced is the number of entries the summary replaces.
 	Replaced int
 	// Reason is empty when the plan is usable.
@@ -403,21 +441,52 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 
 	// The byte bound, when there is one, is a floor on how deep the cut may be — and because both
 	// searches below take the first candidate that passes, it is enough to know the shallowest position
-	// whose kept tail is light enough and refuse anything before it. WirePrefixes is indexed by position
-	// like the path, so the tail is the difference of two prefix sums; clamped to len(path) because the
-	// planning path may be shorter than the table it was sized from. j == n is the end of the walk and
+	// whose kept tail is light enough and refuse anything before it. j == n is the end of the walk and
 	// weighs nothing, so the bound always has a legal answer and cannot on its own produce "no boundary":
 	// when a cut deep enough is refused it is a floor doing it, which is the refusal the reader can act on.
+	//
+	// The wire prefixes are walked once, for both byte rules: WirePrefixes is indexed by position like the
+	// path, so a tail is the difference of two prefix sums, and the table is clamped to its own length
+	// because the planning path may be shorter than the payload it was sized from — past the end of the
+	// table a tail weighs nothing, which is also where the walk below stops by itself (a difference of 0
+	// never exceeds a bound), so no index here can run off the slice.
+	pre := sizes.WirePrefixes()
+	keep := n
+	if len(pre)-1 < keep {
+		keep = len(pre) - 1
+	}
+	tailWire := func(j int) int {
+		if j >= keep {
+			return 0
+		}
+		return pre[keep] - pre[j]
+	}
+
 	minWire := 0
 	if p.MaxWireBytes > 0 {
-		pre := sizes.WirePrefixes()
-		keep := n
-		if len(pre)-1 < keep {
-			keep = len(pre) - 1
-		}
-		for minWire < n && pre[keep]-pre[minWire] > p.MaxWireBytes {
+		for minWire < n && tailWire(minWire) > p.MaxWireBytes {
 			minWire++
 		}
+	}
+
+	// The cap swap: on a round a measured wall asked for, the kept tail is graded in bytes. Everything
+	// else about the search is untouched — same phases, same shallowest-legal preference, same floors.
+	byteCap := p.WireBudgetBytes > 0
+	allowedWire := p.WireBudgetBytes
+	if byteCap && p.MinKeptMessages > 0 && p.MinKeptMessages < n {
+		if j := floorCut(path, p.MinKeptMessages); j >= 0 && tailWire(j) > allowedWire {
+			allowedWire = tailWire(j) // the floor raises this cap outward too, never inward
+		}
+	}
+	overCap := func(j int) bool {
+		if byteCap {
+			return tailWire(j) > allowedWire
+		}
+		return suffix[j] > allowed
+	}
+	wireBudget := 0
+	if byteCap {
+		wireBudget = allowedWire
 	}
 	userTurnsOK := func(j int) bool {
 		if p.MinKeptUserTurns <= 0 {
@@ -437,7 +506,7 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 		if roleOf(path[j]) != "user" {
 			continue
 		}
-		if suffix[j] > allowed {
+		if overCap(j) {
 			continue
 		}
 		if j < minWire {
@@ -451,7 +520,7 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 			Cut: j, BoundaryID: &id,
 			SummarizeTokens: total - suffix[j], KeptTokens: suffix[j],
 			KeptUserTurns: countUsers(path[j:]),
-			Budget:        budget, Replaced: j,
+			Budget:        budget, WireBudget: wireBudget, KeptWire: tailWire(j), Replaced: j,
 		}, true
 	}
 
@@ -465,7 +534,7 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 		if j < n && !legalBoundary(path[j]) {
 			continue
 		}
-		if suffix[j] > allowed {
+		if overCap(j) {
 			continue
 		}
 		if j < minWire {
@@ -478,7 +547,7 @@ func Select(path []*ir.Entry, sizes *asm.Sizes, nctx int, p Params) (*Plan, bool
 			Cut: j, Split: j == n || roleOf(path[j]) != "user", Empty: j == n,
 			SummarizeTokens: total - suffix[j], KeptTokens: suffix[j],
 			KeptUserTurns: countUsers(path[j:]),
-			Budget:        budget, Replaced: j,
+			Budget:        budget, WireBudget: wireBudget, KeptWire: tailWire(j), Replaced: j,
 		}
 		if j < n {
 			// why minKeptUserTurns is not checked again here: the floor is a rule about turn boundaries

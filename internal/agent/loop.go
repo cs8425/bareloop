@@ -600,7 +600,10 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			if sent > 0 {
 				sentText = humanBytes(sent)
 			}
-			res := s.compactHere(ctx, compact.TriggerInLoop, true)
+			// The only round that plans in bytes: the endpoint refused this request by its size, so the wall
+			// is a measurement here and the cap on the kept tail moves into that unit (Params.WireBudgetBytes).
+			// The pre-send guard above deliberately does not do this — it acts at 90% of a prediction.
+			res := s.compactHere(ctx, compact.TriggerInLoop, true, planInBytes)
 			if res.Committed {
 				s.emit(Event{Type: EvtCompact, Data: res})
 				// The window branch above ends the run and asks the reader to send again, and that is the
