@@ -592,14 +592,21 @@ and what the process holds is one timer, the messages that arrive meanwhile, and
 wake the daemon had to produce for itself.
 
 Nothing new is written for the handover, which is what makes it worth doing: the moment a wait is due is
-recomputable from the call's own arguments and the timestamp of the entry that carries it. So `recoverPark` can
+recomputable from the call's own arguments plus the timestamp of the entry that carries it — and, for a
+`duration` written as a range (`"10m..25m"`), from the call's **id** as well, because that is what its length was
+drawn from. The id rather than the clock, since a few milliseconds are enough to change a draw and the moment the
+entry was written is not the moment the call read the time. So `recoverPark` can
 walk the log when a session is opened, find the call still waiting, and rearm the timer for whatever is left —
 **continuing** the wait rather than restarting it — and it never cares what the process that died was doing
 with that wait, sleeping a short one in a goroutine or holding a long one on a timer, because it reads nothing
 but the log. The anchor for "when was this asked" is that entry timestamp, handed back to the tool as
 `builtin.Input.ResumeCalledAt`; without it a resumed wait would count a fresh interval from the wall clock and
-every restart would push the promise further out. The answer it eventually writes says the daemon was not
-running, because that is a fact about the wait the model has to be told rather than invited to infer. A wait is
+every restart would push the promise further out. The answer says what it did in three fields a reader can check
+against each other: `scheduled_at` is the moment that was promised, `resumed_at` the one the tool woke to, and
+`duration` the length that was drawn when the call asked for a range rather than a number — written nowhere else,
+so without it a ranged wait would be a promise the log could not audit. The answer it eventually writes says the
+daemon was not running, because that is a fact about the wait the model has to be told rather than invited to
+infer. A wait is
 therefore the part of this that survives a restart; the messages held in front of it are the part that does
 not, and that is the same asymmetry seen from the other end.
 

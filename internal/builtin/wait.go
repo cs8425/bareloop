@@ -2,10 +2,13 @@ package builtin
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,8 +26,10 @@ func waitTool() Tool {
 		Name: "wait",
 		Description: "Pause the agent loop and resume it after the specified duration or at the " +
 			"specified time. Nothing is sent to the model while it waits; the result of this call is " +
-			"what the resumed turn sees.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration":{"type":"string","description":"Relative duration, e.g. 5m, 30s, 2h, 1h30m; a bare number is seconds"},"until":{"type":"string","description":"Absolute RFC3339 timestamp with timezone, e.g. 2026-11-01T22:25:00+08:00; one without an offset is read in this session's default timezone"}},"additionalProperties":false}`),
+			"what the resumed turn sees. A duration may also be a range (\"10m..25m\"), whose length is " +
+			"drawn once when the call is made and reported back as duration — the wait does not re-draw " +
+			"itself when a daemon answers it after a restart.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration":{"type":"string","description":"Relative duration, e.g. 5m, 30s, 2h, 1h30m; a bare number is seconds. A range like 10m..25m draws one length from inside it, inclusive of both ends"},"until":{"type":"string","description":"Absolute RFC3339 timestamp with timezone, e.g. 2026-11-01T22:25:00+08:00; one without an offset is read in this session's default timezone"}},"additionalProperties":false}`),
 		Run:         runWait,
 	}
 }
@@ -43,6 +48,11 @@ type waitResult struct {
 	Status      string `json:"status"`
 	ScheduledAt string `json:"scheduled_at"`
 	ResumedAt   string `json:"resumed_at"`
+	// Duration is how long this wait was: from the moment it was asked to the moment it came due. It is
+	// always present because the one case that needs it — a range, whose length the caller did not choose
+	// — has no other place the model can read what it got, and an answer that appears only sometimes is a
+	// shape the reader has to branch on. For a wait that arrived after its moment it reads 0s.
+	Duration string `json:"duration"`
 	// Reason names who ended the wait, and it is only ever there when it was a person: a bare
 	// "interrupted" cannot tell "somebody stopped this" from "this ended early and you should try
 	// again", and the two call for opposite next moves. Stop() has nobody's message after it, so it
@@ -58,7 +68,12 @@ type waitResult struct {
 // why it is given the timestamp of the entry that carries the call rather than reading a clock: six
 // hours means six hours from the ask. Computed from now, a wait would restart itself on every
 // restart — which is the one thing a resumed wait must not do.
-func Deadline(args json.RawMessage, calledAt time.Time, zone string) (time.Time, error) {
+//
+// why it is also given the call's id: a duration may be a range, and a range draws its own length. That
+// draw has to be recomputable too, and a timestamp alone is not enough to make it so — the moment the
+// entry was written is not the moment the call ran under a few milliseconds earlier, and a millisecond
+// changes a draw. The id is the fact that is identical on both sides.
+func Deadline(args json.RawMessage, calledAt time.Time, zone, callID string) (time.Time, error) {
 	var q waitArgs
 	if err := decodeArgs(args, &q); err != nil {
 		return time.Time{}, fmt.Errorf("wait: %v", err)
@@ -78,7 +93,7 @@ func Deadline(args json.RawMessage, calledAt time.Time, zone string) (time.Time,
 		return time.Time{}, fmt.Errorf("wait: %v (this session's timezone setting)", err)
 	}
 
-	moment, err := schedule(calledAt, duration, until, loc)
+	moment, err := schedule(calledAt, duration, until, loc, callID)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("wait: %v", err)
 	}
@@ -95,11 +110,19 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 	if !in.ResumeCalledAt.IsZero() {
 		calledAt = in.ResumeCalledAt
 	}
-	scheduled, err := Deadline(raw, calledAt, in.DefaultTimezone)
+	scheduled, err := Deadline(raw, calledAt, in.DefaultTimezone, in.CallID)
 	if err != nil {
 		return ErrText(err.Error()), nil
 	}
 	at := scheduled.Format(time.RFC3339)
+	// The length is read back off the moment rather than recomputed from the argument, because for a
+	// ranged duration the moment already contains the draw — and reading it off is what keeps this
+	// answer and the deadline from ever disagreeing about how long the wait was.
+	askedFor := scheduled.Sub(calledAt)
+	if askedFor < 0 {
+		askedFor = 0
+	}
+	askedForText := askedFor.Truncate(time.Second).String()
 
 	if remaining := scheduled.Sub(in.now()); remaining > 0 {
 		// why this is asked before anything else: a call that has already been ended has to answer, not be
@@ -107,7 +130,7 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 		// put the same wait back on the timer forever — and a Stop that wins the race against the sleep
 		// deserves the answer it asked for rather than a wake-up nobody is waiting for.
 		if ctx.Err() != nil {
-			return interrupted(ctx, in, scheduled), nil
+			return interrupted(ctx, in, scheduled, askedForText), nil
 		}
 		// why the limit is checked for being set at all: zero is what every caller that has never
 		// heard of parking passes, and for those the behaviour here is exactly what it always was.
@@ -133,7 +156,7 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 			// wait that did finish must not be reported as interrupted — on that word the model
 			// would schedule the same wait all over again.
 			if in.now().Before(scheduled) {
-				return interrupted(ctx, in, scheduled), nil
+				return interrupted(ctx, in, scheduled, askedForText), nil
 			}
 		}
 	}
@@ -142,6 +165,7 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 		Status:      "completed",
 		ScheduledAt: at,
 		ResumedAt:   in.now().Format(time.RFC3339),
+		Duration:    askedForText,
 	})}), nil
 }
 
@@ -149,11 +173,12 @@ func runWait(ctx context.Context, in Input, raw json.RawMessage) (Result, error)
 // up, and who ended it. It is one function rather than two copies because the two moments that produce
 // it — already cancelled on arrival, and cancelled during the sleep — must not be able to disagree
 // about what the words are.
-func interrupted(ctx context.Context, in Input, scheduled time.Time) Result {
+func interrupted(ctx context.Context, in Input, scheduled time.Time, askedFor string) Result {
 	return in.withNote(ErrText(JSON(waitResult{
 		Status:      "interrupted",
 		ScheduledAt: scheduled.Format(time.RFC3339),
 		ResumedAt:   in.now().Format(time.RFC3339),
+		Duration:    askedFor,
 		Reason:      interruptReason(ctx),
 	})))
 }
@@ -172,9 +197,20 @@ func interruptReason(ctx context.Context) string {
 
 // schedule is the one place that decides when a wait ends, so the two ways of asking cannot drift
 // apart over what "now" and "which zone" mean.
-func schedule(now time.Time, duration, until string, loc *time.Location) (time.Time, error) {
+func schedule(now time.Time, duration, until string, loc *time.Location, callID string) (time.Time, error) {
 	if duration != "" {
-		d, err := ParseDuration(duration)
+		var (
+			d   time.Duration
+			err error
+		)
+		if strings.Contains(duration, rngRangeSep) {
+			// A range decides its own length first, and decides it from the moment the wait was asked:
+			// see parseRangedDuration. It is dispatched on rather than discovered as a parse failure,
+			// because ".." cannot appear in a single duration, so the two cases cannot be confused.
+			d, err = parseRangedDuration(duration, now, callID)
+		} else {
+			d, err = ParseDuration(duration)
+		}
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -183,6 +219,77 @@ func schedule(now time.Time, duration, until string, loc *time.Location) (time.T
 		return now.Add(d).In(loc), nil
 	}
 	return parseMoment(until, loc)
+}
+
+// rngRangeSep is what turns a duration into a range: "10m..25m". No single duration can contain it, so
+// an existing call cannot be misread as a new one — which is why a range extends this argument instead
+// of adding two more to the schema.
+const rngRangeSep = ".."
+
+// parseRangedDuration draws the length of a wait that asked for a range, inclusive of both ends.
+//
+// why the draw is seeded rather than random: this length must be re-computable, not fresh. Deadline is
+// the one answer to "when is this due" for both the loop that is about to sleep and a daemon that has to
+// answer the same call after a restart, and the two of them cannot be allowed to disagree about which
+// moment was promised — drawing from the entropy pool here would hand them two different waits. So the
+// stream is seeded by the two facts that identify this call: the id the log gave it, and the range it was
+// written with. Given the same entry, any process gets the same answer.
+//
+// The consequence worth knowing: two calls that ask for the same range get different lengths (their ids
+// differ), while one call answers the same question forever. That is what makes a fork or a replay
+// reproduce the run instead of re-rolling it.
+func parseRangedDuration(spec string, calledAt time.Time, callID string) (time.Duration, error) {
+	loText, hiText, ok := strings.Cut(spec, rngRangeSep)
+	if !ok {
+		return 0, fmt.Errorf("%q is not a duration range", spec)
+	}
+	lo, err := ParseDuration(strings.TrimSpace(loText))
+	if err != nil {
+		return 0, err
+	}
+	hi, err := ParseDuration(strings.TrimSpace(hiText))
+	if err != nil {
+		return 0, err
+	}
+	if hi < lo {
+		return 0, fmt.Errorf("%q is a range whose top is below its bottom (write it smallest first, e.g. 10m..25m)", spec)
+	}
+	// The bound is checked after the draw, where it always was: what a ranged ask must not do is skip
+	// the century test just because the caller gave two numbers instead of one.
+	return lo + time.Duration(waitDraw(spec, callID, calledAt, uint64(hi-lo)+1)), nil
+}
+
+// waitDraw takes one uniform value out of [0, n) from a stream seeded by the call itself, stepping the
+// seed through splitmix64 and rejecting what does not land inside the range (rngScale says why).
+func waitDraw(spec, callID string, calledAt time.Time, n uint64) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(spec))
+	if callID == "" {
+		// Nobody could tell this call which call it was (a test, or a harness answering a wait it did not
+		// read out of a log), so fall back to the ask's own timestamp — the next thing that identifies it,
+		// and the same fallback builtin.Input.CallID describes.
+		var ts [8]byte
+		binary.LittleEndian.PutUint64(ts[:], uint64(calledAt.UnixNano()))
+		h.Write(ts[:])
+	} else {
+		h.Write([]byte(callID))
+	}
+	x := h.Sum64()
+	for {
+		// why a mixing step at all: what comes out of a hash is not spread evenly with respect to what
+		// went in, so two ids differing by one character — or two asks by one nanosecond, for the calls
+		// that fall back to the timestamp — would otherwise tend to land near each other once masked.
+		// splitmix64 is the cheap avalanche that makes every bit of the seed reach the answer.
+		x += 0x9E3779B97F4A7C15
+		z := x ^ (x >> 30)
+		z *= 0xBF58476D1CE4E5B9
+		z ^= z >> 27
+		z *= 0x94D049BB133111EB
+		z ^= z >> 31
+		if v, ok := rngScale(z, n); ok {
+			return v
+		}
+	}
 }
 
 // tooLongSeconds bounds the float path of ParseDuration before it becomes a Duration: converting a

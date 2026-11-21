@@ -770,6 +770,7 @@ func (r *registry) builtinInput(ctx context.Context) builtin.Input {
 		MaxInLoopSleep:  parkAfter,
 		DaemonNote:      daemonNote(ctx),
 		ResumeCalledAt:  askedAt(ctx),
+		CallID:          callIDOf(ctx),
 	}
 }
 

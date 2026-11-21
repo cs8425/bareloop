@@ -222,18 +222,18 @@ func TestPolicyPendingIsDerived(t *testing.T) {
 }
 
 // TestCountsSeparatesPublishedFromOffered: the sidebar shows "7/11 tools", where 11 is what the
-// servers offer and 7 is what this session leaves switched on.
+// servers and the daemon offer and 7 is what this session leaves switched on.
 func TestCountsSeparatesPublishedFromOffered(t *testing.T) {
 	r := toolRegistry()
-	// total counts what the session could have: the four tools the two servers offered, plus the two
+	// total counts what the session could have: the four tools the two servers offered, plus the three
 	// builtins every session is offered and every session has to switch on by name.
 	published, enabled, total := r.counts()
-	if published != 4 || enabled != 4 || total != 6 {
+	if published != 4 || enabled != 4 || total != 7 {
 		t.Fatalf("no policy: got published=%d enabled=%d total=%d", published, enabled, total)
 	}
 	r.SetPolicy(Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}}, {Name: "alpha"}}})
 	published, enabled, total = r.counts()
-	if published != 3 || enabled != 3 || total != 6 {
+	if published != 3 || enabled != 3 || total != 7 {
 		t.Fatalf("one off: got published=%d enabled=%d total=%d", published, enabled, total)
 	}
 }
@@ -246,7 +246,7 @@ func TestViewShowsDisabledToolsToo(t *testing.T) {
 	cfg := Config{MCP: []mcp.Config{{Name: "beta", DisabledTools: []string{"fs_write"}, ToolPrefix: "vb"}, {Name: "alpha"}}}
 	r.SetPolicy(cfg)
 	v := r.view(cfg)
-	if v.Total != 6 || v.Visible != 3 {
+	if v.Total != 7 || v.Visible != 3 {
 		t.Fatalf("view counts: got visible=%d total=%d", v.Visible, v.Total)
 	}
 	if len(v.Servers) != 3 || v.Servers[0].Name != "alpha" {
@@ -255,10 +255,10 @@ func TestViewShowsDisabledToolsToo(t *testing.T) {
 	if v.Servers[1].Prefix != "vb" || v.Servers[0].Prefix != "" {
 		t.Fatalf("prefixes: alpha=%q beta=%q, want \"\" and \"vb\"", v.Servers[0].Prefix, v.Servers[1].Prefix)
 	}
-	// The last group is the daemon's own two tools, listed and switched off: a session has to name
+	// The last group is the daemon's own three tools, listed and switched off: a session has to name
 	// the one it wants before it appears in a request.
 	built := v.Servers[2]
-	if !built.Builtin || built.Name != BuiltinServer || built.Enabled != 0 || built.Known != 2 {
+	if !built.Builtin || built.Name != BuiltinServer || built.Enabled != 0 || built.Known != 3 {
 		t.Fatalf("builtins: %+v", built)
 	}
 	var found bool

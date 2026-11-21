@@ -21,7 +21,7 @@ func TestBuiltinsAreOffUntilNamed(t *testing.T) {
 	if got := visibleNames(r); !equalNames(got, defaultNames) {
 		t.Fatalf("a session that asked for nothing gained a tool: got %v, want %v", got, defaultNames)
 	}
-	for _, name := range []string{"wait", "get_datetime"} {
+	for _, name := range []string{"wait", "get_datetime", "rng"} {
 		if _, ok := r.resolve(name); ok {
 			t.Fatalf("%s resolves without being switched on", name)
 		}
@@ -29,8 +29,8 @@ func TestBuiltinsAreOffUntilNamed(t *testing.T) {
 	// Off is not the same as nonexistent: the drawer still lists them, or there is no way to find
 	// the switch.
 	built := r.view(Config{MCP: []mcp.Config{{Name: "beta"}, {Name: "alpha"}}}).Servers[2]
-	if built.Enabled != 0 || built.Known != 2 {
-		t.Fatalf("the builtin group is not showing both tools switched off: %+v", built)
+	if built.Enabled != 0 || built.Known != 3 {
+		t.Fatalf("the builtin group is not showing all three tools switched off: %+v", built)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestMCPToolKeepsANameABuiltinWants(t *testing.T) {
 	// What the drawer is shown: the switch stays where the config put it, because the checkbox *is*
 	// the config — the note is what says the tool was never offered to the model.
 	built := r.view(Config{MCP: []mcp.Config{{Name: "files"}}}).Servers[1]
-	if !built.Builtin || built.Enabled != 1 || built.Known != 2 {
+	if !built.Builtin || built.Enabled != 1 || built.Known != 3 {
 		t.Fatalf("the builtin group does not read back what was configured: %+v", built)
 	}
 	if !strings.Contains(built.Note, "wait is switched on but not published") ||
@@ -226,21 +226,21 @@ func TestBuiltinPolicyIsRejectedAtTheAPI(t *testing.T) {
 // TestBuiltinOffListIsTranslatedFromTheDrawer: the drawer writes one language for every group
 // ("these are the ones switched off in it"), so the on-list the config stores has to come out of that.
 func TestBuiltinOffListIsTranslatedFromTheDrawer(t *testing.T) {
-	if got := builtinEnabledFromOff([]string{"wait"}); len(got) != 1 || got[0] != "get_datetime" {
-		t.Fatalf("off wait: got %v, want [get_datetime]", got)
+	if got := builtinEnabledFromOff([]string{"wait"}); len(got) != 2 || got[0] != "get_datetime" || got[1] != "rng" {
+		t.Fatalf("off wait: got %v, want [get_datetime rng]", got)
 	}
 	// Nothing off means every builtin is on — the same language the MCP group uses. That is not
 	// ambiguous with "all off", because the drawer always sends the whole off-list, so all-off arrives
 	// as every name rather than as an empty one.
-	if got := builtinEnabledFromOff(nil); len(got) != 2 {
-		t.Fatalf("nothing off came back as %v, want both builtins on", got)
+	if got := builtinEnabledFromOff(nil); len(got) != 3 {
+		t.Fatalf("nothing off came back as %v, want all three builtins on", got)
 	}
 	// A stale name in a request body cannot switch on something that does not exist, because the
 	// answer is built from the tools that exist rather than from what was asked for.
-	if got := builtinEnabledFromOff([]string{"nope"}); len(got) != 2 {
-		t.Fatalf("unknown name: got %v, want both builtins on", got)
+	if got := builtinEnabledFromOff([]string{"nope"}); len(got) != 3 {
+		t.Fatalf("unknown name: got %v, want all three builtins on", got)
 	}
-	if got := builtinEnabledFromOff([]string{"wait", "get_datetime"}); len(got) != 0 {
+	if got := builtinEnabledFromOff([]string{"wait", "get_datetime", "rng"}); len(got) != 0 {
 		t.Fatalf("all off: got %v, want none on", got)
 	}
 }

@@ -339,7 +339,7 @@ type Config struct {
 	// NotifyTools asks MCP servers for list_changed subscriptions.
 	NotifyTools bool `json:"notifyTools,omitempty"`
 
-	// BuiltinTools lists the tools this daemon answers itself, by name: "wait", "get_datetime".
+	// BuiltinTools lists the tools this daemon answers itself, by name: "wait", "get_datetime", "rng".
 	// It is an on-list and not an off-list, and that is the whole policy: these are handles on the
 	// loop rather than capabilities, so none of them is on until a session asks for it by name — and a
 	// builtin added in a later version cannot appear in a session that never asked, which an

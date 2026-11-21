@@ -3,7 +3,10 @@
 // What makes a tool belong here is not that it is useful. Anything that touches the world belongs
 // in an MCP server, because that is where the permission to touch it lives. These are the tools
 // only this daemon can answer, because what they act on is the loop itself: the moment the next
-// turn waits for, and the clock a model is allowed to ask about.
+// turn waits for, and the clock a model is allowed to ask about. The third one, `rng`, acts on
+// neither: it earns its place the same way the other two did — it touches nothing outside the
+// process, and what it supplies (entropy a model cannot fake or predict) is worth guaranteeing from
+// the same place that guarantees the rest, because a model asked to be random is not.
 //
 // Two rules follow from that, and they are enforced by the caller (internal/agent) rather than
 // here, because they are about publishing and not about answering:
@@ -72,6 +75,13 @@ type Input struct {
 	// the call a wake re-runs would find itself six hours from now, hand itself over again, and be woken to
 	// find itself six hours from then — a wait that restarts itself forever and never comes due.
 	ResumeCalledAt time.Time
+	// CallID is the id this call has in the log, for the answers that must come out the same when somebody
+	// else recomputes them later. A wait asked for a range of lengths draws one of them, and a draw taken
+	// from the wall clock is not the draw a daemon reading this entry back will take: the moment the call
+	// ran is a few milliseconds away from the moment the entry carrying it was written, and a millisecond is
+	// enough to change a random answer. Empty means nobody had an id to give, and the tool falls back to the
+	// timestamp (see Deadline).
+	CallID string
 }
 
 func (in Input) now() time.Time {
@@ -145,7 +155,7 @@ var ErrUserInterrupt = errors.New("user interrupt")
 // known is every builtin tool that exists, sorted by name. The order is not cosmetic: the tool
 // block is rendered in front of the history, so the list of names is part of the KV prefix and
 // has to come out the same on every restart.
-var known = sortedByName([]Tool{waitTool(), datetimeTool()})
+var known = sortedByName([]Tool{waitTool(), datetimeTool(), rngTool()})
 
 func sortedByName(tools []Tool) []Tool {
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })

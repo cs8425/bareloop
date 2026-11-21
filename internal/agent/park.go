@@ -157,6 +157,29 @@ func askedAt(ctx context.Context) time.Time {
 	return at
 }
 
+// callIDKey is the id of the call being run, handed to it for the same reason askedAt is handed to a
+// resumed one: some answers a tool gives must be reproducible from the log alone, and the call's id is
+// the one per-call fact that is identical on both sides of a restart. A wait asked for a range of lengths
+// draws one of them (builtin.Deadline), and a draw taken from the wall clock would not be the same draw
+// when the daemon recomputes the promise from the entry.
+type callIDKey struct{}
+
+func withCallID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, callIDKey{}, id)
+}
+
+// callIDOf is the accessor for that value. The name carries an "Of" rather than being a bare `callID`
+// because this file is already dense with parameters and fields of exactly that name: inside one of them,
+// `callID` is the string rather than the function, and a later edit that reaches for the accessor there
+// would be a shadowing bug with a confusing error message waiting in it.
+func callIDOf(ctx context.Context) string {
+	id, _ := ctx.Value(callIDKey{}).(string)
+	return id
+}
+
 // endedCallKey marks the one call a wake is resuming that somebody ended before its moment, and with
 // what cause. It is a context value rather than a cancelled run because of what has to happen next: an
 // interrupt is followed by that person's message, and a run that has been cancelled cannot answer it.
@@ -705,7 +728,9 @@ func (s *Session) recoverParkAt(now time.Time) {
 	s.held = c.ID
 	// The deadline is asked of the same code the call asked it of, from the timestamp of the entry that
 	// carries the call: "six hours" means six hours from the ask, whatever process is doing the waking.
-	until, err := builtin.Deadline(c.Args, tail[0].Ts, s.cfg.Timezone)
+	// The id goes along because a ranged wait draws its own length, and the draw has to come out the same
+	// here as it did in the call that parked.
+	until, err := builtin.Deadline(c.Args, tail[0].Ts, s.cfg.Timezone, c.ID)
 	if err != nil {
 		// The call was never going to wait anything, because its arguments cannot be read. Re-running it
 		// is not a guess in that case: it produces the same error the call would have produced, and the

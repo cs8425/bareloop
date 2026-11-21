@@ -42,12 +42,12 @@ func tryCall(t *testing.T, name, args string, in Input) (Result, error) {
 // TestSetIsSortedByName is the published order: the tool block is rendered in front of the history,
 // so the name list is part of the KV prefix and must not depend on map iteration.
 func TestSetIsSortedByName(t *testing.T) {
-	if got := Names(); len(got) != 2 || got[0] != "get_datetime" || got[1] != "wait" {
-		t.Fatalf("Names() = %v, want [get_datetime wait]", got)
+	if got := Names(); len(got) != 3 || got[0] != "get_datetime" || got[1] != "rng" || got[2] != "wait" {
+		t.Fatalf("Names() = %v, want [get_datetime rng wait]", got)
 	}
 	tools := All()
-	if len(tools) != 2 {
-		t.Fatalf("All() returned %d tools, want 2", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("All() returned %d tools, want 3", len(tools))
 	}
 	for i, want := range Names() {
 		if tools[i].Name != want {
@@ -238,7 +238,7 @@ func TestScheduleRelativeUsesSessionZone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTimezone: %v", err)
 	}
-	got, err := schedule(at, "5m", "", loc)
+	got, err := schedule(at, "5m", "", loc, "")
 	if err != nil {
 		t.Fatalf(`schedule("5m"): %v`, err)
 	}
@@ -254,7 +254,7 @@ func TestScheduleAbsoluteKeepsItsOwnZone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTimezone: %v", err)
 	}
-	got, err := schedule(at, "", "2026-11-01T22:25:00+08:00", loc)
+	got, err := schedule(at, "", "2026-11-01T22:25:00+08:00", loc, "")
 	if err != nil {
 		t.Fatalf(`schedule(until): %v`, err)
 	}
@@ -270,14 +270,14 @@ func TestScheduleWithoutOffsetReadsItInTheSessionZone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTimezone: %v", err)
 	}
-	got, err := schedule(at, "", "2026-11-01T22:25:00", loc)
+	got, err := schedule(at, "", "2026-11-01T22:25:00", loc, "")
 	if err != nil {
 		t.Fatalf(`schedule(until without offset): %v`, err)
 	}
 	if want := "2026-11-01T22:25:00+05:00"; got.Format(time.RFC3339) != want {
 		t.Fatalf("schedule(until without offset) = %s, want %s", got.Format(time.RFC3339), want)
 	}
-	if _, err := schedule(at, "", "sometime after lunch", loc); err == nil {
+	if _, err := schedule(at, "", "sometime after lunch", loc, ""); err == nil {
 		t.Fatal("a moment written in prose was accepted")
 	}
 }
@@ -450,7 +450,7 @@ func TestAResumedWaitIsContinuedRatherThanRestarted(t *testing.T) {
 // call in a log after a restart re-arms the wait that was asked for, not a new one it invented.
 func TestDeadlineIsTheSameAnswerTheCallGives(t *testing.T) {
 	for _, args := range []string{`{"duration":"1ms"}`, `{"until":"2020-01-01T00:00:00Z"}`} {
-		got, err := Deadline(json.RawMessage(args), at, "Asia/Taipei")
+		got, err := Deadline(json.RawMessage(args), at, "Asia/Taipei", "")
 		if err != nil {
 			t.Fatalf("Deadline(%s): %v", args, err)
 		}
@@ -486,7 +486,7 @@ func TestDeadlineRefusesWhatIsNotASchedule(t *testing.T) {
 		`{"until":"sometime after lunch"}`,
 		`{"duration":`,
 	} {
-		_, err := Deadline(json.RawMessage(args), at, "")
+		_, err := Deadline(json.RawMessage(args), at, "", "")
 		if err == nil {
 			t.Errorf("Deadline(%s) answered a call the tool would have refused", args)
 			continue
@@ -672,5 +672,282 @@ func TestWaitNamesTheParkBeforeItSleeps(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "parked until") || !strings.Contains(lines[0], "Stop") {
 		t.Fatalf("the log line is %q: it has to name the deadline and the way out", lines[0])
+	}
+}
+
+// --- rng ---------------------------------------------------------------------
+
+// TestRngAnswersWithTheSeparatorsItsTypeChose is the whole output contract: a model that asked for
+// numbers gets one line of comma-separated values, and one that asked for strings gets one value per
+// line, because those are the two things you do with the two kinds.
+func TestRngAnswersWithTheSeparatorsItsTypeChose(t *testing.T) {
+	ints := call(t, "rng", `{"type":"int","min":1,"max":9,"count":4}`, fixedInput(""))
+	if got := strings.Split(strings.TrimSpace(ints.Text), ", "); len(got) != 4 {
+		t.Fatalf(`int count=4 came back as %q, want four comma-separated values`, ints.Text)
+	}
+	lines := call(t, "rng", `{"type":"string","length":5,"count":3}`, fixedInput(""))
+	if got := strings.Split(strings.TrimSpace(lines.Text), "\n"); len(got) != 3 {
+		t.Fatalf(`string count=3 came back as %q, want three lines`, lines.Text)
+	}
+	one := call(t, "rng", `{"type":"int"}`, fixedInput(""))
+	if strings.ContainsAny(one.Text, ",\n") {
+		t.Fatalf("a single draw should be one number and nothing else: %q", one.Text)
+	}
+}
+
+// TestRngBoundsIncludeBothEnds is why the schema says "inclusive" twice: the off-by-one a caller fears
+// most is the top of the range never being reachable. With 200 draws of a two-value range, a missing end
+// is a broken sampler rather than bad luck (2^-200) — and 200 is the most one call may ask for anyway.
+func TestRngBoundsIncludeBothEnds(t *testing.T) {
+	res := call(t, "rng", `{"type":"int","min":7,"max":7,"count":20}`, fixedInput(""))
+	for _, v := range strings.Split(res.Text, ", ") {
+		if v != "7" {
+			t.Fatalf("a range with exactly one value inside it drew %q", v)
+		}
+	}
+	seen := map[string]bool{}
+	res = call(t, "rng", `{"type":"int","min":0,"max":1,"count":200}`, fixedInput(""))
+	if res.IsError {
+		t.Fatalf("the widest draw a call may ask for was refused: %q", res.Text)
+	}
+	for _, v := range strings.Split(res.Text, ", ") {
+		seen[v] = true
+	}
+	if !seen["0"] || !seen["1"] {
+		t.Fatalf("0..1 drawn 200 times produced %v, want both ends of the range", seen)
+	}
+}
+
+// TestRngIntDefaultIsWideEnoughToNotBeADie pins the width of the unbounded case, because that width is a
+// decision rather than an accident: {"type":"int"} is the "any number at all" answer, and a caller that
+// keeps getting one to two digits back would read a small number as the tool preferring small ones. Two
+// hundred draws from a thousand never all land under a hundred (10^-200), so this is the ceiling being
+// tested and not a coin flip.
+func TestRngIntDefaultIsWideEnoughToNotBeADie(t *testing.T) {
+	res := call(t, "rng", `{"type":"int","count":200}`, fixedInput(""))
+	if res.IsError {
+		t.Fatalf(`{"type":"int"} was refused: %q`, res.Text)
+	}
+	var drewPastAHundred bool
+	for _, v := range strings.Split(res.Text, ", ") {
+		var n int64
+		if err := json.Unmarshal([]byte(v), &n); err != nil {
+			t.Fatalf("%q is not a whole number: %v", v, err)
+		}
+		if n < 1 || n > rngIntDefaultHi {
+			t.Fatalf("%d is outside the default range 1..%d", n, rngIntDefaultHi)
+		}
+		if n > 100 {
+			drewPastAHundred = true
+		}
+	}
+	if !drewPastAHundred {
+		t.Fatalf("200 unbounded draws never left 1..100, so the default top is still a hundred")
+	}
+}
+
+// TestRngFloatsCarryThreeDecimalsAndStayInside pins the presentation choice (three decimals, always)
+// as well as the arithmetic, because "0.5" and "0.500" reaching the model on different days is a
+// difference the reader should not have to reason about.
+func TestRngFloatsCarryThreeDecimalsAndStayInside(t *testing.T) {
+	res := call(t, "rng", `{"type":"float","min":-2,"max":3,"count":50}`, fixedInput(""))
+	for _, v := range strings.Split(res.Text, ", ") {
+		var f float64
+		if err := json.Unmarshal([]byte(v), &f); err != nil {
+			t.Fatalf("%q is not a number the caller could read: %v", v, err)
+		}
+		if dot := strings.IndexByte(v, '.'); dot < 0 || len(v)-dot-1 != rngFloatDecimals {
+			t.Fatalf("%q does not carry exactly %d decimals", v, rngFloatDecimals)
+		}
+		if f < -2 || f > 3 {
+			t.Fatalf("%s is outside the range it was drawn from", v)
+		}
+	}
+}
+
+// TestRngStringsUseOnlyTheAlphabetTheyPromise guards the one property the output format leans on: a
+// random string can never contain the newline that separates the list, so there is no escaping to get
+// wrong anywhere in this tool's answer.
+func TestRngStringsUseOnlyTheAlphabetTheyPromise(t *testing.T) {
+	res := call(t, "rng", `{"type":"string","length":20,"count":5}`, fixedInput(""))
+	lines := strings.Split(res.Text, "\n")
+	if len(lines) != 5 {
+		t.Fatalf("count=5 produced %d lines: %q", len(lines), res.Text)
+	}
+	for _, line := range lines {
+		if len(line) != 20 {
+			t.Fatalf("a length-20 draw came back with %d characters: %q", len(line), line)
+		}
+		for _, r := range line {
+			if !strings.ContainsRune(rngAlphabet, r) {
+				t.Fatalf("%q contains %q, which is not in the alphabet a random string is drawn from", line, r)
+			}
+		}
+	}
+}
+
+// TestRngRefusesWhatItCannotDraw is the error surface, and it is short on purpose: with no unique mode
+// and no alphabet argument there is nowhere for a call to fail for a reason the model has to think
+// about. Every answer here has to read like the tool said it, because that text is what the model gets.
+func TestRngRefusesWhatItCannotDraw(t *testing.T) {
+	for _, args := range []string{
+		`{}`,
+		`{"type":"dice"}`,
+		`{"type":"int","count":0}`,
+		`{"type":"int","count":5000}`,
+		`{"type":"int","min":10,"max":3}`,
+		`{"type":"int","min":1.5}`,
+		`{"type":"int","min":1e20}`,
+		`{"type":"string","length":0}`,
+		`{"type":"string","length":99}`,
+		`{"type":"float","min":1,"max":-1}`,
+		`{"type":`,
+	} {
+		res := call(t, "rng", args, fixedInput(""))
+		if !res.IsError {
+			t.Errorf("%s was answered instead of refused: %q", args, res.Text)
+			continue
+		}
+		if !strings.HasPrefix(res.Text, "rng") {
+			t.Errorf("%s: an error a model reads has to name its tool: %q", args, res.Text)
+		}
+	}
+}
+
+// TestRngIgnoresAKnobThatBelongsToAnotherType is the deliberate half of the schema: additionalProperties
+// cannot catch a known key used by the wrong type, and refusing it would spend a whole turn to change
+// nothing about the answer.
+func TestRngIgnoresAKnobThatBelongsToAnotherType(t *testing.T) {
+	res := call(t, "rng", `{"type":"int","length":12,"count":2}`, fixedInput(""))
+	if res.IsError {
+		t.Fatalf(`a length on an int draw is meant to be ignored, not refused: %q`, res.Text)
+	}
+	if len(strings.Split(res.Text, ", ")) != 2 {
+		t.Fatalf("count was lost on the way to an int draw: %q", res.Text)
+	}
+	res = call(t, "rng", `{"type":"string","min":1,"max":6}`, fixedInput(""))
+	if res.IsError || len(res.Text) != 8 {
+		t.Fatalf(`bounds on a string draw are meant to be ignored, not refused: %q`, res.Text)
+	}
+}
+
+// TestRngDoesNotFavorTheLowEndOfItsOwnRange measures the sampler instead of trusting it. This tool
+// exists because a model's own randomness is biased, so bias bought back at the last step would be the
+// punchline: 62 characters do not divide 256, and reading a byte modulo 62 would hand the first eight of
+// them five values to the last fifty-four's four — a quarter more often, which is well outside the 8%
+// allowed here.
+func TestRngDoesNotFavorTheLowEndOfItsOwnRange(t *testing.T) {
+	const draws = 120000
+	counts := make([]int, len(rngAlphabet))
+	for i := 0; i < draws; i++ {
+		v, err := rngUint(uint64(len(rngAlphabet)))
+		if err != nil {
+			t.Fatalf("rngUint: %v", err)
+		}
+		counts[v]++
+	}
+	want := float64(draws) / float64(len(rngAlphabet))
+	low, high := want, want
+	for _, c := range counts {
+		if float64(c) < low {
+			low = float64(c)
+		}
+		if float64(c) > high {
+			high = float64(c)
+		}
+	}
+	if high/want > 1.08 || low/want < 0.92 {
+		t.Fatalf("drawing %d times from %d buckets spread from %.1f%% to %.1f%% of the expected %d",
+			draws, len(rngAlphabet), 100*low/want, 100*high/want, int(want))
+	}
+}
+
+// --- a duration that is a range ---------------------------------------------
+
+// TestARangeDrawsItsLengthOnceAndKeepsIt is D1, and it is the reason the draw is seeded at all: the
+// second call below is what a daemon does after a restart when it answers the first one's wait, and the
+// two of them must not be able to disagree about which moment was promised.
+func TestARangeDrawsItsLengthOnceAndKeepsIt(t *testing.T) {
+	args := json.RawMessage(`{"duration":"10m..25m"}`)
+	first, err := Deadline(args, at, "UTC", "call-1")
+	if err != nil {
+		t.Fatalf("a range was refused: %v", err)
+	}
+	again, err := Deadline(args, at, "UTC", "call-1")
+	if err != nil {
+		t.Fatalf("the recomputation was refused: %v", err)
+	}
+	if !first.Equal(again) {
+		t.Fatalf("the same call answered twice with two moments: %s and %s", first.Format(time.RFC3339), again.Format(time.RFC3339))
+	}
+	if got := again.Sub(at); got < 10*time.Minute || got > 25*time.Minute {
+		t.Fatalf("a 10m..25m wait is due %s after the ask", got)
+	}
+	// A different call asking for the same range must get its own draw, or the range is a constant in
+	// disguise. Over 15 minutes of nanoseconds, two calls agreeing this once is not a coin flip to lose.
+	other, err := Deadline(args, at, "UTC", "call-2")
+	if err != nil {
+		t.Fatalf("the second call was refused: %v", err)
+	}
+	if other.Equal(again) {
+		t.Fatalf("two calls drew the same length, so the range never moved: %s", other.Format(time.RFC3339))
+	}
+}
+
+// TestAFlatDurationIsNotAffectedByTheRangeCode is the regression the syntax was chosen for: ".." cannot
+// appear in a single duration, so every wait written before ranges existed still means exactly what it
+// was written to mean — no draw anywhere near it.
+func TestAFlatDurationIsNotAffectedByTheRangeCode(t *testing.T) {
+	got, err := Deadline(json.RawMessage(`{"duration":"5m"}`), at, "UTC", "call-1")
+	if err != nil {
+		t.Fatalf(`{"duration":"5m"}: %v`, err)
+	}
+	if want := at.Add(5 * time.Minute); !got.Equal(want) {
+		t.Fatalf(`{"duration":"5m"} = %s, want %s`, got.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+// TestARangeIsStillCheckedAgainstACentury is why the bound is checked after the draw rather than before
+// it: giving two numbers is not a way to skip the typo test, and a range entirely past the limit has to
+// read as the mistake it is.
+func TestARangeIsStillCheckedAgainstACentury(t *testing.T) {
+	_, err := Deadline(json.RawMessage(`{"duration":"880000h..900000h"}`), at, "UTC", "call-1")
+	if err == nil {
+		t.Fatal("a range entirely beyond the century was accepted")
+	}
+	if !strings.Contains(err.Error(), tooLong) {
+		t.Fatalf("the refusal does not say why: %v", err)
+	}
+}
+
+// TestARangeWhoseTopIsBelowItsBottom refuses the one shape a caller writes by accident, in words that
+// contain the fix.
+func TestARangeWhoseTopIsBelowItsBottom(t *testing.T) {
+	_, err := Deadline(json.RawMessage(`{"duration":"25m..10m"}`), at, "UTC", "call-1")
+	if err == nil {
+		t.Fatal(`{"duration":"25m..10m"} was accepted`)
+	}
+	if !strings.Contains(err.Error(), "below its bottom") {
+		t.Fatalf("the refusal does not name the mistake: %v", err)
+	}
+}
+
+// TestTheAnswerSaysHowLongTheWaitWas is what the duration field exists for: when the caller did not
+// choose the length, the answer is the only place it can read what it got.
+func TestTheAnswerSaysHowLongTheWaitWas(t *testing.T) {
+	res := call(t, "wait", `{"duration":"1s..2s"}`, fixedInput(""))
+	if res.IsError {
+		t.Fatalf("a ranged wait was answered with an error: %q", res.Text)
+	}
+	var out waitResult
+	if err := json.Unmarshal([]byte(res.Text), &out); err != nil {
+		t.Fatalf("the answer is not the JSON the tool promises: %v (%q)", err, res.Text)
+	}
+	d, err := ParseDuration(out.Duration)
+	if err != nil {
+		t.Fatalf("duration %q cannot be read back as a duration: %v", out.Duration, err)
+	}
+	if d < time.Second || d > 2*time.Second {
+		t.Fatalf("a 1s..2s wait reported %s", out.Duration)
 	}
 }

@@ -196,8 +196,8 @@ its own copy in `data/<id>/config.json`.
 | `defaults.mcp[]` | `name`, `type` (`stdio`/`http`), `command`/`args`/`env`/`envPassthrough`/`envBase`/`dir`, `url`/`headers` |
 | `insecureTLS`, `caFile` | on `defaults.llm` and on any `mcp[]` entry with a `url`: how an https endpoint is trusted ([reaching an endpoint no trust store knows](#reaching-an-endpoint-no-trust-store-knows)) |
 | `proxy` | at three levels — `defaults.proxy` (every session's), `llm.proxy`, `mcp[].proxy`: the nearer answer wins, and empty leaves the environment in charge ([reaching an endpoint through a proxy](#reaching-an-endpoint-through-a-proxy)) |
-| `defaults.builtinTools` | the tools the daemon answers itself, named one at a time: `wait`, `get_datetime`. It is an **on-list**, so all of them are off until a session says otherwise ([the daemon's own two tools](#the-daemons-own-two-tools)) |
-| `defaults.timezone` | the zone the time tools answer in when a call names none: an IANA name (`Asia/Taipei`), a fixed offset (`+08:00`, `UTC+8`), `Local` for the machine's own - and nothing at all means UTC ([the daemon's own two tools](#the-daemons-own-two-tools)) |
+| `defaults.builtinTools` | the tools the daemon answers itself, named one at a time: `wait`, `get_datetime`, `rng`. It is an **on-list**, so all of them are off until a session says otherwise ([the daemon's own three tools](#the-daemons-own-three-tools)) |
+| `defaults.timezone` | the zone the time tools answer in when a call names none: an IANA name (`Asia/Taipei`), a fixed offset (`+08:00`, `UTC+8`), `Local` for the machine's own - and nothing at all means UTC ([the daemon's own three tools](#the-daemons-own-three-tools)) |
 | `defaults.compact` | compaction parameters (see below): `auto` and `inLoop` are both **on** by default — `auto` since 2026-11-16, because a session that never answers should compact rather than die at the window |
 | `defaults.asm` | payload options: `sendReasoning` (**on** by default), `sendImages` (**on**), `omitToolResultName` (off) |
 | `defaults.temperature`, `maxTokens`, `maxTurns`, `reasoningEffort`, `extra` | sampling defaults, and `extra` for the request-body fields bareloop does not model (see below) |
@@ -510,16 +510,17 @@ Changes apply at the **next run**: a run in flight keeps the tool array it start
 mid-run would break the prefix cache and strand a `tool_call` whose tool vanished. `pendingChanges` says
 when something is waiting; `toolsPending` in the status says the same thing in one bit.
 
-### The daemon's own two tools
+### The daemon's own three tools
 
-Two tools are answered by `bareloopd` itself: no server to start, no connection to keep, nothing to install.
+Three tools are answered by `bareloopd` itself: no server to start, no connection to keep, nothing to install.
 
 | tool | what it does | what it takes |
 |---|---|---|
-| `wait` | pauses the loop and resumes it later. Nothing is sent to the model while it waits, and the result of this call is what the resumed turn reads | either `duration` (`"5m"`, `"1h30m"`, `"30s"`; a bare number is seconds) **or** `until` (an RFC3339 moment, e.g. `2026-11-01T22:25:00+08:00`). A moment more than a century away is refused as the typo it is, and an `until` written without an offset is read in the session's own timezone |
+| `wait` | pauses the loop and resumes it later. Nothing is sent to the model while it waits, and the result of this call is what the resumed turn reads | either `duration` (`"5m"`, `"1h30m"`, `"30s"`; a bare number is seconds) **or** `until` (an RFC3339 moment, e.g. `2026-11-01T22:25:00+08:00`). A `duration` may also be a range (`"10m..25m"`), and the length is then drawn once, for that call alone — both ends included, and the same draw after a restart, because it comes from the call's own id rather than from a clock. The answer says which length it drew. A moment more than a century away is refused as the typo it is, and an `until` written without an offset is read in the session's own timezone |
 | `get_datetime` | the date, the clock, the offset, the zone it is naming, the day of the week — and an RFC3339 stamp on the last line, which is a `wait` argument waiting to be pasted | an optional `timezone`, for the case where the interesting question is what time it is somewhere else |
+| `rng` | random numbers and strings drawn by the daemon rather than by the model, which is the point of it: asked to be random, a model repeats the values it likes, avoids the repeats real randomness has, and reads `7` as more random than `4` | `type` (`int`, `float` or `string`), plus `min`/`max` (**inclusive**; default `1`–`1000` for `int`, `0`–`1` for `float`), `length` (1–64, default 8, from `A-Za-z0-9`) and `count` (1–200, default 1). Numbers come back comma-separated on one line and strings one per line, because those are the two things you do with the two kinds. A knob belonging to another type is ignored rather than refused |
 
-Both are **off until a session names them**, because they are handles on the loop rather than capabilities: a
+All three are **off until a session names them**, because they are handles on the loop rather than capabilities: a
 builtin added in a later version must not turn up in a session that never asked for it, which is exactly what
 an off-list would do. So `builtinTools` stores the names that are **on**, and the tools drawer, which sends
 what is switched off for every group, has that translated at the one place that can do it. A name that is not
@@ -530,7 +531,7 @@ transcript saying `builtin/wait` has to mean one route. A builtin is published u
 all — never renamed to make room, never prefixed, since the name is what the documentation quotes and what a
 transcript already quotes.
 
-`timezone` is what the two tools answer in when a call does not say. An IANA name is resolved against the
+`timezone` is what `wait` and `get_datetime` answer in when a call does not say. An IANA name is resolved against the
 platform's zoneinfo and, where there is none, against the copy embedded in the binary, so a container with no
 `/usr/share/zoneinfo` still knows `Asia/Taipei`. Nothing configured is **UTC** rather than the host's zone,
 because which machine answered a request is not information anybody asked for; a session that wants the host's

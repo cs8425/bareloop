@@ -1120,6 +1120,11 @@ func (s *Session) runTools(ctx context.Context, hosts map[string]string, calls [
 			// back the context unchanged when given nothing.
 			callCtx = withDaemonNote(withAskedAt(callCtx, c.askedAt), c.note)
 		}
+		// Every call is told its own id, which is the fact a tool needs when its answer has to be
+		// reproducible from the log: a wait asked for a range of lengths draws one of them, and a draw that
+		// depended on what the clock said when this process got here would not be the draw a restarted daemon
+		// takes when it reads the same entry back.
+		callCtx = withCallID(callCtx, tc.ID)
 		res, ref, err := s.reg.call(callCtx, tc.Name, orEmpty(tc.Args), onEvent)
 
 		ms := time.Since(start).Milliseconds()
