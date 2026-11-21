@@ -19,7 +19,7 @@
     render ms      main thread spent drawing. Everything else on the page waits for this.
     max render ms  the longest single task a click could land behind — the reason "stop" feels dead.
     max frame gap  the worst gap a rAF loop saw while feeding: how long the page was audibly frozen.
-    parsed KB      total characters handed to the markdown parser. This is the O(n²) signature: the old
+    parsed KiB      total characters handed to the markdown parser. This is the O(n²) signature: the old
                    path re-parses the whole reply for every fragment, so it grows with size squared.
     DOM ok         the final DOM must equal one clean render of the whole text — a throttle that drops the
                    last few tokens is a bug, not an optimisation. This column is the guard.
@@ -84,7 +84,7 @@
   <label>gap <input id="gap" value="3" /> ms</label>
   <label>chunk <input id="chunk" value="12" /> chars</label>
   <label>gate <input id="gatehz" value="20" /> Hz</label>
-  <button id="run" type="button">run 8 / 40 KB</button>
+  <button id="run" type="button">run 8 / 40 KiB</button>
   <span id="status" class="dim"></span>
 </div>
 <div id="out"></div>
@@ -195,13 +195,13 @@ function frames() {
 // `rawline` measures a different *strategy*, not a different ceiling: the line still being typed is painted as
 // text and only the completed lines are rendered (transcript.js). Expected before running: less parsed text,
 // because a frame's worth of new characters cannot cost a parse of the whole open tail. Measured, by shape:
-//   line-dense (the sample above, mean line 38 chars) — a wash: 47.6 KB parsed against tail's 52.9, same wall.
-//   realistic doc (markdown-debug.md, mean 62)         — 26.0 KB against 32.7, 44 live repaints against 63.
-//   LLM-shaped prose (mean line 286)                   — 28.5 KB against 69.3, 20.9 ms against 31, and 4 live
+//   line-dense (the sample above, mean line 38 chars) — a wash: 47.6 KiB parsed against tail's 52.9, same wall.
+//   realistic doc (markdown-debug.md, mean 62)         — 26.0 KiB against 32.7, 44 live repaints against 63.
+//   LLM-shaped prose (mean line 286)                   — 28.5 KiB against 69.3, 20.9 ms against 31, and 4 live
 //       repaints against 150: a paragraph is swallowed by the frozen zone at its own blank line, so `live` is
 //       left holding one text node that only ever grows.
 // So the win grows with line length, which is the direction real model output goes. It does not follow: tail's
-// 150 repaints of a 14.6 KB reply cost 31 ms in total, and `rawline` pays for them by drawing a list item
+// 150 repaints of a 14.6 KiB reply cost 31 ms in total, and `rawline` pays for them by drawing a list item
 // without its bullet and a table row outside its table while they are being typed (asserted above).
 const RUNS = [
   { id: 'full', mode: 'full', hz: 1000, name: 'full, no gate (pre-T1)' },
@@ -402,7 +402,7 @@ window.__boundaryTests = () => {
   // the bench samples, fed the same way a stream feeds them
   for (const kb of [1, 8]) {
     const r = boundaryHolds(sample(kb), 97);
-    out.push({ name: `sample ${kb} KB`, ok: r.ok, cut: md.lastSafeBoundary(sample(kb)), at: r.at ?? null, why: r.why || null, src: kb * 1024 });
+    out.push({ name: `sample ${kb} KiB`, ok: r.ok, cut: md.lastSafeBoundary(sample(kb)), at: r.at ?? null, why: r.why || null, src: kb * 1024 });
   }
   for (const [name, partial, final] of GROWTH_CASES) {
     const cut = md.lastSafeBoundary(partial);

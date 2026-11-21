@@ -1,0 +1,65 @@
+<!doctype html>
+<!-- cdp-smoke.html — CDP 工具箱試刀台(-testdata 掛載:/testdata/cdp-smoke.html)
+     每個控件把觀測寫進 window.__T;結案時 evaluate 讀 JSON 比對。
+     探針清單:
+       dialog-alert / dialog-confirm / dialog-prompt  — cdp_dialog(延時開啟,避免 click 卡主線)
+       dbl / ctx                                      — cdp_pointer dblclick / rightclick
+       #t                                             — cdp_input 打字目標
+       #dragbox                                       — cdp_interact drag(moves+終點)
+       window scroll                                  — cdp_scroll(scrollY+事件數;頁高 2400px)
+       #fileinput                                     — cdp_upload(name/size/首行)
+       #dl                                            — cdp_download(blob → cdp-smoke.txt)
+       #delayed → #late                               — cdp_wait selector
+       console 按鈕                                    — cdp_console(grep smoke)
+       matchMedia/innerWidth 讀數                       — cdp_emulate(viewport/colorScheme)
+       fetch-404 按鈕                                  — cdp_network(status 過濾)
+-->
+<meta charset="utf-8">
+<title>cdp smoke bench</title>
+<style>body{font:14px system-ui;margin:2em;height:2400px}section{margin-bottom:1em}</style>
+<h2>CDP smoke bench</h2>
+<section><button id="alert-btn">alert</button><button id="confirm-btn">confirm</button><button id="prompt-btn">prompt</button></section>
+<section><button id="dbl">dbl-clicks: <span id="dblc">0</span></button><div id="ctxbox" style="border:1px solid;padding:8px; width:200px">right-click me</div></section>
+<section><input id="t" placeholder="type here" style="width:300px"></section>
+<section><div id="dragbox" style="width:60px;height:60px;background:#4af;touch-action:none">drag</div></section>
+<section><input id="fileinput" type="file"><span id="fname"></span></section>
+<section><button id="dl">download cdp-smoke.txt</button></section>
+<section><button id="delayed">reveal after 700ms</button></section>
+<section><button id="con">console trio</button><button id="f404">fetch 404</button></section>
+<section id="media">media…</section>
+<script>
+window.__T = {dbl: 0, ctx: false, dragMoves: 0, scrollEvents: 0};
+const T = window.__T;
+const later = (fn) => () => setTimeout(fn, 80); // 讓 click 先返回,dialog 開啟後再阻塞
+document.getElementById('alert-btn').onclick = later(() => { alert('smoke-alert'); T.alertReturned = true; });
+document.getElementById('confirm-btn').onclick = later(() => { T.confirmResult = confirm('smoke-confirm?'); });
+document.getElementById('prompt-btn').onclick = later(() => { T.promptResult = prompt('smoke-prompt?', ''); });
+document.getElementById('dbl').onclick = () => { T.dbl++; document.getElementById('dblc').textContent = T.dbl; };
+document.getElementById('ctxbox').addEventListener('contextmenu', (e) => { e.preventDefault(); T.ctx = true; });
+const box = document.getElementById('dragbox');
+box.addEventListener('pointerdown', () => { T.dragStarted = true; });
+box.addEventListener('pointermove', () => { if (T.dragStarted) T.dragMoves++; });
+box.addEventListener('pointerup', (e) => { T.dragStarted = false; T.dragEnd = [Math.round(e.clientX), Math.round(e.clientY)]; });
+document.getElementById('fileinput').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  T.fileName = f.name; T.fileSize = f.size;
+  T.fileHead = (await f.text()).slice(0, 20);
+  document.getElementById('fname').textContent = `${f.name} (${f.size}B)`;
+};
+document.getElementById('dl').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['cdp-smoke-download-ok'], { type: 'text/plain' }));
+  a.download = 'cdp-smoke.txt';
+  a.click();
+  T.downloadFired = true;
+};
+document.getElementById('delayed').onclick = () => setTimeout(() => {
+  const d = document.createElement('div'); d.id = 'late'; d.textContent = 'late-ok'; document.body.appendChild(d);
+}, 700);
+document.getElementById('con').onclick = () => { console.log('smoke-log-42'); console.warn('smoke-warn-42'); console.error('smoke-error-42'); };
+document.getElementById('f404').onclick = () => fetch('/testdata/definitely-not-here.txt').then(r => { T.net404 = r.status; });
+const media = () => `dark=${matchMedia('(prefers-color-scheme: dark)').matches} w=${innerWidth} h=${innerHeight}`;
+document.getElementById('media').textContent = media();
+addEventListener('resize', () => document.getElementById('media').textContent = media());
+addEventListener('scroll', () => { T.scrollEvents++; }, { passive: true });
+</script>

@@ -3,7 +3,7 @@
 Two files, used only by `../md-spec.html`, which is served only when the daemon is started with
 `-testdata testdata`. They are somebody else's documents, kept here so a conformance run reproduces
 offline against a version that will not move under it. Nothing in this directory is compiled, embedded or
-shipped: `//go:embed all:web` does not reach `testdata/`, and 140 KB of someone else's examples has no
+shipped: `//go:embed all:web` does not reach `testdata/`, and 140 KiB of someone else's examples has no
 business inside a binary.
 
 Both documents carry the same licence, and it is not the permissive one people expect from a test suite.
