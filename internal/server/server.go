@@ -260,7 +260,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) (*agent.Session
 // The default is a page, and the page is the ceiling of an answer: silence, a bare place name,
 // an oversized limit — whatever the URL says, the largest transcript this endpoint hands over is
 // one page (ir.MaxPageEntries at most). An endpoint that ships images inline must not answer to
-// the size of the session: one session's unparameterised read measured 73 MB, and no request —
+// the size of the session: one session's unparameterised read measured 73 MiB, and no request —
 // silence included — is a promise to pay for it. The answer is the *path* (the sequence that gets
 // sent and the sequence the transcript draws), not every entry in the log including the branches
 // nobody is on.

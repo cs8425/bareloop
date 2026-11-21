@@ -2,7 +2,7 @@ package asm
 
 // A generation failure leaves behind an assistant entry that is entirely our own words:
 //
-//	[generation failed: llm: 413 Payload Too Large: (empty body) [44 msgs, 100.3 MB sent, 6 tools]]
+//	[generation failed: llm: 413 Payload Too Large: (empty body) [44 msgs, 100.3 MiB sent, 6 tools]]
 //
 // It has to be an entry — the turn needs something on the path to answer it, or the loop asks the same
 // question forever — but it is a byte report, and handing it back as one of the model's turns credits

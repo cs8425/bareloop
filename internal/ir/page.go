@@ -16,7 +16,7 @@ const MaxPageEntries = 200
 
 // DefaultPageEntries is what the transcript endpoint answers a request that names no size at
 // all: a page, never the path. "No query string" was never anybody's promise to pay for the
-// whole session — one session's unparameterised read measured 73 MB, images inline — and a
+// whole session — one session's unparameterised read measured 73 MiB, images inline — and a
 // server should not be able to be talked into an unbounded transfer by saying nothing, nor by
 // naming a place without a size (a bare before/after gets this page too). No name the endpoint
 // reads asks for the whole path any more — the one that did is gone with its option, before the

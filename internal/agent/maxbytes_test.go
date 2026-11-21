@@ -26,16 +26,16 @@ func TestTheByteWallIsNotTheWindow(t *testing.T) {
 	}{
 		// The real sentence, in the shape internal/llm builds for every non-2xx: llama.cpp answers an
 		// oversized body with the status and an empty body, so nothing but the code is there to read.
-		{"llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MB sent, 12 tools]", true},
+		{"llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MiB sent, 12 tools]", true},
 		// The same failure after it has been stored as an assistant entry and clipped.
-		{"[generation failed: llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MB sent]]", true},
+		{"[generation failed: llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MiB sent]]", true},
 		// A proxy that formats its own answer.
 		{"llm: 413 : <html><body>Request Entity Too Large</body></html>", true},
 		{"llm: 431 Request Header Fields Too Large: nginx", true},
 		// The token wall, which needs a different rescue (and a different number in its sentence).
-		{"llm: 400 Bad Request: {\"error\":{\"code\":\"context_length_exceeded\"}} [4 msgs, 2.1 KB sent]", false},
+		{"llm: 400 Bad Request: {\"error\":{\"code\":\"context_length_exceeded\"}} [4 msgs, 2.1 KiB sent]", false},
 		{"llm: 500 Internal Server Error: the request exceeds the available context size", false},
-		{"llm: 503 Service Unavailable: upstream busy [4 msgs, 2.1 KB sent]", false},
+		{"llm: 503 Service Unavailable: upstream busy [4 msgs, 2.1 KiB sent]", false},
 		{"", false},
 	} {
 		if got := isBodyTooLarge(c.text); got != c.want {
@@ -51,21 +51,21 @@ func TestTheByteWallIsNotTheWindow(t *testing.T) {
 func TestTheCeilingIsTheSmallerOfConfigAndProof(t *testing.T) {
 	const mb = 1 << 20
 	if got := resolveBodyCeiling(32*mb, 0); got != 32*mb {
-		t.Errorf("config alone = %d, want 32 MB", got)
+		t.Errorf("config alone = %d, want 32 MiB", got)
 	}
 	if got := resolveBodyCeiling(0, 8*mb); got != 8*mb {
-		t.Errorf("measurement alone = %d, want 8 MB", got)
+		t.Errorf("measurement alone = %d, want 8 MiB", got)
 	}
 	if got := resolveBodyCeiling(0, 0); got != 0 {
 		t.Errorf("neither = %d, want 0 (unknown is a number, and it is not free)", got)
 	}
-	// The interesting pair: config says 32 MB, a 12 MB body was refused. Sending 30 MB because the
+	// The interesting pair: config says 32 MiB, a 12 MiB body was refused. Sending 30 MiB because the
 	// config allows it would be refused by the evidence, every time, with the ceiling never moving.
 	if got := resolveBodyCeiling(32*mb, 12*mb); got != 12*mb {
-		t.Errorf("config above the measurement = %d, want 12 MB (min over the values that exist)", got)
+		t.Errorf("config above the measurement = %d, want 12 MiB (min over the values that exist)", got)
 	}
 	if got := resolveBodyCeiling(4*mb, 12*mb); got != 4*mb {
-		t.Errorf("config below the measurement = %d, want 4 MB (the operator's own tighter limit holds)", got)
+		t.Errorf("config below the measurement = %d, want 4 MiB (the operator's own tighter limit holds)", got)
 	}
 	for _, c := range []struct {
 		cfg, measured int
@@ -169,7 +169,7 @@ func TestTheConfiguredWallReachesTheSessionAndTheStatusLine(t *testing.T) {
 	}
 	st := s.Status()
 	if st.BodyCeiling != 32<<20 {
-		t.Errorf("Status.bodyCeiling = %d, want the configured 32 MB", st.BodyCeiling)
+		t.Errorf("Status.bodyCeiling = %d, want the configured 32 MiB", st.BodyCeiling)
 	}
 	if !strings.Contains(st.BodyCeilingSource, "config") {
 		t.Errorf("Status.bodyCeilingSource = %q, want it to name where the number came from", st.BodyCeilingSource)
@@ -335,11 +335,11 @@ func TestAWallNothingCanFitStillReportsTheNumbers(t *testing.T) {
 	if got := humanBytes(999); got != "999 B" {
 		t.Errorf("humanBytes(999) = %q", got)
 	}
-	if got := humanBytes(20000); !strings.HasSuffix(got, "KB") {
-		t.Errorf("humanBytes(20000) = %q, want KB", got)
+	if got := humanBytes(20000); !strings.HasSuffix(got, "KiB") {
+		t.Errorf("humanBytes(20000) = %q, want KiB", got)
 	}
-	if got := humanBytes(32 << 20); got != "32.0 MB" {
-		t.Errorf("humanBytes(32 MB) = %q", got)
+	if got := humanBytes(32 << 20); got != "32.0 MiB" {
+		t.Errorf("humanBytes(32 MiB) = %q", got)
 	}
 }
 
@@ -368,7 +368,7 @@ func TestTheByteWallCompactsTheTurnBeforeTheUpload(t *testing.T) {
 	}
 	// The band a wall has to sit in is narrower than "smaller than the payload": it runs from the round's
 	// floor (the narrowest question the summariser may ask, which is the region it is replacing — here
-	// measured at 11.4 KB) up to the payload itself (15.6 KB). Placement is relative for the reason the
+	// measured at 11.4 KiB) up to the payload itself (15.6 KiB). Placement is relative for the reason the
 	// comment above TestTheSummaryRequestIsCutToFitTheBody gives, with one side of that band pinned by its
 	// own case below rather than trusted to arithmetic.
 	s.bodyCfg = sizes.WireTotal() - 2000
@@ -424,7 +424,7 @@ func TestTheByteWallCompactsTheTurnBeforeTheUpload(t *testing.T) {
 }
 
 // TestTheByteGuardCountsTheSkeletonToo pins the half of the number the path estimate cannot see: a turn
-// that fits by 1.6 KB does not fit once the system prompt and the tool schemas are counted, and that is
+// that fits by 1.6 KiB does not fit once the system prompt and the tool schemas are counted, and that is
 // what the pre-send comparison exists to catch. Asserted on the comparison rather than on a compaction:
 // whether a small path is worth summarising is a separate question with its own floor, and a test that
 // conflates the two goes red for the wrong reason.
@@ -443,7 +443,7 @@ func TestTheByteGuardCountsTheSkeletonToo(t *testing.T) {
 	}
 	// The two guard rails that make the case below a case rather than a coincidence.
 	if sizes.WireTotal() >= 5000 {
-		t.Fatalf("the path alone is already at %d B against a 5 KB wall; shrink pathOf", sizes.WireTotal())
+		t.Fatalf("the path alone is already at %d B against a 5000-byte wall; shrink pathOf", sizes.WireTotal())
 	}
 	if sizes.WireTotal()+s.bodyEnv < 5000 {
 		t.Fatalf("even the envelope does not cross the wall (%d + %d < 5000); thicken pathOf", sizes.WireTotal(), s.bodyEnv)
@@ -487,16 +487,16 @@ func TestTheLimitIsQuotedAsTheEvidenceStatesIt(t *testing.T) {
 	if got := bodyLimitPhrase(0, 0); got != "unknown" {
 		t.Errorf("no ceiling and nothing measured: %q, want \"unknown\"", got)
 	}
-	if got := bodyLimitPhrase(119<<20, 119<<20); got != "under the 119.0 MB it refused" {
+	if got := bodyLimitPhrase(119<<20, 119<<20); got != "under the 119.0 MiB it refused" {
 		t.Errorf("a wall taken from this very refusal is quoted as %q, which asks the reader to fit inside the size that was just refused", got)
 	}
 	// A configured wall sitting ABOVE the true one must not be quoted as if it were the limit: the refusal
-	// is the better evidence, and quoting 286 MB here would tell the reader their 196 MB body was fine.
-	if got := bodyLimitPhrase(286<<20, 196<<20); got != "under the 196.0 MB it refused" {
+	// is the better evidence, and quoting 286 MiB here would tell the reader their 196 MiB body was fine.
+	if got := bodyLimitPhrase(286<<20, 196<<20); got != "under the 196.0 MiB it refused" {
 		t.Errorf("a config wall above this refusal is quoted as %q, want the refused size quoted instead", got)
 	}
-	if got := bodyLimitPhrase(32<<20, 40<<20); got != "32.0 MB" {
-		t.Errorf("a configured wall (32 MB) against a larger body (40 MB): %q, want no hedge", got)
+	if got := bodyLimitPhrase(32<<20, 40<<20); got != "32.0 MiB" {
+		t.Errorf("a configured wall (32 MiB) against a larger body (40 MiB): %q, want no hedge", got)
 	}
 	if got := bodyLimitPhrase(8<<20, 16<<20); strings.Contains(got, "refused") {
 		t.Errorf("a wall lower than the body just refused: %q — it is not this request's own size, so it reads as a limit", got)
@@ -504,7 +504,7 @@ func TestTheLimitIsQuotedAsTheEvidenceStatesIt(t *testing.T) {
 }
 
 // TestTheGuardActsBelowTheWallItWasGiven pins the margin, which exists because of something watched
-// happening at 117 MB: a refusal records the ceiling as the size it refused, and that size is one the
+// happening at 117 MiB: a refusal records the ceiling as the size it refused, and that size is one the
 // endpoint has already sent back. A same-shaped request then estimates a few bytes under that ceiling
 // (the estimate reads low) and goes straight out to be refused again — forever, the guard never firing.
 // So the check acts at 90% of the wall, and a wall 20% above the payload is the far side of that.
@@ -583,10 +583,10 @@ func TestTheByteWallCutsDeepEnoughToReachItsSideOfTheRoom(t *testing.T) {
 	// wall caps the tail the round keeps and, through the question the round has to ask, the region it
 	// replaces — and those two added together are the path. A wall under about half the payload therefore
 	// asks for a cut so deep that a summary of what it replaced no longer fits the wall itself, and the
-	// round skips ("the narrowest summary this round can ask is 11.4 KB and this endpoint takes 7.6 KB"):
+	// round skips ("the narrowest summary this round can ask is 11.4 KiB and this endpoint takes 7.6 KiB"):
 	// correct behaviour, wrong end of the band for this test. The fixed cost of asking — the instruction,
-	// the envelope, and whatever the estimate leaves out — is proportionally far larger on a 70 KB path
-	// than on the live 146 MB one, which is why the fixture sits at 1.5x while live was safe at 1.25x.
+	// the envelope, and whatever the estimate leaves out — is proportionally far larger on a 70 KiB path
+	// than on the live 146 MiB one, which is why the fixture sits at 1.5x while live was safe at 1.25x.
 	s.bodyCfg = before * 2 / 3
 	if over, est, ceil := s.bodyOverWall(sizes); !over {
 		t.Fatalf("the pre-send check did not see the wall: %d B against %d B", est, ceil)
@@ -769,7 +769,7 @@ func TestTheResendIsBoundedAndEachAttemptIsSmaller(t *testing.T) {
 	// and that the run ends on the refusal rather than on a fake answer. It deliberately does not promise
 	// that maxBodyResends is what stops it here: inside one turn a forced compaction usually gets one shot,
 	// because the cut lands on a floor and the next 10% has nothing outside it to summarize. Measured, not
-	// theorised — 401 entries at 457 KB came back refused and the summary left 147 entries at 165 KB, which
+	// theorised — 401 entries at 457 KiB came back refused and the summary left 147 entries at 165 KiB, which
 	// is keepBudget (20% of a 200k window = 40k tokens) and not the byte line (the wall allowed ~365);
 	// the second refusal then found the path already sitting on that floor. So the bound is asserted as a
 	// ceiling. Its job is the shape where the path DOES stay cuttable — a run that grows again between

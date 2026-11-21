@@ -1,7 +1,7 @@
 package asm
 
 // A tool's structuredContent is the one field in a payload whose size is chosen by somebody else:
-// an MCP server that answers a file read with 10 MB of JSON decides what fraction of the model
+// an MCP server that answers a file read with 10 MiB of JSON decides what fraction of the model
 // window this session has left. The fold in structured.go is where that field becomes message text,
 // so it is also the only place a ceiling on it can go — one function, every mode, and nothing about
 // the log changes: the entry keeps the whole document, which is what makes the ceiling reversible
@@ -84,7 +84,7 @@ var structuredFoldBytes = len("\n" + StructuredMarker + "\n")
 // structuredWireBytes is what a tool result's structuredContent can cost on the wire under a
 // ceiling: the label, the document when it fits or its head when it does not, and the note when it
 // was cut. Estimate uses it, and that is the whole reason the ceiling has to be a number a caller
-// can pass — an estimate that still counted a capped 10 MB document at 10 MB would refuse to send a
+// can pass — an estimate that still counted a capped 10 MiB document at 10 MiB would refuse to send a
 // session whose payload is now sixteen thousand bytes, which is the opposite failure and just as
 // fatal.
 func structuredWireBytes(n, maxBytes int) int {

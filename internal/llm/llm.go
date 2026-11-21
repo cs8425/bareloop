@@ -133,7 +133,7 @@ type Config struct {
 	// MaxBodyBytes is the largest request body this endpoint takes: the operator's llama.cpp -bs, or
 	// the proxy's client_max_body_size, or the server box's default. It is a byte wall and not a token
 	// wall — a server that hits it answers 413 before it has read a single token — so no window size
-	// predicts it and nothing in the conversation does either: 32 MB of screenshot is 32 MB however
+	// predicts it and nothing in the conversation does either: 32 MiB of screenshot is 32 MiB however
 	// few tokens the text around it is worth. 0 = nobody said, so the number has to be learned from a
 	// refusal (see agent's maxbytes.go), and until it is learned nothing can be cut in advance.
 	MaxBodyBytes int `json:"maxRequestBodyBytes,omitempty"`

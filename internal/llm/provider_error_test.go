@@ -17,7 +17,7 @@ import (
 // count, tools, and the size of the finished body — and these tests pin that the sentence is there, in a
 // form a person can compare against a limit.
 
-var sentBrief = regexp.MustCompile(`\[\d+ msgs, [\d.]+ (B|KB|MB|GB) sent`)
+var sentBrief = regexp.MustCompile(`\[\d+ msgs, [\d.]+ (B|KiB|MiB|GiB) sent`)
 
 func refused(t *testing.T, call func() error, tools int) string {
 	t.Helper()
@@ -95,7 +95,7 @@ func TestHumanBytesReadsAsASize(t *testing.T) {
 	for _, c := range []struct {
 		n    int
 		want string
-	}{{512, "512 B"}, {2048, "2.0 KB"}, {118 * 1024 * 1024, "118.0 MB"}, {3 * 1024 * 1024 * 1024, "3.0 GB"}} {
+	}{{512, "512 B"}, {2048, "2.0 KiB"}, {118 * 1024 * 1024, "118.0 MiB"}, {3 * 1024 * 1024 * 1024, "3.0 GiB"}} {
 		if got := humanBytes(c.n); got != c.want {
 			t.Errorf("humanBytes(%d) = %q, want %q", c.n, got, c.want)
 		}

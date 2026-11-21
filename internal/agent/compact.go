@@ -323,7 +323,7 @@ func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual 
 	// A round the wall actually refused (wire) does not stop there: it moves the ceiling from a veto into
 	// the cap itself, sized from the bytes the path weighs (see below), because "the shallowest cut that
 	// still fits" leaves no headroom for a turn that is still growing — measured: three compactions in
-	// ninety seconds, the request parked at 95 MB against a 102 MB wall the whole time.
+	// ninety seconds, the request parked at 95 MiB against a 102 MiB wall the whole time.
 	p.MaxWireBytes = s.keptWireBudget()
 
 	// Planning input = assembler input: both come out of the single choke point (§3.2).
@@ -341,7 +341,7 @@ func (s *Session) compactOnce(ctx context.Context, trig compact.Trigger, manual 
 	// of what the path weighs instead of a fifth of the window. Both numbers are the same percentage of
 	// "what there is to keep", which is the whole point — the token one is meaningless when the thing that
 	// just failed was a byte count, and the two disagree by four orders of magnitude on a path of images
-	// (an entry the provider bills at 505 tokens can carry 3.7 MB of base64).
+	// (an entry the provider bills at 505 tokens can carry 3.7 MiB of base64).
 	if wire {
 		if pct := p.KeepPct(); pct > 0 {
 			p.WireBudgetBytes = sizes.WireTotal() * pct / 100

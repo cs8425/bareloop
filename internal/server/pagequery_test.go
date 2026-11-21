@@ -50,7 +50,7 @@ func TestPageQueryReadsEveryWindowName(t *testing.T) {
 
 func TestPageQueryDefaultIsAPage(t *testing.T) {
 	// The endpoint's contract: a GET that names no window buys a page, never the transcript.
-	// (One session's unparameterised read measured 73 MB; this test is why it cannot happen again.)
+	// (One session's unparameterised read measured 73 MiB; this test is why it cannot happen again.)
 	o, err := pageQuery(httptest.NewRequest("GET", "/api/session/s", nil))
 	if err != nil || o.Limit != ir.DefaultPageEntries {
 		t.Errorf("got %+v (%v), want the default page of %d", o, err, ir.DefaultPageEntries)

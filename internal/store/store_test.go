@@ -1036,7 +1036,7 @@ func TestCorpusDict(t *testing.T) {
 			hc += int64(len(henc.EncodeAll(p, nil)))
 		}
 		henc.Close()
-		// The trainer wants pre-truncated samples; beyond ~32KB the tail of a sample
+		// The trainer wants pre-truncated samples; beyond ~32 KiB the tail of a sample
 		// adds nothing it could not already match on.
 		samples := make([][]byte, len(s.texts))
 		for j, p := range s.texts {

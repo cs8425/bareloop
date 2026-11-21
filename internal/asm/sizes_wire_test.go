@@ -44,7 +44,7 @@ func TestWirePricesAnImageByItsBytesNotByItsReference(t *testing.T) {
 	// holds, this one counts the bytes the wire carries. An entry whose two columns agree is an entry
 	// with no attachment — and this entry has one, so the two must part company.
 	if got.Wire < 10*got.Bytes {
-		t.Fatalf("Bytes = %d and Wire = %d: a 3 KB image behind a 69-byte reference must move these two numbers apart",
+		t.Fatalf("Bytes = %d and Wire = %d: a 3000-byte image behind a 69-byte reference must move these two numbers apart",
 			got.Bytes, got.Wire)
 	}
 }

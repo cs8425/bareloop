@@ -3,7 +3,7 @@
 // other. A body over the wall is refused with 413 before a token is counted, so the session that
 // trips it cannot be saved by any token arithmetic: the request does not go out, and neither does
 // the compaction request that would have shrunk it (it reads the same path). That is how a session
-// bricks itself at 32 MB of screenshot rather than at 262k tokens.
+// bricks itself at 32 MiB of screenshot rather than at 262k tokens.
 //
 // So the rule here is the same shape as nctx.go's, over bytes: config (the operator knows their -bs)
 // and a refusal (413 at N proves the ceiling is under N, and N is measured exactly — the transport
@@ -47,7 +47,7 @@ func resolveBodyCeiling(cfgBytes, measuredBytes int) int {
 }
 
 // bodyCeilingSource labels the decision for the log line and the status, in the same spirit as
-// nctxSource: an operator reading "12 MB limit (measured)" knows the number came from a refusal and
+// nctxSource: an operator reading "12 MiB limit (measured)" knows the number came from a refusal and
 // may be one request too generous, and "unknown" is the state that must be reported, because with no
 // number nothing can be cut in advance.
 func bodyCeilingSource(cfgBytes, measuredBytes int) string {
@@ -158,7 +158,7 @@ func (s *Session) lastRefusedBody() int {
 // errBodyCeiling marks a request that was measured before sending and found over the wall with no room
 // left to cut. The attempt loop stops on it instead of re-sending: the size is known exactly, so
 // asking again is another upload of bytes the server has already refused — which is how one 413 used
-// to cost three, and why a session with a 100 MB path and a 32 MB limit took a minute to say no.
+// to cost three, and why a session with a 100 MiB path and a 32 MiB limit took a minute to say no.
 var errBodyCeiling = errors.New("summary request would not fit this endpoint's body limit")
 
 // noteEnvelopeBytes records the one part of the body the path estimate cannot see: the system prompt,
@@ -183,16 +183,16 @@ func (s *Session) noteEnvelopeBytes(req llm.Request) {
 
 // bodyGuardMarginPct is how much room the pre-send check leaves under the wall before it acts. Two
 // things make a bare "estimate >= ceiling" the wrong test, and the second one is not hypothetical: it
-// was watched happening at 117 MB.
+// was watched happening at 117 MiB.
 //
 //   - The estimate reads low. Calibrated against the transport it is 0.001% on a path of nothing but
-//     images (1,141 bytes on 123 MB) and up to 8% on a tool-heavy one, because quoted text in tool
+//     images (1,141 bytes on 123 MiB) and up to 8% on a tool-heavy one, because quoted text in tool
 //     results is where the residual lives.
 //   - A refusal sets the ceiling to the size it refused — and that size is by definition one the
 //     endpoint has already sent back. So the wall and "the next request of the same shape" are the same
 //     number, and any estimate error at all, in the reading-low direction, puts the next request under a
-//     ceiling it is going to breach. Without a margin the session uploads 117 MB, is refused, learns a
-//     ceiling of exactly 117 MB, and then uploads 117 MB again forever: the guard never fires because it
+//     ceiling it is going to breach. Without a margin the session uploads 117 MiB, is refused, learns a
+//     ceiling of exactly 117 MiB, and then uploads 117 MiB again forever: the guard never fires because it
 //     is comparing a number that reads low against a number that is itself the failure.
 //
 // Acting at 90% of the wall covers the 8% residual with something to spare, and what it costs is one
@@ -261,7 +261,7 @@ func (s *Session) bodyOverWall(sizes *asm.Sizes) (bool, int, int) {
 //
 // Compaction is asked for with force, as in guardFit — this is a fit problem, not a policy question, so
 // compact.auto gets no vote. A session with auto compaction off is precisely the one that will otherwise
-// upload 119 MB at a 119 MB wall every turn of its life and learn the wall over again each time.
+// upload 119 MiB at a 119 MiB wall every turn of its life and learn the wall over again each time.
 func (s *Session) guardBody(ctx context.Context, sizes *asm.Sizes) bool {
 	over, est, ceil := s.bodyOverWall(sizes)
 	if !over {
@@ -286,7 +286,7 @@ func (s *Session) guardBody(ctx context.Context, sizes *asm.Sizes) bool {
 // stops committing when the region runs out, so an unbounded loop would still end; what it would not end
 // cheaply is the upload. Counted in practice, not assumed: in a single turn expect ONE resend, because the
 // first forced cut lands on a floor and the second refusal finds nothing outside it — measured on 400 x
-// 1.1 KB entries in a 200k window, where the summary stopped at 147 entries / 165 KB (= keepBudget, while
+// 1.1 KiB entries in a 200k window, where the summary stopped at 147 entries / 165 KiB (= keepBudget, while
 // the byte line allowed ~365 entries) and the next refusal had no region left to cut. The counter earns
 // its keep on the shape where the path grows back between refusals, which is a run with tool rounds. The pathological shape is real — the newest entry alone weighs more than the
 // wall, so every round commits a summary of older things, the total never drops under the act line, and
@@ -329,12 +329,12 @@ func fitScope(sizes *asm.Sizes, lo, hi, budget int) int {
 // bodyLimitPhrase quotes the ceiling in the sentence that tells a person their body came back too large.
 // A refusal proves the wall is at or below the size it refused, never at that size itself — and right
 // here the two numbers are very often the same one, because the refusal is where the ceiling came from.
-// Quoting the ceiling for that reads as a self-report: "request body (147.5 MB) is over this endpoint's
-// limit (147.5 MB or less)", which sounds like a limit no request can satisfy and invites the
+// Quoting the ceiling for that reads as a self-report: "request body (147.5 MiB) is over this endpoint's
+// limit (147.5 MiB or less)", which sounds like a limit no request can satisfy and invites the
 // reasonable-sounding fix of raising it by one byte. So when the wall is this refusal's own size the
-// phrase quotes the EVIDENCE instead — "under the 147.5 MB it refused" — a bound, not a number to squeeze
-// inside. That also covers a configured wall sitting above the true one: a 286 MB config that came back
-// refused at 196 MB says "under the 196 MB it refused" rather than quoting the operator's too-generous
+// phrase quotes the EVIDENCE instead — "under the 147.5 MiB it refused" — a bound, not a number to squeeze
+// inside. That also covers a configured wall sitting above the true one: a 286 MiB config that came back
+// refused at 196 MiB says "under the 196.0 MiB it refused" rather than quoting the operator's too-generous
 // number. When the ceiling is LOWER than what was just refused it came from somewhere else (config, or an
 // earlier refusal) and is quoted as itself.
 func bodyLimitPhrase(ceil, sent int) string {
@@ -347,9 +347,10 @@ func bodyLimitPhrase(ceil, sent int) string {
 	return humanBytes(ceil)
 }
 
-// humanBytes writes a byte count the way the provider's refusal sentence does, so the two can be
-// compared by eye while someone is deciding what to cut. A request reported as 124151703 bytes is
-// not a number anyone weighs against a limit.
+// humanBytes writes a byte count with a binary divisor (1024) and the label that matches it, so the two
+// can be compared by eye while someone is deciding what to cut — and compared against the raw byte counts
+// the status API reports without a fourth-of-a-percent vanishing between them. A request reported as
+// 124151703 bytes is not a number anyone weighs against a limit.
 func humanBytes(n int) string {
 	const unit = 1024
 	if n < unit {
@@ -360,5 +361,5 @@ func humanBytes(n int) string {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

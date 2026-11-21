@@ -395,7 +395,7 @@ func (s *Session) window() (kept []*ir.Entry, cmp *ir.Entry, err error) {
 	// this window holds only "blob:<sha>" per picture. A window of screenshots costs
 	// its text and a handful of hashes, not megabytes per turn; the base64 is fetched
 	// at the two moments that owe it — the wire (asm.ExpandMessages before sending)
-	// and a text-only note's "~N KB" (asm.Blobs, an indexed size query).
+	// and a text-only note's "~N KiB" (asm.Blobs, an indexed size query).
 	found, err := s.log.Contents(ids, false)
 	if err != nil {
 		return nil, nil, err
@@ -1648,7 +1648,7 @@ func (s *Session) Inspect() *Inspection {
 	}
 	// TotalBytes is the payload's weight in the log, summed from the size table the payload was
 	// built with — the same entryBytes the row column already shows. It used to be a full
-	// json.Marshal of the payload per inspect for a number no decision reads (r106: 39GB).
+	// json.Marshal of the payload per inspect for a number no decision reads (r106: 39GiB).
 	for _, e := range built.Entries {
 		if sz, ok := sizes.Get(e.ID); ok {
 			ins.TotalBytes += sz.Bytes

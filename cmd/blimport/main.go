@@ -71,7 +71,7 @@ func main() {
 	verify := flag.Bool("verify", false, "re-open imported stores and print aggregates + payload digest")
 	comp := flag.String("compress", "zstd", `compress new payloads: zstd | gzip | none (the -verify digest weighs the text either way)`)
 	zdictPath := flag.String("zdict", "", "zstd dictionary file: new zstd writes are stamped with it (keep the file: its frames need it to read back)")
-	zstdSlots := flag.Int("zstd-slots", 2, `resident zstd encoder pool depth, ~10MB of tables per slot; 0 or -1 means auto: one slot per CPU core`)
+	zstdSlots := flag.Int("zstd-slots", 2, `resident zstd encoder pool depth, ~10 MiB of tables per slot; 0 or -1 means auto: one slot per CPU core`)
 	gendict := flag.Bool("gendict", false, "train a zstd dictionary from the store payloads under <src-data-dir>, write -dictout, and exit")
 	dictout := flag.String("dictout", "zdict.bin", "output file for -gendict")
 	maxdict := flag.Int("maxdict", 32768, "dictionary budget for -gendict, bytes")
@@ -371,7 +371,7 @@ func genDictionary(root, out string, maxdict int) {
 	if len(dirs) == 0 {
 		fail("no stores (directories holding %s) under %s", store.DBFileName, root)
 	}
-	// The trainer reads each sample on its own; beyond ~32KB a sample says nothing
+	// The trainer reads each sample on its own; beyond ~32 KiB a sample says nothing
 	// its head did not already say, and the cap is what keeps a huge corpus fast.
 	const sampleCap = 32 << 10
 	var samples [][]byte

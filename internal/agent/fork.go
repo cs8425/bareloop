@@ -151,7 +151,7 @@ func (m *Manager) Fork(ctx context.Context, srcID string, o ForkOptions) (string
 	// parameters however many rows the copy writes — SQLite's variable limit is
 	// 32,766 since 3.32, and because per-row statements are never concatenated,
 	// the statement text never grows either; the per-string/blob ceiling
-	// (about 1 GB) is a single blob's problem, not the transaction's; and the
+	// (SQLITE_MAX_LENGTH, 1e9 bytes — about 954 MiB) is a single blob's problem, not the transaction's; and the
 	// uncommitted pages live in SQLite's own page cache, spilling to its temp
 	// store, not onto this process's heap. What the copy does grow is the WAL,
 	// up to the checkpoint, and one final commit. In short the ceiling is the

@@ -409,7 +409,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelCauseFunc, st ru
 // which is how you check that nothing but the user's own words steers the model — language and
 // script included. The dump is the whole payload, so it is large: set it only when debugging.
 // The line counts, never serialises: the byte column it used to print cost a full
-// json.Marshal of the payload per turn for nothing but a log digit (r106 heap profile: 39GB).
+// json.Marshal of the payload per turn for nothing but a log digit (r106 heap profile: 39GiB).
 func (s *Session) logPayload(turn int, built *asm.Built, tools []llm.Tool) {
 	if built.System == "" {
 		s.logf("turn %d: %d messages, NO system prompt (session systemPrompt is empty), %d tools",

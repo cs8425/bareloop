@@ -3,14 +3,14 @@ package compact
 // A 413 is a fact about bytes, so the round it triggers plans in bytes: Params.WireBudgetBytes moves the
 // kept-tail cap from "keepBudget% of the window" to "keepBudget% of what the path weighs". The live
 // symptom this pins is a rescue that kept working and kept failing: three compactions in ninety seconds,
-// each one replacing the shallowest legal position, the request parked at 95 MB under a 102 MB wall the
+// each one replacing the shallowest legal position, the request parked at 95 MiB under a 102 MiB wall the
 // whole time — because "the lightest tail the token cap allows, vetoed only by the wall" is by
 // construction a tail with no headroom, and the turn that triggered it is still growing.
 //
 // The fixture stands in for a path of images without dragging a blob store in: DeriveSizes takes a
-// stamped Tokens as measured (Size.Real), so an entry can cost 50 tokens and carry 400 KB, which is the
+// stamped Tokens as measured (Size.Real), so an entry can cost 50 tokens and carry 400 KiB, which is the
 // entire disagreement between the two rulers (the provider billed the real ones at 505 tokens for
-// 3.7 MB). As in the other selection tests, every byte number below is read out of the size table.
+// 3.7 MiB). As in the other selection tests, every byte number below is read out of the size table.
 
 import (
 	"strings"
@@ -26,7 +26,7 @@ func wireEntry(id, role string, tok, bytes int) *ir.Entry {
 }
 
 // wirePath is [user light, assistant light, user fat, assistant fat, user light]: 250 tokens and
-// roughly 800 KB, with the weight in the middle — so a token cap stops the cut at the third entry while
+// roughly 800 KiB, with the weight in the middle — so a token cap stops the cut at the third entry while
 // a byte cap has to walk past the fat ones, and both still find a legal user boundary.
 func wirePath() []*ir.Entry {
 	return []*ir.Entry{
@@ -48,7 +48,7 @@ func TestTheByteCapSizesTheKeptTailInsteadOfTheTokenCap(t *testing.T) {
 
 	// The token answer for this path, with the byte cap switched off: 25% of a 1000-token window is 250
 	// tokens, which the whole path fits inside, so the cut stops at the first user position whose region
-	// is worth summarising — entry x2, carrying 400 KB of the payload with it.
+	// is worth summarising — entry x2, carrying 400 KiB of the payload with it.
 	tok := Params{KeepBudgetPct: intp(25), MinSummarizeTokens: 50}
 	control, ok := Select(path, sizes, selNCtx, tok)
 	if !ok || control.Cut != 2 || control.WireBudget != 0 {

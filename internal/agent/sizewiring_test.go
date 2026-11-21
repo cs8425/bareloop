@@ -113,7 +113,7 @@ func TestTheEnvelopeIsMeasuredOnceAndOnlyAgainWhenItMoves(t *testing.T) {
 	// config field it started from.
 	long := strings.Repeat("instructions for the session ", 100)
 	if n := s.envelopeBytes(long, two); n <= first {
-		t.Fatalf("a 2.9 KB system head left the envelope at %d", n)
+		t.Fatalf("a 3100-byte system head left the envelope at %d", n)
 	}
 	if stub.asks != 3 {
 		t.Fatalf("a new system head measured %d times in total, want 3", stub.asks)

@@ -20,7 +20,7 @@ import (
 
 func TestWindowKeepsReferencesAndPayloadShowsBytes(t *testing.T) {
 	s, _ := chainFixture(t, "blob-window", 4096)
-	img := bytes.Repeat([]byte("screenshot-pixel"), 409) // ~6.5 KB of raw bytes
+	img := bytes.Repeat([]byte("screenshot-pixel"), 409) // ~6.4 KiB of raw bytes
 	b64 := base64.StdEncoding.EncodeToString(img)
 	e := &ir.Entry{Kind: ir.KindUser, Role: "user", Content: "what does this show?",
 		Parts: []ir.Part{{Type: ir.PartImage, MimeType: "image/png", Data: b64, Name: "shot.png"}}}

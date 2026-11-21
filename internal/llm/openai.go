@@ -429,7 +429,7 @@ func asInt(v any) (int, bool) {
 //
 // The byte count is taken on the finished body, which is the only number with any claim to being what the
 // provider saw: images are base64 by then, the structured caps have applied, and `extra` has been merged
-// in. Counting the log instead would price a picture at its stored bytes and call a 118 MB request 4 MB.
+// in. Counting the log instead would price a picture at its stored bytes and call a 118 MiB request 4 MiB.
 func requestBrief(req Request, body []byte) string {
 	brief := fmt.Sprintf("%d msgs, %s sent", len(req.Messages), humanBytes(len(body)))
 	if n := len(req.Tools); n > 0 {
@@ -438,19 +438,21 @@ func requestBrief(req Request, body []byte) string {
 	return "[" + brief + "]"
 }
 
-// humanBytes says a size the way someone compares one: 512 B, 18.4 KB, 118.4 MB. "124151703 bytes" is a
-// number nobody holds in their head while deciding what to trim off a request.
+// humanBytes says a size the way someone compares one: 512 B, 18.4 KiB, 118.4 MiB. "124151703 bytes" is a
+// number nobody holds in their head while deciding what to trim off a request. The divisor is 1024 and the
+// label says so, because the number it is checked against — the length of the body that was written — is
+// raw bytes.
 func humanBytes(n int) string {
 	const unit = 1024
 	switch {
 	case n < unit:
 		return fmt.Sprintf("%d B", n)
 	case n < unit*unit:
-		return fmt.Sprintf("%.1f KB", float64(n)/unit)
+		return fmt.Sprintf("%.1f KiB", float64(n)/unit)
 	case n < unit*unit*unit:
-		return fmt.Sprintf("%.1f MB", float64(n)/(unit*unit))
+		return fmt.Sprintf("%.1f MiB", float64(n)/(unit*unit))
 	default:
-		return fmt.Sprintf("%.1f GB", float64(n)/(unit*unit*unit))
+		return fmt.Sprintf("%.1f GiB", float64(n)/(unit*unit*unit))
 	}
 }
 

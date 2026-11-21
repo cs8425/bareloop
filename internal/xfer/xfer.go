@@ -51,11 +51,11 @@ const (
 
 // The import gates. Exports are unbounded by design — one's own transcript streamed out is
 // never the dangerous direction — but imports read untrusted bytes, so the compressed body
-// is capped and the decompressed stream is capped again, separately: a 50 MB zstd bomb
+// is capped and the decompressed stream is capped again, separately: a 50 MiB zstd bomb
 // unfolds to gigabytes if nobody stands in the doorway. Both sides are streams end to end
 // (reader → decompressor → parser → one store transaction), so the caps bound what is ever
 // buffered. Vars, not consts, because dialing them down in a test is the only honest way
-// to test a 512 MB doorframe.
+// to test a 512 MiB doorframe.
 var (
 	MaxCompressedBody int64 = 50 << 20
 	MaxDecompressed   int64 = 512 << 20

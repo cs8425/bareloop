@@ -238,7 +238,7 @@ func entryBytes(e *ir.Entry) int {
 // The one length that is not the answer on its own is an image part's. A part whose data is
 // "blob:<sha>" occupies 69 bytes in the log and 4/3rds of the blob's raw bytes on the wire inside a
 // data URL; a part whose data is already base64 occupies that many bytes both places. Priced from
-// the log column, an entry holding a 2 MB screenshot claims 69 bytes; the 413 that arrives for it
+// the log column, an entry holding a 2 MiB screenshot claims 69 bytes; the 413 that arrives for it
 // disagrees by a factor of forty thousand, which is the whole reason this column exists.
 //
 // The second result counts the references that could not be priced at all, so that a caller adding

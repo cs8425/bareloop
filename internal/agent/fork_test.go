@@ -473,7 +473,7 @@ func idsOf(path []*ir.Entry) []string {
 }
 
 // TestForkLargePathCopiesInOneTransaction sizes the copy for the record: two
-// thousand entries and a 25 KB blob that ten of them name, forked as one commit
+// thousand entries and a 25 KiB blob that ten of them name, forked as one commit
 // with every row landing. The transaction's limits are argued where the copy is
 // written (fork.go, "How big can all of it get"); this is the measurement that
 // keeps that argument honest — a fork nobody could defend would first show up

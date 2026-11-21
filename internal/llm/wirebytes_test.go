@@ -83,7 +83,7 @@ func TestTheEnvelopeMovesWithWhatBelongsToIt(t *testing.T) {
 	long := base
 	long.Messages = []asm.Message{sys, {Role: "user", Content: strings.Repeat("long ", 40000)}}
 	if got := env(long); got != floor {
-		t.Fatalf("a 200 KB conversation changed the envelope from %d to %d", floor, got)
+		t.Fatalf("a 200,000-byte conversation changed the envelope from %d to %d", floor, got)
 	}
 
 	// A tool is part of it, schemas and all: enabling one tool is one of the ways a request grows

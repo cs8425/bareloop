@@ -88,7 +88,7 @@ type Params struct {
 	// exists because the two rulers disagree about images — one entry is a few hundred tokens and several
 	// megabytes — so a path of screenshots can sit comfortably inside a 20%-of-window token budget while
 	// weighing more than the endpoint's body limit, and a plan made by tokens alone then replaces two
-	// entries and still sends 117 MB. Zero means no ceiling is known: pure token planning, exactly the
+	// entries and still sends 117 MiB. Zero means no ceiling is known: pure token planning, exactly the
 	// behaviour before bytes were in the picture.
 	//
 	// why it is a candidate filter and not a rewrite of the token cap: it is a different unit, and the
@@ -103,7 +103,7 @@ type Params struct {
 	// asks "does the tail weigh at most this" rather than "does the tail cost at most keepBudget% of the
 	// window". It is the 413 rescue's unit — the failure arrived in bytes, so 20% of an 81,920-token
 	// window is not an answer to it: that budget happily keeps twenty-three screenshots (twelve thousand
-	// tokens, 135 MB) the endpoint has just refused, and the round then buys back a few megabytes per
+	// tokens, 135 MiB) the endpoint has just refused, and the round then buys back a few megabytes per
 	// summary while the turn keeps growing. The caller sizes it from the path itself (the bytes it
 	// weighs now, times keepBudget%) so the same percentage means the same thing in either currency:
 	// keep a fifth of what you have. Zero leaves the token planner untouched.

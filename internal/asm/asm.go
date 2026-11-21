@@ -676,7 +676,7 @@ func content(e *ir.Entry, opts Options) any {
 // which is exactly what happened in a real session: it produced a confident four-point description
 // of pixels that were never sent, while its own reasoning noticed the note and overruled it.
 //
-// The quoted KB is counted out of the base64, and a reference part does not carry it: the size is
+// The quoted KiB is counted out of the base64, and a reference part does not carry it: the size is
 // asked of the resolver and worked back through the standard encoding's exact length, so the note
 // says the same number byte for byte whether the entry travels with bytes or with a reference —
 // the KV prefix cannot tell the two shapes apart. A size nobody can answer (no resolver, a blob
@@ -690,13 +690,13 @@ func imageNote(p ir.Part, blobs Blobs) string {
 	if mt == "" {
 		mt = "unknown type"
 	}
-	return "[attached " + name + " (" + mt + ", ~" + kbWord(p, blobs) + " KB) is in this conversation " +
+	return "[attached " + name + " (" + mt + ", ~" + kbWord(p, blobs) + " KiB) is in this conversation " +
 		"but its pixels were NOT sent to you: this session sends text only. You cannot see it, so do " +
 		"not describe it and do not guess what it shows — say that you cannot see the image and ask " +
 		"the user to describe it or to turn image sending on.]"
 }
 
-// kbWord is the "~N KB" number of the note: the base64's length run through the
+// kbWord is the "~N KiB" number of the note: the base64's length run through the
 // formula this file has always used, whether the part carries that base64 or names
 // it in the blob table. Standard base64 of n bytes is exactly 4*((n+2)/3) long, so
 // the reference path arrives at the identical digits — the length is what the old
@@ -924,7 +924,7 @@ func Estimate(e *ir.Entry, structuredMax int) int {
 		}
 	}
 	// A tool's structuredContent is counted whether or not this session's mode sends it: the
-	// estimate is a ceiling on what the entry can cost, and under-counting a 200 KB JSON is how a
+	// estimate is a ceiling on what the entry can cost, and under-counting a 200 KiB JSON is how a
 	// request reaches the pre-send guard instead of the compaction trigger that would have made
 	// room for it. Over-counting under "drop" only makes the unsent tail look bigger than it is.
 	//

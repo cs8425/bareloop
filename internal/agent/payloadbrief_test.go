@@ -52,7 +52,7 @@ func TestBriefDoesNotChangeHowAFailureSorts(t *testing.T) {
 		built := &asm.Built{System: "you are", Entries: []*ir.Entry{{ID: "0000003"}, {ID: "0000004"}}}
 		return fmt.Errorf("%w [%s]", errors.New(msg), payloadBrief(built))
 	}
-	oversized := wrap("llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MB sent, 12 tools]")
+	oversized := wrap("llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MiB sent, 12 tools]")
 	if transientLLMError(oversized) {
 		t.Errorf("the same bytes will fail the same way, and the brief did not keep that verdict: %v", oversized)
 	}

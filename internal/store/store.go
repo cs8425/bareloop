@@ -156,9 +156,9 @@ func Open(dir string, fsync bool) (*Log, error) {
 	// a rollback, no torn-tail rule to implement); synchronous(NORMAL) is what fsync=false
 	// always meant (the bench's 0.8ms write; FULL for fsync=true); busy_timeout is insurance
 	// for a second reader; mmap_size(0) because the WAL shm mapping is the only mapping we
-	// want the page cache deciding about (r83: 300MB lessons); cache_size(-512) because the
-	// default 2MB per handle is generous at the scale this store plans for — the r83 A/B
-	// measured the default costing +20MB of RSS at 17 open sessions, and hundreds are planned.
+	// want the page cache deciding about (r83: 300 MiB lessons); cache_size(-512) because the
+	// default 2 MiB per handle is generous at the scale this store plans for — the r83 A/B
+	// measured the default costing +20 MiB of RSS at 17 open sessions, and hundreds are planned.
 	syncMode := "NORMAL"
 	if fsync {
 		syncMode = "FULL"
@@ -171,7 +171,7 @@ func Open(dir string, fsync bool) (*Log, error) {
 		return nil, err
 	}
 	// why one connection: one daemon, one writer per session, and an SQLite handle is a
-	// wasm sandbox — the bench priced each connection at ~330KB, so we keep exactly one.
+	// wasm sandbox — the bench priced each connection at ~330 KiB, so we keep exactly one.
 	db.SetMaxOpenConns(1)
 	l := &Log{dir: dir, db: db}
 	var v int
@@ -329,7 +329,7 @@ func payloadShas(payload string) []string {
 //
 // zstd is the default because the trained dictionary made it the smaller and the faster
 // answer on every corpus measured (S8.7/S8.8): ~9% under gzip on disk, ~2× the scan
-// speed, with the book itself costing 32KB (docs/zstd-dictionary.md).
+// speed, with the book itself costing 32 KiB (docs/zstd-dictionary.md).
 var Compressor = "zstd" // "gzip" | "zstd" | "none" — each CLI's -compress flag wires it
 
 // gzipFloor is the TOAST threshold shrunk to this store's page: under half a kilobyte
@@ -351,8 +351,8 @@ var gzReaders = sync.Pool{New: func() any { return new(gzip.Reader) }}
 // pool (see SetZdict): swapping a dictionary mid-process costs one fresh pair, never a
 // silent misread of frames stamped by the old one. EncodeAll/DecodeAll are safe for
 // concurrent use on one instance, and a gzip-default process never pays either one's
-// buffers. The encoder window is this codec's real RAM note — ~80MB resident at
-// the pinned 1MB window, ~67MB of it the fixed tables of the chosen encoder (see
+// buffers. The encoder window is this codec's real RAM note — ~80 MiB resident at
+// the pinned 1 MiB window, ~67 MiB of it the fixed tables of the chosen encoder (see
 // zstdWindow) — which is why the window is pinned and why the import is lazy.
 type zstdPairVal struct {
 	enc *zstd.Encoder
@@ -379,18 +379,18 @@ var (
 const ZstdLevel = zstd.SpeedBetterCompression
 
 // zstdWindow is the encoder's match history. Measured on the heap profile (the
-// docs only mention the 8MB default): the history buffer scales with the window —
-// 68MB at 8MB, 8MB at 1MB — and whatever else the better-dict encoder carries
+// docs only mention the 8 MiB default): the history buffer scales with the window —
+// 68 MiB at 8 MiB, 8 MiB at 1 MiB — and whatever else the better-dict encoder carries
 // resident per pool slot does not follow the window. The library default arrived
-// as ~135MB on this machine; pinning 1MB lands the floor at ~80MB, which is the
+// as ~135 MiB on this machine; pinning 1 MiB lands the floor at ~80 MiB, which is the
 // fixed cost per pool slot times the slot count — see zstdEncoderSlots for the
 // other half of that product, and neither WithLowerEncoderMem (it only trims the
-// history, worth ~1MB here) nor WithDecoderLowmem (already the default — true)
+// history, worth ~1 MiB here) nor WithDecoderLowmem (already the default — true)
 // has anything left to give.
 //
 // One row per EncodeAll frame is how payloads are written, and a frame never
 // matches outside itself — the window only has to cover the largest single
-// payload, and 1MB does that with headroom (measured: reforking the corpus store
+// payload, and 1 MiB does that with headroom (measured: reforking the corpus store
 // byte-for-byte under the new window — same 282,624 path bytes, so no ratio
 // change). A dictionary must fit inside the window (the format requires it), which
 // SetZdict enforces loudly instead of letting NewWriter fail into "store text"
@@ -400,9 +400,9 @@ const zstdWindow = 1 << 20
 
 // ZstdSlots pins the EncodeAll pool depth, and pinning it is the difference
 // between a RAM figure and a rumor: the library sizes that pool at GOMAXPROCS —
-// one full set of better-dict tables (~10MB) per core, born when the first row big
-// enough to compress is written and held forever — so an unpinned encoder costs 80MB on this 8-core machine and would
-// cost 300MB+ on a 32-core one. The store cannot use the extra slots: every
+// one full set of better-dict tables (~10 MiB) per core, born when the first row big
+// enough to compress is written and held forever — so an unpinned encoder costs 80 MiB on this 8-core machine and would
+// cost 300 MiB+ on a 32-core one. The store cannot use the extra slots: every
 // AppendEntry holds its Log's mutex across the compression, so only cross-store
 // concurrent writes reach the pool at all — two slots cover a session writing
 // while an import or fork runs, and past that writers queue on the channel,
@@ -599,7 +599,7 @@ func (l *Log) BlobBytes(sha string) (b []byte, mime string, found bool, err erro
 
 // BlobSize is one blob's byte count, answered from the size column the write path
 // keeps beside the bytes — no bytes move. It exists so an assembler can price an
-// image note (asm's text-only view says "~N KB") over a reference, where the
+// image note (asm's text-only view says "~N KiB") over a reference, where the
 // base64 the note was always counted from is not in hand.
 func (l *Log) BlobSize(sha string) (size int, found bool, err error) {
 	l.mu.Lock()

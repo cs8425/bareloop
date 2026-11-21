@@ -2,7 +2,7 @@ package asm
 
 // Tests for the reference path: entries whose image parts name the blob table
 // ("blob:<sha>") instead of carrying base64. The promise they hold is one number and
-// one byte string: a note quotes the same "~N KB" the base64 was always counted from,
+// one byte string: a note quotes the same "~N KiB" the base64 was always counted from,
 // and an expanded payload is byte-identical to the payload the base64 would have built.
 
 import (
@@ -156,8 +156,8 @@ func TestAssembleReferenceNoteWithoutResolver(t *testing.T) {
 	e := &ir.Entry{ID: "1", Role: "user", Parts: []ir.Part{refImage("abc", "image/png", "pic.png")}}
 	b := Assemble(Payload{Kept: []*ir.Entry{e}}, Options{SendImages: boolPtr(false)})
 	text, ok := b.Messages[0].Content.(string)
-	if !ok || !strings.Contains(text, "~? KB)") {
-		t.Errorf("note without a resolver: %q; wanted it to say ~? KB", b.Messages[0].Content)
+	if !ok || !strings.Contains(text, "~? KiB)") {
+		t.Errorf("note without a resolver: %q; wanted it to say ~? KiB", b.Messages[0].Content)
 	}
 }
 

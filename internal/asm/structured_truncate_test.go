@@ -188,7 +188,7 @@ func TestDocumentUnderTheCeilingIsUntouched(t *testing.T) {
 
 // TestEstimateFollowsTheCeilingAndNeverUnderrunsTheWire holds both directions that matter. Pricing
 // the whole stored document is the bug this file exists to fix: after a restart — which forgets the
-// real usage — a 10 MB result would read as megabytes of tokens, and the pre-send guard would refuse
+// real usage — a 10 MiB result would read as megabytes of tokens, and the pre-send guard would refuse
 // a payload that is really sixteen thousand bytes. Under-counting the bytes actually sent is the bug
 // the old comment in Estimate warned about, so it is asserted against the assembled wire itself.
 func TestEstimateFollowsTheCeilingAndNeverUnderrunsTheWire(t *testing.T) {
