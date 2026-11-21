@@ -835,6 +835,7 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 			Model:   cfg.LLM.Model,
 			Finish:  "error",
 			Label:   "llm error",
+			Notice:  true,
 			Ms:      time.Since(start).Milliseconds(),
 		}, streamID, false
 	}
@@ -898,6 +899,7 @@ func (s *Session) generate(ctx context.Context, built *asm.Built, tools []llm.To
 			Model:   cfg.LLM.Model,
 			Finish:  "error",
 			Label:   "llm error",
+			Notice:  true,
 			Ms:      time.Since(start).Milliseconds(),
 		}, streamID, false
 	}
@@ -1052,7 +1054,11 @@ stream:
 		// quietly truncated reads like an answer that is complete.
 		entry.Label = "llm error"
 		if entry.Content == "" {
+			// Nothing was said, so the entry is entirely our notice and asm keeps it off the wire.
+			// The branch below is the opposite case: the model did speak, and half a sentence the
+			// model said belongs in the conversation even with our note appended to it.
 			entry.Content = "[generation failed: " + clip(streamErr, 600) + "]"
+			entry.Notice = true
 		} else {
 			entry.Content += "\n\n[stream error: " + clip(streamErr, 300) + "]"
 		}

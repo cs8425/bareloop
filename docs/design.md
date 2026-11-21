@@ -327,6 +327,13 @@ owing one forever. A provider that answers 500 reliably then produces a storm - 
 round, each with a payload line and an error event, forever. As the belt to those braces, a round that
 committed nothing stops the run instead of starting another round.
 
+That entry is written for a person, and it is not replayed to the model: `ir.Entry.Notice` marks it, and
+the assembler keeps a notice off the wire while it stays on the path. "118.4 MB sent, 12 tools" is our
+report about a body the provider never read, so handing it back credits the model with a sentence it
+never said - and it does so in the one request where the conversation should have been unchanged, the
+retry. The exception is deliberate: a stream that died *after* producing words leaves those words in the
+conversation, because half a sentence the model said is still something the model said.
+
 What was sent rides along with the failure, because it is the one thing that cannot be reconstructed later:
 a provider that refuses a body usually says nothing about it — llama.cpp answers a body over its HTTP
 layer's size cap with an empty one, a proxy with HTML — and the next turn is a different payload. So every

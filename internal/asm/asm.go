@@ -824,6 +824,13 @@ func repair(b *Built) int {
 		if unsendableAssistant(e) {
 			continue // nothing a provider would accept (see unsendableAssistant)
 		}
+		if e.IsNotice() {
+			// Our status text, not the model's turn to speak (see ir.Entry.Notice). Like the drop
+			// above, it costs the conversation nothing it had: the entry stays on the path, and
+			// Entries and Messages are appended together here, so the ids, the head count and the
+			// size table all follow this one decision instead of drifting from it.
+			continue
+		}
 		outEntries = append(outEntries, e)
 		outMsgs = append(outMsgs, b.Messages[i])
 		if e.Role != "assistant" || len(e.ToolCalls) == 0 {

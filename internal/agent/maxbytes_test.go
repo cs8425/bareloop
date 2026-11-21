@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -633,6 +634,7 @@ type wallProvider struct {
 	*sizedProvider
 	mu     sync.Mutex
 	tried  []int
+	texts  []string // the same requests' messages glued: what the endpoint was actually shown
 	refuse int
 }
 
@@ -643,6 +645,7 @@ func (p *wallProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.
 	}
 	p.mu.Lock()
 	p.tried = append(p.tried, n)
+	p.texts = append(p.texts, showToEndpoint(req))
 	outstanding := p.refuse
 	if outstanding > 0 {
 		p.refuse--
@@ -658,6 +661,24 @@ func (p *wallProvider) sizes() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]int(nil), p.tried...)
+}
+
+// showToEndpoint glues a request's message contents together, so a test can ask whether the endpoint
+// was shown some piece of the conversation without unpicking how each message encodes its content.
+func showToEndpoint(req llm.Request) string {
+	var sb strings.Builder
+	for _, m := range req.Messages {
+		sb.WriteString("[" + m.Role + "] ")
+		sb.WriteString(fmt.Sprint(m.Content))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func (p *wallProvider) shown() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.texts...)
 }
 
 // TestARefusedBodyResendsItselfAfterTheCompaction is the fix for a loop that stopped after saving itself.
@@ -697,6 +718,41 @@ func TestARefusedBodyResendsItselfAfterTheCompaction(t *testing.T) {
 	}
 	if !saw413 {
 		t.Fatal("the refused request left no trace on the path: a retry nobody can see is a retry nobody trusts")
+	}
+}
+
+// TestTheFailureNoticeIsNotShownToTheEndpoint is the other half of that promise, and the half that used
+// to be wrong. The entry which closes a failed turn carries our byte report — msgs, MB sent, tools, the
+// entry range — and it reached the model as one of its own turns: a sentence the model never said, in
+// the conversation forever, and in the resent request it even interrupted the very question we were
+// asking again. It stays on the path (the transcript reads it, and it is what stops the loop owing an
+// answer) and never reaches the endpoint.
+func TestTheFailureNoticeIsNotShownToTheEndpoint(t *testing.T) {
+	s, cp := chainFixture(t, "notice-off-wire", 100000)
+	wp := &wallProvider{sizedProvider: &sizedProvider{chainProvider: cp, skeleton: 1000}, refuse: 1}
+	s.provider = wp
+	pathOf(t, s, 30, 1100)
+
+	send(t, s, "answer this")
+	waitForIdle(t, s)
+
+	shown := wp.shown()
+	if len(shown) != 2 {
+		t.Fatalf("the endpoint saw %d request(s), want two: %v", len(shown), wp.sizes())
+	}
+	var onPath int
+	for _, e := range s.path() {
+		if strings.Contains(e.Content, "generation failed") {
+			onPath++
+		}
+	}
+	if onPath == 0 {
+		t.Fatal("the failure left no entry on the path, yet the run resent: which of them closed the turn?")
+	}
+	for i, text := range shown {
+		if strings.Contains(text, "generation failed") {
+			t.Fatalf("request %d was shown the failure notice: the model is told it reported a byte count\n%s", i+1, clip(text, 300))
+		}
 	}
 }
 

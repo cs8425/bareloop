@@ -199,6 +199,18 @@ type Entry struct {
 
 	Compaction *CompactionMeta `json:"compaction,omitempty"`
 
+	// Notice marks an entry whose whole content is our own status text, not something the model
+	// said: today that is "[generation failed: …]", written when a request never reached an answer.
+	// It stays on the path — the transcript, the audit trail, and the fact that the turn has an
+	// answer all read it — but asm keeps it off the wire: handing the model a byte report as its
+	// own previous turn is a sentence it never said.
+	//
+	// The mark is only ever set where the content is assigned, never where something is appended to it:
+	// appending means the model spoke first, and an entry that begins with the model's words is
+	// conversation even when it ends with our note — the whole entry goes off the wire with this bit, so
+	// setting it on a half-said answer would throw the answer away to save the note.
+	Notice bool `json:"notice,omitempty"`
+
 	// Label is a free-form UI annotation (e.g. "interrupted by user").
 	Label string    `json:"label,omitempty"`
 	Ts    time.Time `json:"ts"`
@@ -206,6 +218,12 @@ type Entry struct {
 
 // IsCompaction reports whether the entry is a compaction record.
 func (e *Entry) IsCompaction() bool { return e.Kind == KindCompaction }
+
+// IsNotice reports whether the entry is our own status text rather than an utterance, and so should
+// not be handed to the model as one of its turns. The tool-call half is not decoration: an entry
+// that carried calls stays on the wire even when it failed, or the tool results after it turn into
+// orphans that repair() then has to explain.
+func (e *Entry) IsNotice() bool { return e != nil && e.Notice && len(e.ToolCalls) == 0 }
 
 // Path walks from id up to the root and returns the root-to-id sequence.
 // A missing parent terminates the walk (the visible prefix is returned).
