@@ -209,8 +209,8 @@ func (s *Session) Interrupt(msg Message) error {
 //
 // It deliberately does not call needsRun(): that function also drives the loop's own auto-continuation,
 // where a compaction boundary must say no. Here a compaction boundary is exactly what you resume from,
-// because the run that compacted the context ends by asking the user to send again - which should not
-// have to be a new message.
+// because the run that compacted the context over a WINDOW problem ends by asking the user to send again
+// (a refused body now resends itself, maxbytes.go) - which should not have to be a new message.
 func (s *Session) Resume(ctx context.Context) error {
 	s.mu.Lock()
 	if s.phase != phaseIdle {
@@ -433,6 +433,8 @@ func (s *Session) logPayload(turn int, built *asm.Built, tools []llm.Tool) {
 // tools. It reports whether the user aborted.
 func (s *Session) turns(ctx context.Context) (bool, error) {
 	cfg := s.Config()
+	// How many times this run has resent a turn that the endpoint refused for size (maxbytes.go).
+	bodyResends := 0
 	for {
 		// Ask the server once, before this session has sent anything: the configured window is a
 		// ceiling, not a fact, and discovering that it shrank by means of a refused request costs a
@@ -601,8 +603,27 @@ func (s *Session) turns(ctx context.Context) (bool, error) {
 			res := s.compactHere(ctx, compact.TriggerInLoop, true)
 			if res.Committed {
 				s.emit(Event{Type: EvtCompact, Data: res})
-				return false, fmt.Errorf("request body (%s) is over this endpoint's limit (%s): the context was compacted, please send again",
-					sentText, bodyLimitPhrase(ceil, sent))
+				// The window branch above ends the run and asks the reader to send again, and that is the
+				// right call there: it has just re-probed the window, so the ruler itself changed, and a
+				// retry pays for a whole generation to discover whether the new one fits. Here the ruler is
+				// bytes and the compaction was cut to fit under it, so the request that goes out next is NOT
+				// the request that just failed — which is the single premise the "do not retry, the same
+				// bytes will keep failing the same way" rule in generate rests on. Stopping here would spend
+				// the summary and still leave the message unanswered, on a session that has just learned the
+				// wall and is therefore best placed to use it. So build again from storage, the way the
+				// pre-send guard does when it moves the path, and send.
+				//
+				// Held messages stay held, correctly: the turn this run owes is still outstanding, and the
+				// answer they wait behind may now actually arrive. Ending the run without flushing them —
+				// what this branch used to do — is the worse of the two.
+				if bodyResends < maxBodyResends {
+					bodyResends++
+					s.logf("body: compacted after the refusal (%d/%d) - building this turn again and sending", bodyResends, maxBodyResends)
+					s.emit(Event{Type: EvtInfo, Info: fmt.Sprintf("body compaction after a refused request: sending again (%d/%d)", bodyResends, maxBodyResends)})
+					continue
+				}
+				return false, fmt.Errorf("request body (%s) is over this endpoint's limit (%s): compacted %d times and still refused - raise llm.maxRequestBodyBytes or drop the largest entry",
+					sentText, bodyLimitPhrase(ceil, sent), bodyResends)
 			}
 			skip := res.Skipped
 			if skip == "" {

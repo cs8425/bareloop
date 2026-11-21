@@ -280,6 +280,22 @@ func (s *Session) guardBody(ctx context.Context, sizes *asm.Sizes) bool {
 	return false
 }
 
+// maxBodyResends bounds what the reactive branch in turns() may do after the endpoint refused a request:
+// it compacts, and then it may build that request again and send it — up to this many times per run.
+// The bound is not about termination. A resend only happens on a committed compaction, and compaction
+// stops committing when the region runs out, so an unbounded loop would still end; what it would not end
+// cheaply is the upload. Counted in practice, not assumed: in a single turn expect ONE resend, because the
+// first forced cut lands on a floor and the second refusal finds nothing outside it — measured on 400 x
+// 1.1 KB entries in a 200k window, where the summary stopped at 147 entries / 165 KB (= keepBudget, while
+// the byte line allowed ~365 entries) and the next refusal had no region left to cut. The counter earns
+// its keep on the shape where the path grows back between refusals, which is a run with tool rounds. The pathological shape is real — the newest entry alone weighs more than the
+// wall, so every round commits a summary of older things, the total never drops under the act line, and
+// each attempt pays for another hundred megabytes. Two resends buy the normal case (one refusal to learn
+// the wall, one cut to get under it) and then hand the problem back to the reader with a count in the
+// sentence, which is what the byte branch owed and did not have: it used to stop and say "please send
+// again" after spending a summary generation on a path it then never shipped.
+const maxBodyResends = 2
+
 // fitScope is the largest i in [lo, hi] whose estimated body still fits budget bytes. The prefix sums
 // are monotone, so it is a search rather than a scan: a path of 100k entries is asked about with
 // seventeen lookups, and this runs inside a compaction that is already making a network call.
@@ -313,15 +329,20 @@ func fitScope(sizes *asm.Sizes, lo, hi, budget int) int {
 // bodyLimitPhrase quotes the ceiling in the sentence that tells a person their body came back too large.
 // A refusal proves the wall is at or below the size it refused, never at that size itself — and right
 // here the two numbers are very often the same one, because the refusal is where the ceiling came from.
-// Quoted flat that reads "119.4 MB is over a 119.4 MB limit": a limit no request can satisfy, which
-// invites the reasonable-sounding fix of raising it by one byte. When the ceiling is smaller than what
-// was just refused it came from somewhere else (config, or a lower refusal) and is quoted as itself.
+// Quoting the ceiling for that reads as a self-report: "request body (147.5 MB) is over this endpoint's
+// limit (147.5 MB or less)", which sounds like a limit no request can satisfy and invites the
+// reasonable-sounding fix of raising it by one byte. So when the wall is this refusal's own size the
+// phrase quotes the EVIDENCE instead — "under the 147.5 MB it refused" — a bound, not a number to squeeze
+// inside. That also covers a configured wall sitting above the true one: a 286 MB config that came back
+// refused at 196 MB says "under the 196 MB it refused" rather than quoting the operator's too-generous
+// number. When the ceiling is LOWER than what was just refused it came from somewhere else (config, or an
+// earlier refusal) and is quoted as itself.
 func bodyLimitPhrase(ceil, sent int) string {
 	if ceil <= 0 {
 		return "unknown"
 	}
 	if sent > 0 && ceil >= sent {
-		return humanBytes(ceil) + " or less"
+		return "under the " + humanBytes(sent) + " it refused"
 	}
 	return humanBytes(ceil)
 }

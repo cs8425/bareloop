@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -484,13 +486,18 @@ func TestTheLimitIsQuotedAsTheEvidenceStatesIt(t *testing.T) {
 	if got := bodyLimitPhrase(0, 0); got != "unknown" {
 		t.Errorf("no ceiling and nothing measured: %q, want \"unknown\"", got)
 	}
-	if got := bodyLimitPhrase(119<<20, 119<<20); !strings.HasSuffix(got, "or less") {
+	if got := bodyLimitPhrase(119<<20, 119<<20); got != "under the 119.0 MB it refused" {
 		t.Errorf("a wall taken from this very refusal is quoted as %q, which asks the reader to fit inside the size that was just refused", got)
+	}
+	// A configured wall sitting ABOVE the true one must not be quoted as if it were the limit: the refusal
+	// is the better evidence, and quoting 286 MB here would tell the reader their 196 MB body was fine.
+	if got := bodyLimitPhrase(286<<20, 196<<20); got != "under the 196.0 MB it refused" {
+		t.Errorf("a config wall above this refusal is quoted as %q, want the refused size quoted instead", got)
 	}
 	if got := bodyLimitPhrase(32<<20, 40<<20); got != "32.0 MB" {
 		t.Errorf("a configured wall (32 MB) against a larger body (40 MB): %q, want no hedge", got)
 	}
-	if got := bodyLimitPhrase(8<<20, 16<<20); strings.HasSuffix(got, "or less") {
+	if got := bodyLimitPhrase(8<<20, 16<<20); strings.Contains(got, "refused") {
 		t.Errorf("a wall lower than the body just refused: %q — it is not this request's own size, so it reads as a limit", got)
 	}
 }
@@ -610,5 +617,133 @@ func TestTheByteWallCutsDeepEnoughToReachItsSideOfTheRoom(t *testing.T) {
 	if over, est, ceil := s.bodyOverWall(afterSizes); over {
 		t.Fatalf("after a byte-bound compaction the payload is still at the line: %d B against %d B (before %d B)",
 			est, ceil, before)
+	}
+}
+
+// ─── the reactive resend: what the loop does after the endpoint refuses a body ──────────────
+
+// wallProvider is a run's model that answers by size. It refuses the first `refuse` requests the way
+// llama.cpp refuses an oversized body — the status and an empty body, no prose to match against — and
+// answers the rest with an ordinary one-word reply; a negative `refuse` refuses everything. It borrows
+// both the summariser and the byte arithmetic from sizedProvider, so the number it refuses is a number the
+// session itself measured, and it records the size of every request it saw: that is the only way to tell
+// "it resent the same thing" apart from "it resent less", which is the whole difference between a rescue
+// and a loop.
+type wallProvider struct {
+	*sizedProvider
+	mu     sync.Mutex
+	tried  []int
+	refuse int
+}
+
+func (p *wallProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error) {
+	n, err := p.sizedProvider.BodyBytes(req)
+	if err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	p.tried = append(p.tried, n)
+	outstanding := p.refuse
+	if outstanding > 0 {
+		p.refuse--
+	}
+	p.mu.Unlock()
+	if outstanding != 0 {
+		return nil, errors.New("llm: 413 Payload Too Large: (empty body)")
+	}
+	return says("done")(ctx, req, nil)
+}
+
+func (p *wallProvider) sizes() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.tried...)
+}
+
+// TestARefusedBodyResendsItselfAfterTheCompaction is the fix for a loop that stopped after saving itself.
+// The byte branch of the error path compacts the path and then used to end the run with "the context was
+// compacted, please send again" — which spends a summary generation, leaves the message unanswered, and
+// does it in the one moment the session knows the wall best. One send now has to produce one answer, and
+// the endpoint has to have seen it twice: refused at the old size, answered at a smaller one.
+func TestARefusedBodyResendsItselfAfterTheCompaction(t *testing.T) {
+	s, cp := chainFixture(t, "resend-once", 100000)
+	wp := &wallProvider{sizedProvider: &sizedProvider{chainProvider: cp, skeleton: 1000}, refuse: 1}
+	s.provider = wp
+	pathOf(t, s, 30, 1100)
+
+	send(t, s, "answer this")
+	waitForIdle(t, s)
+
+	sizes := wp.sizes()
+	if len(sizes) != 2 {
+		t.Fatalf("the endpoint saw %d request(s) (%v), want two — the one it refused and the one it answered: %s",
+			len(sizes), sizes, describePath(s.path()))
+	}
+	if sizes[1] >= sizes[0] {
+		t.Fatalf("the resend was %d bytes after a refused %d: the compaction was paid for and not used", sizes[1], sizes[0])
+	}
+	path := s.path()
+	tip := path[len(path)-1]
+	if tip.Kind != ir.KindAssistant || !strings.Contains(tip.Content, "done") {
+		t.Fatalf("the run ended on %s %q instead of an answer: the message is still unanswered", tip.Kind, clip(tip.Content, 120))
+	}
+	// The refusal stays in the story. The loop worked around it, and whoever reads this transcript later
+	// should be able to see that it did rather than being shown an answer that looks first-time right.
+	var saw413 bool
+	for _, e := range path {
+		if strings.Contains(e.Content, "413") {
+			saw413 = true
+		}
+	}
+	if !saw413 {
+		t.Fatal("the refused request left no trace on the path: a retry nobody can see is a retry nobody trusts")
+	}
+}
+
+// TestTheResendIsBoundedAndEachAttemptIsSmaller is the other half of the promise. On an endpoint that
+// refuses everything, the loop must stop with a count in the sentence rather than upload forever — and
+// every attempt has to be smaller than the last, because a refusal measures an upper bound: the session
+// learns "it is under this", so the next request it builds is a tighter question, not the same one again.
+func TestTheResendIsBoundedAndEachAttemptIsSmaller(t *testing.T) {
+	s, cp := chainFixture(t, "resend-bound", 200000)
+	wp := &wallProvider{sizedProvider: &sizedProvider{chainProvider: cp, skeleton: 1000}, refuse: -1}
+	s.provider = wp
+	// What this test can honestly promise, and what it cannot. It promises that a run against an endpoint
+	// that refuses everything uploads a BOUNDED number of times, that each upload is smaller than the last,
+	// and that the run ends on the refusal rather than on a fake answer. It deliberately does not promise
+	// that maxBodyResends is what stops it here: inside one turn a forced compaction usually gets one shot,
+	// because the cut lands on a floor and the next 10% has nothing outside it to summarize. Measured, not
+	// theorised — 401 entries at 457 KB came back refused and the summary left 147 entries at 165 KB, which
+	// is keepBudget (20% of a 200k window = 40k tokens) and not the byte line (the wall allowed ~365);
+	// the second refusal then found the path already sitting on that floor. So the bound is asserted as a
+	// ceiling. Its job is the shape where the path DOES stay cuttable — a run that grows again between
+	// refusals, i.e. tool rounds, where without a counter the loop would pay a full upload per refusal.
+	pathOf(t, s, 400, 1100)
+
+	send(t, s, "answer this")
+	waitForIdle(t, s)
+
+	sizes := wp.sizes()
+	if len(sizes) < 2 {
+		t.Fatalf("the endpoint saw only %d request(s) (%v): a refused body has to go out again after the compaction: %s",
+			len(sizes), sizes, describePath(s.path()))
+	}
+	if limit := maxBodyResends + 1; len(sizes) > limit {
+		t.Fatalf("the endpoint saw %d request(s) (%v), past what maxBodyResends allows (%d): the reactive branch uploads forever: %s",
+			len(sizes), sizes, limit, describePath(s.path()))
+	}
+	for i := 1; i < len(sizes); i++ {
+		if sizes[i] >= sizes[i-1] {
+			t.Fatalf("attempt %d was %d bytes after attempt %d's %d: a refusal has to tighten what goes out next, not repeat it",
+				i+1, sizes[i], i, sizes[i-1])
+		}
+	}
+	path := s.path()
+	tip := path[len(path)-1]
+	if tip.Kind == ir.KindAssistant && strings.Contains(tip.Content, "done") {
+		t.Fatal("an endpoint that refuses everything ended with an answer: the run did not stop on the refusal")
+	}
+	if !strings.Contains(tip.Content, "413") {
+		t.Fatalf("the run ended on %q, not on the refusal it gave up fighting", clip(tip.Content, 160))
 	}
 }
