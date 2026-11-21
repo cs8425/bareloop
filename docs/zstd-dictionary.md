@@ -1,6 +1,6 @@
 # The zstd dictionary
 
-New zstd payloads are compressed with a **trained dictionary**: a ~32 KB book of the
+New zstd payloads are compressed with a **trained dictionary**: a ~32 KiB book of the
 shapes this store's payloads are made of — the JSON skeleton, the field names, the
 shared vocabulary — that every small frame is allowed to reference. Without a book,
 each payload is compressed on its own and pays for its own tables; with one, the
@@ -12,7 +12,7 @@ It is not magic, and it is not configuration either. **A dictionary is data**: s
 
 ## What it is worth
 
-Measured on a 17-store corpus (~16 MB of payload text), and on stores the book was
+Measured on a 17-store corpus (~16 MiB of payload text), and on stores the book was
 *not* trained on (the honest column):
 
 | | bytes | vs gzip |
@@ -24,7 +24,7 @@ Measured on a 17-store corpus (~16 MB of payload text), and on stores the book w
 
 Every one of the 17 stores got smaller with a held-out dictionary than without one —
 none got worse. Scanning every payload takes ~108 ms zstd against ~205 ms gzip, so
-the dictionary buys disk without spending the read path. Training a book from 7.3 MB
+the dictionary buys disk without spending the read path. Training a book from 7.3 MiB
 of payloads costs ~3 s.
 
 ## What it costs in RAM
@@ -38,17 +38,17 @@ paragraph-long answer spends it, and it is spent for the process's life):
 
 | `-compress` | resident once a row at or above the 512-byte compression floor has been written | measured how |
 |---|---|---|
-| `zstd` (default) | **~20 MB**, flat across machines | heap profile × pinned pool: the resident set is *slots × ~10 MB per slot* (better-dict tables + history each). The library sizes the pool at **GOMAXPROCS** — one slot per CPU core, built when the first compressible row is written, held forever — which would make the figure a function of the machine (~80 MB at 8 cores, 300 MB+ at 32); the store pins it at **2 slots** — `-zstd-slots`, where `0` or `-1` hands the decision back to GOMAXPROCS — because `AppendEntry` compresses under its Log's mutex, so only cross-store concurrent writes ever reach the pool and past two the rest merely queue. Window pinned at 1 MB as well (the library's 8 MB default added ~50 MB per slot on top) |
-| `gzip` | **~0.3 MB** per in-flight writer | source-level: a 32 KB window and two fixed tables per `flate` writer, reused through a pool — it exists only while a write is happening, a handful at the very most |
+| `zstd` (default) | **~20 MiB**, flat across machines | heap profile × pinned pool: the resident set is *slots × ~10 MiB per slot* (better-dict tables + history each). The library sizes the pool at **GOMAXPROCS** — one slot per CPU core, built when the first compressible row is written, held forever — which would make the figure a function of the machine (~80 MiB at 8 cores, 300 MiB+ at 32); the store pins it at **2 slots** — `-zstd-slots`, where `0` or `-1` hands the decision back to GOMAXPROCS — because `AppendEntry` compresses under its Log's mutex, so only cross-store concurrent writes ever reach the pool and past two the rest merely queue. Window pinned at 1 MiB as well (the library's 8 MiB default added ~50 MiB per slot on top) |
+| `gzip` | **~0.3 MiB** per in-flight writer | source-level: a 32 KiB window and two fixed tables per `flate` writer, reused through a pool — it exists only while a write is happening, a handful at the very most |
 | `none` | none | no encoder at all; every payload goes to disk as text (a codec already stores text whenever compression loses, but only after trying) |
 
 Set against the size table above — zstd + book is ~11 % smaller than gzip on the
-same corpus — the trade is disk for RAM at roughly **20 MB resident for 11 % of
+same corpus — the trade is disk for RAM at roughly **20 MiB resident for 11 % of
 store size**. On a machine where even that is the scarce thing (a small VPS sharing
 it with the models, browser tabs, or everything else), the honest recommendation is:
 
 ```sh
-bareloopd -compress gzip    # ~20 MB never resident; stores ~11 % bigger; reads unchanged
+bareloopd -compress gzip    # ~20 MiB never resident; stores ~11 % bigger; reads unchanged
 ```
 
 Nothing about the choice is permanent: rows record the codec that wrote them, so
@@ -66,7 +66,7 @@ go build ./...   # the new book is now embedded
 ```
 
 `-gendict` reads every store under the directory, takes the payloads exactly as the
-payload column would hold them, truncates each sample to the first 32 KB (the trainer
+payload column would hold them, truncates each sample to the first 32 KiB (the trainer
 learns nothing from more), and prints the book's id, its sha256, and the training
 time. Keep that line in the commit message.
 

@@ -144,7 +144,7 @@ no measurement yet and pretending otherwise would drive the trigger off a guess.
 
 The window is not the only ceiling. `llm.maxRequestBodyBytes` bounds the **bytes** of a request, and a
 server that hits it answers `413` before it has read a single token — so no prompt count, nobody's
-estimate, predicts the refusal, and the repair is a different arithmetic. 32 MB of screenshot is 32 MB
+estimate, predicts the refusal, and the repair is a different arithmetic. 32 MiB of screenshot is 32 MiB
 however few tokens the text around it is worth.
 
 The effective ceiling is the same expression as the window's — the smaller of the values that exist:
@@ -164,12 +164,12 @@ the region it is writing down.
 
 And a request measured over the wall with nothing left to cut is **not sent**. The size is known
 exactly, so three attempts would be three uploads of the same refused bytes; the round ends with both
-numbers in its skip reason instead (`the narrowest summary this round can ask is 13.2 KB and this
-endpoint takes 8.0 KB: raise llm.maxRequestBodyBytes…`).
+numbers in its skip reason instead (`the narrowest summary this round can ask is 13.2 KiB and this
+endpoint takes 8.0 KiB: raise llm.maxRequestBodyBytes…`).
 
 The turn's own request is handled from the other two ends. A `413` that did happen is a **measurement**:
 the transport knows exactly how many bytes it wrote, so the refusal moves the ceiling on the spot, and the
-loop turns the dead end into a sentence with numbers in it (`request body (119.4 MB) is over this
+loop turns the dead end into a sentence with numbers in it (`request body (119.4 MiB) is over this
 endpoint's limit…`) rather than a run that cannot start. And a request already over the wall is not
 uploaded in order to find out: the pre-send check beside `guardFit` compares the path's wire estimate plus
 the measured skeleton against the ceiling and spends one forced compaction while there is still something
@@ -186,7 +186,7 @@ The ceiling is a bound on where the cut lands as well as on whether the send hap
 bounds it depends on how the ceiling was arrived at. The two rulers disagree about images by two orders
 of magnitude — an entry is a few hundred tokens and several megabytes — so a path of screenshots sits
 inside a twentieth-of-the-window token budget while weighing twice the ceiling, and a plan priced by
-tokens alone replaces two entries, sends 117 MB anyway, and is refused again.
+tokens alone replaces two entries, sends 117 MiB anyway, and is refused again.
 
 While the wall is **predicted** — by the pre-send guard, and by every round the window starts — bytes
 only veto: they raise the floor under the cut and never the roof over it, because there the byte count is
@@ -200,8 +200,8 @@ in it — the next turn grows and trips the same refusal — while the byte cap 
 which is what the resend budget is for. Nothing else moves: the phases still prefer a user boundary, the
 floors a user set still outrank the cap, and when `minKeptMessages` asks for a tail the cap cannot hold
 the round says so rather than quietly widening it. `Plan` carries both readings (`wireBudget`,
-`keptWire`) and the log names the currency in use ("this round sizes the kept tail in bytes — 21.5 MB of
-the 107.5 MB the path weighs"), because the same numbers mean opposite things under the two rulers.
+`keptWire`) and the log names the currency in use ("this round sizes the kept tail in bytes — 21.5 MiB of
+the 107.5 MiB the path weighs"), because the same numbers mean opposite things under the two rulers.
 
 **Where a size comes from.** A server counts one request, never one message, so a message's own cost is
 only ever a difference: the prompt of the next counted request, less the answer in between, less the
@@ -340,7 +340,7 @@ round, each with a payload line and an error event, forever. As the belt to thos
 committed nothing stops the run instead of starting another round.
 
 That entry is written for a person, and it is not replayed to the model: `ir.Entry.Notice` marks it, and
-the assembler keeps a notice off the wire while it stays on the path. "118.4 MB sent, 12 tools" is our
+the assembler keeps a notice off the wire while it stays on the path. "118.4 MiB sent, 12 tools" is our
 report about a body the provider never read, so handing it back credits the model with a sentence it
 never said - and it does so in the one request where the conversation should have been unchanged, the
 retry. The exception is deliberate: a stream that died *after* producing words leaves those words in the
@@ -352,7 +352,7 @@ layer's size cap with an empty one, a proxy with HTML — and the next turn is a
 non-2xx carries the message count and the size of the finished body (images base64 by then, structured caps
 applied, `extra` merged in), and the turn adds the entries that payload was assembled from:
 
-    [generation failed: llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MB sent, 12 tools]
+    [generation failed: llm: 413 Request Entity Too Large: (empty body) [142 msgs, 118.4 MiB sent, 12 tools]
                          [entries 0000003–0000146 (141) +system]]
 
 An id range rather than the ids, because a payload is the path or a window onto it and the range is the thing
@@ -410,7 +410,7 @@ Whether a server can see at all is one request away: llama.cpp's `/props` answer
 context whether anyone looks at it or not. For those, `"asm": {"sendImages": false}`: the payload then
 carries one line instead of the bytes,
 
-    [attached image4.png (image/png, ~184 KB) is in this conversation but its pixels were NOT
+    [attached image4.png (image/png, ~184 KiB) is in this conversation but its pixels were NOT
     sent to you: this session sends text only. You cannot see it, so do not describe it and do
     not guess what it shows - say that you cannot see the image and ask the user …]
 
@@ -751,8 +751,8 @@ were bugs first.
   else touches it, which is also why the `hashchange` listener cannot fight `selectSession` - writing an equal
   hash does nothing, so the listener just sees the id it has already selected and stops.
 - **The transcript is a page, and the page has two places.** `session.js` asks for 40 entries on every read:
-  on one measured 66-entry session that is 681 KB and 82 251 px of transcript instead of the whole path's
-  1.9 MB and 213 211 px. A page either **ends at the tip**, which is what opening a session gets you, or is
+  on one measured 66-entry session that is 681 KiB and 82 251 px of transcript instead of the whole path's
+  1.9 MiB and 213 211 px. A page either **ends at the tip**, which is what opening a session gets you, or is
   **parked** on a turn away from it, asked for with `?anchor=<id>`. Reading backwards is a floating
   `↑ older · 40 of 66` at the top of the transcript, the only place it is ever wanted, and it counts what came
   back (`window.count`) rather than what was asked for, because a page is whole turns and can arrive smaller.

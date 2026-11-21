@@ -169,7 +169,7 @@ override: the largest transcript this endpoint hands over is one page.** Silence
 and so does a place named without a size; no name the endpoint reads asks for the whole path —
 one once did, and it was taken out back before it had a user to mislead. An endpoint that ships
 images inline must not answer to the size of the session: one session's unparameterised read
-measured 73 MB once, and the request that made it was "no query string".
+measured 73 MiB once, and the request that made it was "no query string".
 
 | parameter | what it asks for |
 |---|---|
@@ -255,7 +255,7 @@ bytes — and the reading is not "small request" but "this body cannot be sent a
 
 The wall those bytes are weighed against is `llm.maxRequestBodyBytes` — your llama.cpp `-bs`, your
 proxy's `client_max_body_size`. It is a byte ceiling rather than a token one, so `nCtx` says nothing
-about it: a session with a 262k window is refused at 32 MB of screenshot. `status.bodyCeiling` is the
+about it: a session with a 262k window is refused at 32 MiB of screenshot. `status.bodyCeiling` is the
 number in use, `bodyCeilingSource` says whether it came from config or from a refusal (the smaller of
 the two always wins — a body the server sent back is evidence), and `bodyRefusedBytes` is the size
 that last refusal carried. With neither number the ceiling is unknown: nothing is cut in advance, and
@@ -307,8 +307,8 @@ a query parameter or a file name. `?id=` is required and the caller's, same rule
 create and fork; `?name=` overrides the name the file remembers. A native file seeds the
 config (secrets stay stripped); a webui file's system root becomes the session's system
 prompt, its message tree lands entry for entry, its `currNode` becomes the tip. Two doors
-stand on size: the request body caps at 50 MB before a byte is parsed, and the decompressed
-stream caps at 512 MB as it unfolds — a bomb never exists in full anywhere. The whole file
+stand on size: the request body caps at 50 MiB before a byte is parsed, and the decompressed
+stream caps at 512 MiB as it unfolds — a bomb never exists in full anywhere. The whole file
 lands in one store transaction: anything rejected (a duplicate id, a parent the file never
 carries, an unknown dialect) answers `400` and creates no session, `409` for a taken id,
 `413` over either cap. Imports always create new sessions; merging into an existing

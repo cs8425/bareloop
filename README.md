@@ -21,14 +21,14 @@ endpoint.
   row — zstd with a trained dictionary by default — and a row's own bytes say which codec
   wrote it, so every store reads every store
   ([`docs/zstd-dictionary.md`](docs/zstd-dictionary.md)). One RAM note with the default:
-  zstd's high-compression encoder keeps roughly 20 MB of match tables resident once the
+  zstd's high-compression encoder keeps roughly 20 MiB of match tables resident once the
   first row big enough to compress (at or above the 512-byte floor) has been written —
-  the library would size them per CPU core (~10 MB each), but
+  the library would size them per CPU core (~10 MiB each), but
   the pool depth is pinned at two slots (`-zstd-slots`; `0` hands it back to the core
   count), so the figure is flat whatever the machine has
   (measured on the heap profile; it is the encoder, the decoder stays lazy). That is the
   encoder's appetite, not compression per se — gzip's pooled writers cost a few hundred
-  KB each — so run with `-compress gzip` if even 20 MB matters more than the ratio:
+  KiB each — so run with `-compress gzip` if even 20 MiB matters more than the ratio:
   rows record the codec that wrote them, so any store still reads either way. It is a tree, but the UI shows one
   path at a time: what is not on the path is not drawn, and there is no branch switcher yet
   (`docs/design.md`, Deferred).
@@ -70,7 +70,7 @@ Go 1.27 or newer is what `go.mod` asks for ([why](docs/design.md#go-version)).
 
 The daemon takes no memory flags of its own — it is a Go program, so the runtime's
 `GOMEMLIMIT` and `GOGC` apply as they do everywhere else; on a small machine, a
-`GOMEMLIMIT` of a few hundred MB turns a transient peak into a GC hurry-up instead
+`GOMEMLIMIT` of a few hundred MiB turns a transient peak into a GC hurry-up instead
 of a resident high-water mark.
 
 ## Run it against mocks
@@ -267,8 +267,8 @@ server is asked; if neither knows, compaction stays off until you fill it in
 ([the five cases](docs/design.md#the-context-window)).
 
 The byte wall is the same shape with the other ruler, and it matters most where the first ruler goes
-blind: a `413` arrives before a token is counted, so no prompt estimate predicts it, and 32 MB of
-screenshot is 32 MB however few tokens the text around it is worth. While the ceiling is only what config
+blind: a `413` arrives before a token is counted, so no prompt estimate predicts it, and 32 MiB of
+screenshot is 32 MiB however few tokens the text around it is worth. While the ceiling is only what config
 claims or what an estimate says, bytes may **veto** a cut and never enlarge one. Once a refusal has
 **measured** the wall, the round it triggers switches currency — the kept tail gets `keepBudget%` of what
 the path actually weighs, because the shallowest position a wall will fit is a cut with no headroom in it
@@ -602,7 +602,7 @@ different decision from deciding how much of its JSON to quote.
 On screen the word is not applied: **both channels are always shown**. A tool result that carries the second
 channel gets one more fold inside its card, labelled `structuredContent` and — once opened — how many
 characters it holds. It is closed like the output fold above it, and its JSON is formatted and laid out only
-on the first open, so a server that answers every call with 100 KB of JSON costs the transcript one 24 px row
+on the first open, so a server that answers every call with 100 KiB of JSON costs the transcript one 24 px row
 until someone asks to read it. The four words and the ceiling are both set in the settings dialog, where
 the cost of both is repeated in one sentence — each can be priced in a whole KV prefix rather than a
 handful of tokens.
@@ -680,7 +680,7 @@ means there ([behind a login](#keeping-the-daemon-behind-a-login)).
 the **path** — the entries that would be sent, oldest first — and no request shape buys the whole
 of it: the largest answer is **one page** (40 by default, 200 the ceiling), cut on whole turns so
 a tool call never sits on one page with its result on the next. Silence buys a page, and so does
-a bare `before` or `after` — one session's unparameterised read measured 73 MB once, and the
+a bare `before` or `after` — one session's unparameterised read measured 73 MiB once, and the
 request that made it was "no query string". `?usage=1` is the one whole-path answer left: the
 path as a skeleton of usage rows, content absent by construction rather than by flag, because a
 bill is bounded by arithmetic and a transcript is not.
