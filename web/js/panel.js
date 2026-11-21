@@ -235,7 +235,16 @@ async function renderContext(body) {
   btn.title = 'fold the oldest turns into a summary — the window frees up, the transcript keeps every entry';
   btn.onclick = () => compactNow();
   actions.appendChild(btn);
-  actions.appendChild(el('span', 'dim', `auto-compaction fires past ${state.status?.thresholdPct ?? '?'}%`));
+  // The sentence has to answer the switch, not just the number. With auto-compaction off the threshold
+  // still means something — it is the line a "compact now" plan is reported against — but nothing will
+  // ever cross it on its own, and promising that it would is a claim about a feature the operator has
+  // explicitly turned off: the ring just fills, and what stops the session next is the window or the body
+  // wall, not this line. Read from state.cfg (the session's own config), which is on unless explicitly off.
+  const autoFold = state.cfg?.compact?.auto !== false;
+  const past = state.status?.thresholdPct ?? '?';
+  actions.appendChild(el('span', 'dim', autoFold
+    ? `auto-compaction fires past ${past}%`
+    : `auto-compaction off — nothing folds itself, not even past ${past}%`));
   body.appendChild(actions);
   body.appendChild(
     el(
