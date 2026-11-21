@@ -232,8 +232,9 @@ const rngRangeSep = ".."
 // the one answer to "when is this due" for both the loop that is about to sleep and a daemon that has to
 // answer the same call after a restart, and the two of them cannot be allowed to disagree about which
 // moment was promised — drawing from the entropy pool here would hand them two different waits. So the
-// stream is seeded by the two facts that identify this call: the id the log gave it, and the range it was
-// written with. Given the same entry, any process gets the same answer.
+// stream is seeded by the two facts that identify this call: the id the log gave it, and the interval it
+// asked for — the interval as parsed, not as spelled, so "25m..10m" and "600s..1500s" are the same question
+// and promise the same moment. Given the same entry, any process gets the same answer.
 //
 // The consequence worth knowing: two calls that ask for the same range get different lengths (their ids
 // differ), while one call answers the same question forever. That is what makes a fork or a replay
@@ -251,12 +252,16 @@ func parseRangedDuration(spec string, calledAt time.Time, callID string) (time.D
 	if err != nil {
 		return 0, err
 	}
+	// A pair written backwards ("25m..10m") is a typo the code can see, not a question to send back: the same
+	// two numbers, smallest first. The swap happens before the draw, and the draw is seeded by the swapped
+	// pair printed in Go's own form — so the spelling a caller chose (25m..10m, 10m..25m, 600s..1500s) cannot
+	// move the moment it promised.
 	if hi < lo {
-		return 0, fmt.Errorf("%q is a range whose top is below its bottom (write it smallest first, e.g. 10m..25m)", spec)
+		lo, hi = hi, lo
 	}
 	// The bound is checked after the draw, where it always was: what a ranged ask must not do is skip
 	// the century test just because the caller gave two numbers instead of one.
-	return lo + time.Duration(waitDraw(spec, callID, calledAt, uint64(hi-lo)+1)), nil
+	return lo + time.Duration(waitDraw(lo.String()+rngRangeSep+hi.String(), callID, calledAt, uint64(hi-lo)+1)), nil
 }
 
 // waitDraw takes one uniform value out of [0, n) from a stream seeded by the call itself, stepping the

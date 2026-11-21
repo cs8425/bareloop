@@ -795,12 +795,10 @@ func TestRngRefusesWhatItCannotDraw(t *testing.T) {
 		`{"type":"dice"}`,
 		`{"type":"int","count":0}`,
 		`{"type":"int","count":5000}`,
-		`{"type":"int","min":10,"max":3}`,
 		`{"type":"int","min":1.5}`,
 		`{"type":"int","min":1e20}`,
 		`{"type":"string","length":0}`,
 		`{"type":"string","length":99}`,
-		`{"type":"float","min":1,"max":-1}`,
 		`{"type":`,
 	} {
 		res := call(t, "rng", args, fixedInput(""))
@@ -810,6 +808,34 @@ func TestRngRefusesWhatItCannotDraw(t *testing.T) {
 		}
 		if !strings.HasPrefix(res.Text, "rng") {
 			t.Errorf("%s: an error a model reads has to name its tool: %q", args, res.Text)
+		}
+	}
+}
+
+// TestRngSwapsAReversedPair: writing the two bounds backwards is a typo the code can see, so the tool reads
+// past it instead of billing a turn for it — and the swap is real rather than one lucky draw, which is what
+// the 200-draw half of this test is for.
+func TestRngSwapsAReversedPair(t *testing.T) {
+	for _, args := range []string{
+		`{"type":"int","min":10,"max":3,"count":20}`,
+		`{"type":"float","min":1,"max":-1,"count":20}`,
+	} {
+		res := call(t, "rng", args, fixedInput(""))
+		if res.IsError {
+			t.Fatalf("a reversed pair should be drawn, not argued with: %s → %q", args, res.Text)
+		}
+	}
+	res := call(t, "rng", `{"type":"int","min":10,"max":3,"count":200}`, fixedInput(""))
+	if res.IsError {
+		t.Fatalf("a reversed pair was refused: %q", res.Text)
+	}
+	for _, v := range strings.Split(res.Text, ", ") {
+		var n int64
+		if err := json.Unmarshal([]byte(v), &n); err != nil {
+			t.Fatalf("%q is not a whole number: %v", v, err)
+		}
+		if n < 3 || n > 10 {
+			t.Fatalf(`{"min":10,"max":3} drew %d, outside 3..10 — the bounds were not swapped`, n)
 		}
 	}
 }
@@ -920,15 +946,24 @@ func TestARangeIsStillCheckedAgainstACentury(t *testing.T) {
 	}
 }
 
-// TestARangeWhoseTopIsBelowItsBottom refuses the one shape a caller writes by accident, in words that
-// contain the fix.
+// TestARangeWhoseTopIsBelowItsBottom is the reversed spelling, now fixed in code rather than sent back as a
+// lesson: the pair is backwards, the question is the same one, so the answer has to be the same moment —
+// which also proves the swap happens before the draw and not after it. The third spelling is the same claim
+// about units: 600s..1500s is 10m..25m, and how a caller chose to write it should not move the promise.
 func TestARangeWhoseTopIsBelowItsBottom(t *testing.T) {
-	_, err := Deadline(json.RawMessage(`{"duration":"25m..10m"}`), at, "UTC", "call-1")
-	if err == nil {
-		t.Fatal(`{"duration":"25m..10m"} was accepted`)
+	ordered, err := Deadline(json.RawMessage(`{"duration":"10m..25m"}`), at, "UTC", "call-1")
+	if err != nil {
+		t.Fatalf(`{"duration":"10m..25m"} was refused: %v`, err)
 	}
-	if !strings.Contains(err.Error(), "below its bottom") {
-		t.Fatalf("the refusal does not name the mistake: %v", err)
+	for _, spec := range []string{`{"duration":"25m..10m"}`, `{"duration":"600s..1500s"}`} {
+		got, err := Deadline(json.RawMessage(spec), at, "UTC", "call-1")
+		if err != nil {
+			t.Fatalf("%s was refused: %v", spec, err)
+		}
+		if !got.Equal(ordered) {
+			t.Fatalf("%s answered %s while 10m..25m answered %s; the same question asked twice, twice over",
+				spec, got.Format(time.RFC3339), ordered.Format(time.RFC3339))
+		}
 	}
 }
 

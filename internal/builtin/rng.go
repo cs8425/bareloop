@@ -146,8 +146,11 @@ func rngIntBounds(min, max *float64) (lo, hi int64, err error) {
 			return 0, 0, err
 		}
 	}
+	// Backwards is a typo, not a contradiction: the caller named two bounds and meant the interval between
+	// them, and it is our job to read it rather than to spend a turn teaching it. (Someone who wants exactly
+	// one number writes min == max, which still means that.)
 	if lo > hi {
-		return 0, 0, fmt.Errorf("max %d is below min %d", hi, lo)
+		lo, hi = hi, lo
 	}
 	return lo, hi, nil
 }
@@ -190,8 +193,7 @@ func rngFloats(count int, min, max *float64) (Result, error) {
 		hi = *max
 	}
 	if hi < lo {
-		return ErrText(fmt.Sprintf("rng: max %s is below min %s",
-			strconv.FormatFloat(hi, 'g', -1, 64), strconv.FormatFloat(lo, 'g', -1, 64))), nil
+		lo, hi = hi, lo // as in rngIntBounds: a backwards pair is read past, not argued with
 	}
 	out := make([]string, 0, count)
 	for i := 0; i < count; i++ {
