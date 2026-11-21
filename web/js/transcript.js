@@ -478,7 +478,7 @@ async function copyText(text) {
 
 // toggleRaw swaps a message between what the model asked for and what the model said: the rendered
 // markdown on one side, the stored text untouched on the other. Raw shows text only - an image is the
-// one thing that cannot be shown as raw without shouting 400 KB of base64 across the screen, and
+// one thing that cannot be shown as raw without shouting 400 KiB of base64 across the screen, and
 // transcript already lists its name and size above the text.
 function toggleRaw(e, node, b) {
   const body = node.querySelector(':scope > .body');
@@ -510,7 +510,7 @@ function fillBody(node, body, e) {
       img.className = 'attach';
       img.src = `data:${mime};base64,${p.data}`;
       img.alt = p.name || 'image';
-      img.title = `${p.name || 'image'} · ${mime} · ~${Math.round((p.data.length * 3) / 4 / 1024)} KB`;
+      img.title = `${p.name || 'image'} · ${mime} · ~${Math.round((p.data.length * 3) / 4 / 1024)} KiB`;
       body.appendChild(img);
       continue;
     }
@@ -583,7 +583,7 @@ function fillBody(node, body, e) {
 // and 340px is seventeen lines of a tool entry's own `pre` (measured: 17 lines of `ls` output stood 336px),
 // so anything past sixteen lines cannot be seen whole on any device. 2 000 characters is the same height in
 // the 1 076px column this transcript measured at, and it is the only test that catches a result that is one
-// long line: wrapping adds no newlines, so counting lines alone would print a 200KB blob across two screens.
+// long line: wrapping adds no newlines, so counting lines alone would print a 200KiB blob across two screens.
 // Both are read off the string, never off layout — a layout read per entry in the mount path is 9.6ms a time
 // (see the 2026-10-28 note in _state/todo-and-decisions.md).
 const FOLD_LINES = 16;
@@ -621,7 +621,7 @@ function structuredBlock(raw) {
   fold.appendChild(summary);
   fold.appendChild(pre);
   // Nothing about the bytes is computed until the first open. The transcript is mounted entry by entry,
-  // and a server that answers every call with a 100 KB JSON would otherwise pay for a pretty-print
+  // and a server that answers every call with a 100 KiB JSON would otherwise pay for a pretty-print
   // nobody clicked — the mount path is the one place this project has measured (_state/render-throttle-plan.md).
   // `toggle` fires on close too, hence the open test and the `textContent` guard.
   fold.addEventListener('toggle', () => {
@@ -809,7 +809,7 @@ function streamStart(streamId) {
   const s = { id: streamId, node, body, reasoning, tag, content: '', reasoningText: '', rText: null, rBox: null, rShownLen: 0, tools: new Map(), args: new Map(), argsShown: new Map() };
   // Two channels arrive per delta besides the reply: the reasoning text and a tool call's arguments. Both
   // used to be written straight into the DOM as they landed — an O(n) text replacement plus a forced layout
-  // per token. Measured over 13 KB of reasoning in 216 deltas: panel open 21.9 s of wall with a long task
+  // per token. Measured over 13 KiB of reasoning in 216 deltas: panel open 21.9 s of wall with a long task
   // on almost every delta, panel closed 2.7 s. So they draw on the reply's frame budget, and only while they
   // are visible: a closed <details> is read by nobody, and the committed entry renders both from the log
   // regardless of what the live node did. (What this does not fix: with the panel open on a 62-entry
@@ -836,10 +836,10 @@ function streamStart(streamId) {
     // the reader opened the block to watch; folding at the first answer delta keeps the reply at its old cost.
     const atBottom = s.rBox.scrollHeight - s.rBox.scrollTop - s.rBox.clientHeight < 4;
     // Append what arrived since the last frame instead of replacing the whole string. Honest numbers: at
-    // 100 KB over 60 frames this is 0.14 ms/frame against 0.34 ms/frame for rewriting the whole string —
+    // 100 KiB over 60 frames this is 0.14 ms/frame against 0.34 ms/frame for rewriting the whole string —
     // real, but small next to the transcript term above, and it did not move the wall clock here. It stays
     // because it is strictly less work (proportional to what arrived, not to what is already on screen) and
-    // because a thinking model can stream 100 KB the way an ordinary reply streams 1 KB.
+    // because a thinking model can stream 100 KiB the way an ordinary reply streams 1 KiB.
     s.rText.appendData(s.reasoningText.slice(s.rShownLen));
     s.rShownLen = s.reasoningText.length;
     if (atBottom) s.rBox.scrollTop = s.rBox.scrollHeight;

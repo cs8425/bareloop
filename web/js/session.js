@@ -34,7 +34,7 @@ export function writeHash(id, replace = false) {
 }
 
 // PAGE is what one read of the transcript asks for, and what every "older" press adds to it. Two
-// numbers decided it: a whole path of this project's own test session serialises to 1.9 MB, and the
+// numbers decided it: a whole path of this project's own test session serialises to 1.9 MiB, and the
 // cost of laying out a transcript grows with what is on it (a forced reflow measured 0.14 ms at 221
 // characters of content and 52.88 ms once the same element had reached 214 000 pixels of height). A
 // session is opened to read the newest part of it, so that is what the first request asks for.
@@ -47,7 +47,7 @@ const REVEAL_PX = 200;
 // SLIDE is how far one gesture moves the window: half a page. It is also the reason a slide re-fetches half of
 // what it already had — the overlap is what makes the move invisible. A page is whole turns, so "half" is as
 // exact as "forty" ever was; what is guaranteed is progress: the ids a slide dropped do not come back on the
-// next one, which is exactly what asking the server for `anchor=<newest>` used to do (r72 §8.7②, 1.4 MB for
+// next one, which is exactly what asking the server for `anchor=<newest>` used to do (r72 §8.7②, 1.4 MiB for
 // one press).
 const SLIDE = PAGE / 2;
 

@@ -47,7 +47,7 @@ async function renderCost(body) {
   if (!state.id) return;
   // ?usage=1 is the skeleton door: every row's usage and parentage, no content and no images.
   // A plain GET would now buy one page anyway, and one page priced as a whole bill is a smaller
-  // lie than 73 MB but still a lie — so the bill asks for the shape of a bill.
+  // lie than 73 MiB but still a lie — so the bill asks for the shape of a bill.
   const data = await get('?usage=1').catch(() => null);
   if (!data) return;
   const st = data.status || {};
@@ -89,7 +89,11 @@ async function renderCost(body) {
   // `var(--t-2)`, not `13px`: an inline px size is the one thing app.css's scale cannot reach, and this is
   // the headline sentence of the panel - with a literal it stayed 13px at every text size the user picks.
   line.style.fontSize = 'var(--t-2)';
-  line.textContent = `${fmtN(t.prompt)} prompt · ${fmtN(t.cache)} cached (${t.prompt ? `${Math.round((100 * t.cache) / t.prompt)}%` : '—'}) · ${fmtN(uncached)} new · ${fmtN(t.completion)} out`;
+  // Two decimals on the hit rate, not a rounded integer. Once a prefix is cached the ratio moves in
+  // fractions of a percent per turn — 96.55% then 96.11% then 92.4% is the story of a prefix starting to
+  // miss — and at whole numbers that whole story reads as "96%, 96%, 92%", flat until it isn't. This is the
+  // number someone watches to decide whether the prompt cache is still holding, so it keeps its resolution.
+  line.textContent = `${fmtN(t.prompt)} prompt · ${fmtN(t.cache)} cached (${t.prompt ? `${((100 * t.cache) / t.prompt).toFixed(2)}%` : '—'}) · ${fmtN(uncached)} new · ${fmtN(t.completion)} out`;
   line.title =
     'prompt tokens include the cached ones — that is how the provider reports them, and adding the two would count them twice.\n' +
     'new = prompt − cached: the tokens a miss made this server compute again.\n' +

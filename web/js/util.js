@@ -17,12 +17,12 @@ export const logEl = () => $('#log');
 // 1234 -> "1.2k": token counts are read at a glance, so precision past two digits is noise.
 export const fmtN = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n ?? 0));
 
-// A size in the unit you would say out loud. The byte floor never rounds to "0 KB": a page that
-// fetched something and reports nothing is a rounding artefact no reader can tell from a real zero,
-// and this number is quoted next to "how much of the session is on screen".
+// A size in the unit you would say out loud, counted in 1024s and labelled to match: the byte floor never
+// rounds to "0 KiB", because a page that fetched something and reports nothing is a rounding artefact no
+// reader can tell from a real zero, and this number is quoted next to "how much of the session is on screen".
 export const fmtBytes = (n) => {
   const b = n || 0;
-  return b < 1024 ? `${b} B` : b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  return b < 1024 ? `${b} B` : b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KiB` : `${(b / (1024 * 1024)).toFixed(1)} MiB`;
 };
 
 // How long ago is still "just now", and for how long a minute is the finest unit worth printing. A session
@@ -95,7 +95,7 @@ export function collapseDataUrls(text) {
   if (!text || typeof text !== 'string') return { text: text || '', images };
   const out = text.replace(DATA_URL, (whole, mime, data) => {
     images.push({ mimeType: mime, data });
-    return `[${mime}, ~${Math.round((data.length * 3) / 4 / 1024)} KB of base64 not shown]`;
+    return `[${mime}, ~${Math.round((data.length * 3) / 4 / 1024)} KiB of base64 not shown]`;
   });
   return { text: out, images };
 }

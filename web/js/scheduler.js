@@ -17,7 +17,7 @@
 //     render costs 60 ms is really ~16 Hz — and that is the desired failure: the page thins out instead
 //     of queueing work it can no longer afford. The old path had no ceiling at all, so its rate was the
 //     provider's chunk rate (measured 80–100 events/s) and its cost grew with the message, which is how
-//     a 47 KB reply ended up costing 5 s of main thread and a 120 KB one ended up frozen.
+//     a 47 KiB reply ended up costing 5 s of main thread and a 120 KiB one ended up frozen.
 export const DEFAULT_HZ = 20;
 
 // The rungs the user can pick, and the order the picker shows them in: 50 ms, 100 ms, 200 ms, 1 s, and
@@ -87,7 +87,7 @@ export function resolveHz(fallback = DEFAULT_HZ) {
 // `rawline` is measured rather than assumed (testdata/bench-stream.html): on LLM-shaped prose — long unwrapped
 // paragraphs — it parses 59% less text and repaints the live region 4 times instead of 150. What it costs is
 // that a line loses its block decoration while it is being typed: no bullet under a list item, a table row
-// sitting below the table, a paragraph's second line hanging under it. On a 14.6 KB reply, tail's 150 repaints
+// sitting below the table, a paragraph's second line hanging under it. On a 14.6 KiB reply, tail's 150 repaints
 // cost 31 ms in all, so nothing is buying back a problem by paying that. Reachable, default off.
 export const MODES = ['tail', 'plain', 'full', 'rawline'];
 

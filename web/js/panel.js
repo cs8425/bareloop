@@ -281,7 +281,7 @@ async function renderInspect(body) {
   const tr = el('tr');
   // `wire` is a column of its own because the two byte numbers answer different questions, and only one of
   // them is the question a refused request was asking: tokens is what the window holds, wire is what the
-  // body pays. A row can be 2,500 tokens and 30 MB, and on an image path that is the normal case.
+  // body pays. A row can be 2,500 tokens and 30 MiB, and on an image path that is the normal case.
   for (const h of ['id', 'role', 'tokens', 'wire', 'head']) tr.appendChild(el('th', '', h));
   table.appendChild(tr);
   for (const r of rows) {
